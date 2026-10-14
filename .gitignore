@@ -1,0 +1,9 @@
+# Copyrighted game data and anything derived from it -- never commit or distribute
+iso/
+build/
+ppc/
+.venv/
+thirdparty/XenonRecomp/
+thirdparty/ffmpeg/
+__pycache__/
+*.pyc

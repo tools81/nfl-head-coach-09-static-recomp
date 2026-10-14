@@ -1,0 +1,38 @@
+# XenonRecomp config for NFL Head Coach 09 (Xbox 360, title 45410841, XDK 2.0.6534)
+# Paths are relative to this file. The XEX itself is never committed.
+[main]
+file_path = "../build/extracted/default.xex"
+out_directory_path = "../ppc"
+switch_table_file_path = "HC09_switch_tables.toml"
+
+skip_lr = false
+skip_msr = false
+ctr_as_local = false
+xer_as_local = false
+reserved_as_local = false
+cr_as_local = false
+non_argument_as_local = false
+non_volatile_as_local = false
+
+# Found with tools/find_abi.py (each pattern matched exactly once)
+restgprlr_14_address = 0x82D62F00
+savegprlr_14_address = 0x82D62EB0
+restfpr_14_address = 0x82D63DAC
+savefpr_14_address = 0x82D63D60
+restvmx_14_address = 0x82D64098
+savevmx_14_address = 0x82D63E00
+restvmx_64_address = 0x82D6412C
+savevmx_64_address = 0x82D63E94
+
+# setjmp: leaf at 0x82D66DC0 (no .pdata entry), saves LR/CR/r13-r31/f14-f31/v0-v127.
+setjmp_address = 0x82D66DC0
+# longjmp: 0x82D66870 (has .pdata entry); maps val 0->1, reloads f14.. from jmp_buf (via r7),
+# calls RtlUnwind when the unwind cookie at jmp_buf+0x138 is set.
+longjmp_address = 0x82D66870
+
+# Non-code data inside .text. The 0x00485645 marker at 0x82F9FD0C starts a data block that
+# runs to the end of .text (0x82FA04FC), the same layout Unleashed Recompiled skips.
+invalid_instructions = [
+    { data = 0x00000000, size = 4 },      # padding
+    { data = 0x00485645, size = 0x7F4 },  # end-of-.text data block (through 0x82FA04FC)
+]

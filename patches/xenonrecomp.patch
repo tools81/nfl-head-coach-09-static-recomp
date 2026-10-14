@@ -1,0 +1,476 @@
+diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+index fa91527..b73bc81 100644
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -609,7 +609,7 @@ bool Recompiler::Recompile(
+     case PPC_INST_BCTR:
+         if (switchTable != config.switchTables.end())
+         {
+-            println("\tswitch ({}.u64) {{", r(switchTable->second.r));
++            println("\tswitch ({}.u32) {{", r(switchTable->second.r));
+ 
+             for (size_t i = 0; i < switchTable->second.labels.size(); i++)
+             {
+@@ -628,7 +628,7 @@ bool Recompiler::Recompile(
+             }
+ 
+             println("\tdefault:");
+-            println("\t\t__builtin_unreachable();");
++            println("\t\t__builtin_debugtrap();");
+             println("\t}}");
+ 
+             switchTable = config.switchTables.end();
+@@ -663,9 +663,11 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_BDNZF:
+-        // NOTE: assuming eq here as a shortcut because all the instructions in the game do that
++    {
++        constexpr std::string_view fields[] = { "lt", "gt", "eq", "so" };
+         println("\t--{}.u64;", ctr());
+-        println("\tif ({}.u32 != 0 && !{}.eq) goto loc_{:X};", ctr(), cr(insn.operands[0] / 4), insn.operands[1]);
++        println("\tif ({}.u32 != 0 && !{}.{}) goto loc_{:X};", ctr(), cr(insn.operands[0] / 4), fields[insn.operands[0] % 4], insn.operands[1]);
++    }
+         break;
+ 
+     case PPC_INST_BEQ:
+@@ -712,7 +714,9 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_BLRL:
+-        println("__builtin_debugtrap();");
++        println("\t{}.u64 = ctx.lr;", temp());
++        println("\tctx.lr = 0x{:X};", base + 4);
++        println("\tPPC_CALL_INDIRECT_FUNC({}.u32);", temp());
+         break;
+ 
+     case PPC_INST_BLT:
+@@ -827,23 +831,23 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_DIVD:
+-        println("\t{}.s64 = {}.s64 / {}.s64;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        println("\t{0}.s64 = ({2}.s64 == 0 || ({1}.s64 == INT64_MIN && {2}.s64 == -1)) ? 0 : {1}.s64 / {2}.s64;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
+         break;
+ 
+     case PPC_INST_DIVDU:
+-        println("\t{}.u64 = {}.u64 / {}.u64;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        println("\t{0}.u64 = {2}.u64 == 0 ? 0 : {1}.u64 / {2}.u64;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
+         if (strchr(insn.opcode->name, '.'))
+             println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+ 
+     case PPC_INST_DIVW:
+-        println("\t{}.s32 = {}.s32 / {}.s32;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        println("\t{0}.s32 = ({2}.s32 == 0 || ({1}.s32 == INT_MIN && {2}.s32 == -1)) ? 0 : {1}.s32 / {2}.s32;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
+         if (strchr(insn.opcode->name, '.'))
+             println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+ 
+     case PPC_INST_DIVWU:
+-        println("\t{}.u32 = {}.u32 / {}.u32;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        println("\t{0}.u32 = {2}.u32 == 0 ? 0 : {1}.u32 / {2}.u32;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
+         if (strchr(insn.opcode->name, '.'))
+             println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
+         break;
+@@ -1740,6 +1744,197 @@ bool Recompiler::Recompile(
+         println("\tsimde_mm_store_ps({}.f32, simde_mm_add_ps(simde_mm_load_ps({}.f32), simde_mm_load_ps({}.f32)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
+         break;
+ 
++    // ---- Added for NFL Head Coach 09 ----------------------------------------------------
++    // Vector registers are stored as one little-endian 128-bit value: PPC (big-endian)
++    // element k of an N-element vector lives at host index N-1-k. Element-wise ops are
++    // layout-agnostic; packs put vB in the host low half; whole-register shifts take the
++    // shift amount from host byte 0 (PPC byte 15).
++
++    case PPC_INST_BDNZT:
++    {
++        constexpr std::string_view fields[] = { "lt", "gt", "eq", "so" };
++        println("\t--{}.u64;", ctr());
++        println("\tif ({}.u32 != 0 && {}.{}) goto loc_{:X};", ctr(), cr(insn.operands[0] / 4), fields[insn.operands[0] % 4], insn.operands[1]);
++        break;
++    }
++
++    case PPC_INST_CROR:
++    case PPC_INST_CRORC:
++    {
++        constexpr std::string_view fields[] = { "lt", "gt", "eq", "so" };
++        println("\t{}.{} = {}.{} | {}{}.{};",
++            cr(insn.operands[0] / 4), fields[insn.operands[0] % 4],
++            cr(insn.operands[1] / 4), fields[insn.operands[1] % 4],
++            insn.opcode->id == PPC_INST_CRORC ? "!" : "",
++            cr(insn.operands[2] / 4), fields[insn.operands[2] % 4]);
++        break;
++    }
++
++    case PPC_INST_EQV:
++        println("\t{}.u64 = ~({}.u64 ^ {}.u64);", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int32_t>({}.s32, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
++    case PPC_INST_MULHD:
++        println("\t{}.s64 = int64_t((__int128({}.s64) * __int128({}.s64)) >> 64);", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int64_t>({}.s64, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
++    case PPC_INST_MULHDU:
++        println("\t{}.u64 = uint64_t((__uint128_t({}.u64) * __uint128_t({}.u64)) >> 64);", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.compare<int64_t>({}.s64, 0, {});", cr(0), r(insn.operands[0]), xer());
++        break;
++
++#define HC09_LD "simde_mm_load_si128((simde__m128i*){}.u8)"
++#define HC09_BINOP(op, intrinsic) \
++    case op: \
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, " intrinsic "(" HC09_LD ", " HC09_LD "));", \
++            v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2])); \
++        break;
++
++    HC09_BINOP(PPC_INST_VADDSBS, "simde_mm_adds_epi8")
++    HC09_BINOP(PPC_INST_VAVGUH, "simde_mm_avg_epu16")
++    HC09_BINOP(PPC_INST_VMAXSH, "simde_mm_max_epi16")
++    HC09_BINOP(PPC_INST_VMINSH, "simde_mm_min_epi16")
++    HC09_BINOP(PPC_INST_VSUBSHS, "simde_mm_subs_epi16")
++    HC09_BINOP(PPC_INST_VSUBUBM, "simde_mm_sub_epi8")
++#undef HC09_BINOP
++
++    case PPC_INST_VANDC:
++        // vD = vA & ~vB
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_andnot_si128(" HC09_LD ", " HC09_LD "));", v(insn.operands[0]), v(insn.operands[2]), v(insn.operands[1]));
++        break;
++
++    case PPC_INST_VNOR:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_xor_si128(simde_mm_or_si128(" HC09_LD ", " HC09_LD "), simde_mm_set1_epi32(-1)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++
++    case PPC_INST_VADDSWS:
++        for (size_t i = 0; i < 4; i++)
++        {
++            println("\t{}.s64 = int64_t({}.s32[{}]) + int64_t({}.s32[{}]);", temp(), v(insn.operands[1]), i, v(insn.operands[2]), i);
++            println("\t{}.s32[{}] = {}.s64 > INT_MAX ? INT_MAX : {}.s64 < INT_MIN ? INT_MIN : {}.s64;", vTemp(), i, temp(), temp(), temp());
++        }
++        println("\t{} = {};", v(insn.operands[0]), vTemp());
++        break;
++
++#define HC09_CMP(op, intrinsic) \
++    case op: \
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, " intrinsic "(" HC09_LD ", " HC09_LD "));", \
++            v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2])); \
++        if (strchr(insn.opcode->name, '.')) \
++            println("\t{}.setFromMask(" HC09_LD ", 0xFFFF);", cr(6), v(insn.operands[0])); \
++        break;
++
++    HC09_CMP(PPC_INST_VCMPEQUH, "simde_mm_cmpeq_epi16")
++    HC09_CMP(PPC_INST_VCMPGTSH, "simde_mm_cmpgt_epi16")
++    HC09_CMP(PPC_INST_VCMPGTSW, "simde_mm_cmpgt_epi32")
++    HC09_CMP(PPC_INST_VCMPGTUH, "simde_mm_cmpgt_epu16")
++#undef HC09_CMP
++
++    case PPC_INST_VCMPGTUW:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_cmpgt_epi32(simde_mm_xor_si128(" HC09_LD ", simde_mm_set1_epi32(INT_MIN)), simde_mm_xor_si128(" HC09_LD ", simde_mm_set1_epi32(INT_MIN))));",
++            v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        if (strchr(insn.opcode->name, '.'))
++            println("\t{}.setFromMask(" HC09_LD ", 0xFFFF);", cr(6), v(insn.operands[0]));
++        break;
++
++    case PPC_INST_VCTUXS:
++        // float -> uint32 with scale 2^uimm, saturating; NaN and negatives -> 0
++        for (size_t i = 0; i < 4; i++)
++        {
++            println("\t{}.f64 = double({}.f32[{}]) * {}.0;", temp(), v(insn.operands[1]), i, 1ull << insn.operands[2]);
++            println("\t{}.u32[{}] = ({}.f64 != {}.f64 || {}.f64 <= 0.0) ? 0u : ({}.f64 >= 4294967295.0 ? 0xFFFFFFFFu : uint32_t({}.f64));",
++                vTemp(), i, temp(), temp(), temp(), temp(), temp());
++        }
++        println("\t{} = {};", v(insn.operands[0]), vTemp());
++        break;
++
++    // Packs: PPC result = pack(vA) || pack(vB); host low half holds vB.
++    case PPC_INST_VPKSHSS:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_packs_epi16(" HC09_LD ", " HC09_LD "));", v(insn.operands[0]), v(insn.operands[2]), v(insn.operands[1]));
++        break;
++    case PPC_INST_VPKSWSS:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_packs_epi32(" HC09_LD ", " HC09_LD "));", v(insn.operands[0]), v(insn.operands[2]), v(insn.operands[1]));
++        break;
++    case PPC_INST_VPKSWUS:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_packus_epi32(" HC09_LD ", " HC09_LD "));", v(insn.operands[0]), v(insn.operands[2]), v(insn.operands[1]));
++        break;
++    case PPC_INST_VPKUHUS:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_packus_epi16(simde_mm_min_epu16(" HC09_LD ", simde_mm_set1_epi16(0xFF)), simde_mm_min_epu16(" HC09_LD ", simde_mm_set1_epi16(0xFF))));", v(insn.operands[0]), v(insn.operands[2]), v(insn.operands[1]));
++        break;
++    case PPC_INST_VPKUWUS:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_packus_epi32(simde_mm_min_epu32(" HC09_LD ", simde_mm_set1_epi32(0xFFFF)), simde_mm_min_epu32(" HC09_LD ", simde_mm_set1_epi32(0xFFFF))));", v(insn.operands[0]), v(insn.operands[2]), v(insn.operands[1]));
++        break;
++    case PPC_INST_VPKUWUM:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_packus_epi32(simde_mm_and_si128(" HC09_LD ", simde_mm_set1_epi32(0xFFFF)), simde_mm_and_si128(" HC09_LD ", simde_mm_set1_epi32(0xFFFF))));", v(insn.operands[0]), v(insn.operands[2]), v(insn.operands[1]));
++        break;
++
++    // Per-element shifts and rotates (shift count from the low bits of the matching element)
++    case PPC_INST_VSLH:
++    case PPC_INST_VSRH:
++    case PPC_INST_VSRAH:
++    case PPC_INST_VRLH:
++    {
++        const auto a = v(insn.operands[1]), b = v(insn.operands[2]);
++        for (size_t i = 0; i < 8; i++)
++        {
++            switch (insn.opcode->id)
++            {
++            case PPC_INST_VSLH: println("\t{}.u16[{}] = uint16_t({}.u16[{}] << ({}.u16[{}] & 0xF));", vTemp(), i, a, i, b, i); break;
++            case PPC_INST_VSRH: println("\t{}.u16[{}] = uint16_t({}.u16[{}] >> ({}.u16[{}] & 0xF));", vTemp(), i, a, i, b, i); break;
++            case PPC_INST_VSRAH: println("\t{}.s16[{}] = int16_t({}.s16[{}] >> ({}.u16[{}] & 0xF));", vTemp(), i, a, i, b, i); break;
++            default: println("\t{}.u16[{}] = uint16_t(({}.u16[{}] << ({}.u16[{}] & 0xF)) | ({}.u16[{}] >> ((16 - ({}.u16[{}] & 0xF)) & 0xF)));", vTemp(), i, a, i, b, i, a, i, b, i); break;
++            }
++        }
++        println("\t{} = {};", v(insn.operands[0]), vTemp());
++        break;
++    }
++
++    case PPC_INST_VRLW:
++        for (size_t i = 0; i < 4; i++)
++            println("\t{}.u32[{}] = ({}.u32[{}] << ({}.u32[{}] & 0x1F)) | ({}.u32[{}] >> ((32 - ({}.u32[{}] & 0x1F)) & 0x1F));", vTemp(), i, v(insn.operands[1]), i, v(insn.operands[2]), i, v(insn.operands[1]), i, v(insn.operands[2]), i);
++        println("\t{} = {};", v(insn.operands[0]), vTemp());
++        break;
++
++    case PPC_INST_VSRB:
++    case PPC_INST_VSRAB:
++        for (size_t i = 0; i < 16; i++)
++        {
++            if (insn.opcode->id == PPC_INST_VSRB)
++                println("\t{}.u8[{}] = uint8_t({}.u8[{}] >> ({}.u8[{}] & 0x7));", vTemp(), i, v(insn.operands[1]), i, v(insn.operands[2]), i);
++            else
++                println("\t{}.s8[{}] = int8_t({}.s8[{}] >> ({}.u8[{}] & 0x7));", vTemp(), i, v(insn.operands[1]), i, v(insn.operands[2]), i);
++        }
++        println("\t{} = {};", v(insn.operands[0]), vTemp());
++        break;
++
++    case PPC_INST_VSPLTISH:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.u16, simde_mm_set1_epi16(short(0x{:X})));", v(insn.operands[0]), uint16_t(insn.operands[1]));
++        break;
++
++    // Whole-register shifts. PPC "left" is toward host high bytes.
++    case PPC_INST_VSL:
++        println("\t{}.u64 = {}.u8[0] & 0x7;", temp(), v(insn.operands[2]));
++        println("\t{}.u64[1] = {}.u64 ? ({}.u64[1] << {}.u64) | ({}.u64[0] >> (64 - {}.u64)) : {}.u64[1];",
++            vTemp(), temp(), v(insn.operands[1]), temp(), v(insn.operands[1]), temp(), v(insn.operands[1]));
++        println("\t{}.u64[0] = {}.u64[0] << {}.u64;", vTemp(), v(insn.operands[1]), temp());
++        println("\t{} = {};", v(insn.operands[0]), vTemp());
++        break;
++
++    case PPC_INST_VSLO:
++    case PPC_INST_VSLO128:
++        println("\t{}.u64 = ({}.u8[0] >> 3) & 0xF;", temp(), v(insn.operands[2]));
++        println("\tfor (int i = 0; i < 16; i++) {}.u8[i] = i >= int({}.u64) ? {}.u8[i - {}.u64] : 0;", vTemp(), temp(), v(insn.operands[1]), temp());
++        println("\t{} = {};", v(insn.operands[0]), vTemp());
++        break;
++
++#undef HC09_LD
++    // ---- end NFL Head Coach 09 additions --------------------------------------------------
++
+     case PPC_INST_VADDSHS:
+         println("\tsimde_mm_store_si128((simde__m128i*){}.s16, simde_mm_adds_epi16(simde_mm_load_si128((simde__m128i*){}.s16), simde_mm_load_si128((simde__m128i*){}.s16)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
+         break;
+@@ -1831,7 +2026,17 @@ bool Recompiler::Recompile(
+ 
+     case PPC_INST_VCMPBFP:
+     case PPC_INST_VCMPBFP128:
+-        println("\t__builtin_debugtrap();");
++        for (size_t i = 0; i < 4; i++)
++            println("\t{0}.u32[{1}] = ({2}.f32[{1}] <= {3}.f32[{1}] ? 0u : 0x80000000u) | ({2}.f32[{1}] >= -{3}.f32[{1}] ? 0u : 0x40000000u);",
++                vTemp(), i, v(insn.operands[1]), v(insn.operands[2]));
++        println("\t{} = {};", v(insn.operands[0]), vTemp());
++        if (strchr(insn.opcode->name, '.'))
++        {
++            println("\t{}.lt = false;", cr(6));
++            println("\t{}.gt = false;", cr(6));
++            println("\t{0}.eq = ({1}.u32[0] | {1}.u32[1] | {1}.u32[2] | {1}.u32[3]) == 0;", cr(6), v(insn.operands[0]));
++            println("\t{}.so = false;", cr(6));
++        }
+         break;
+ 
+     case PPC_INST_VCMPEQFP:
+@@ -1875,10 +2080,6 @@ bool Recompiler::Recompile(
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_cmpgt_epu8(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
+         break;
+ 
+-    case PPC_INST_VCMPGTUH:
+-        println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_cmpgt_epu16(simde_mm_load_si128((simde__m128i*){}.u16), simde_mm_load_si128((simde__m128i*){}.u16)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
+-        break;
+-
+     case PPC_INST_VEXPTEFP:
+     case PPC_INST_VEXPTEFP128:
+         // TODO: vectorize
+@@ -2036,6 +2237,38 @@ bool Recompiler::Recompile(
+             }
+             break;
+ 
++        // ---- Added for NFL Head Coach 09: remaining vpkd3d128 formats ----
++        // Source floats are PPC x..w = host f32[3]..f32[0]. Normalized-integer formats expect
++        // values already biased as 3.0 + v * 2^-22 (1.0 + v * 2^-22 for 2-bit W): they are
++        // clamped to the format's range and the low mantissa bits are kept. A one-word result
++        // goes to host u32[position]; a two-word result puts its high (x, y) word at
++        // u32[position + 1] and its low (z, w) word at u32[position].
++        case 1: // 2 normalized shorts: x << 16 | y
++            println("\t{}.u32 = (PPCClampBits({}.u32[3], 0x403F8001u, 0x40407FFFu) & 0xFFFF) << 16;", temp(), v(insn.operands[1]));
++            println("\t{}.u32 |= PPCClampBits({}.u32[2], 0x403F8001u, 0x40407FFFu) & 0xFFFF;", temp(), v(insn.operands[1]));
++            println("\t{}.u32[{}] = {}.u32;", v(insn.operands[0]), insn.operands[4], temp());
++            break;
++
++        case 2: // 2_10_10_10: x | y << 10 | z << 20 | w << 30
++            println("\t{}.u32 = PPCClampBits({}.u32[3], 0x403FFE01u, 0x404001FFu) & 0x3FF;", temp(), v(insn.operands[1]));
++            println("\t{}.u32 |= (PPCClampBits({}.u32[2], 0x403FFE01u, 0x404001FFu) & 0x3FF) << 10;", temp(), v(insn.operands[1]));
++            println("\t{}.u32 |= (PPCClampBits({}.u32[1], 0x403FFE01u, 0x404001FFu) & 0x3FF) << 20;", temp(), v(insn.operands[1]));
++            println("\t{}.u32 |= (PPCClampBits({}.u32[0], 0x3F800000u, 0x3F800003u) & 0x3) << 30;", temp(), v(insn.operands[1]));
++            println("\t{}.u32[{}] = {}.u32;", v(insn.operands[0]), insn.operands[4], temp());
++            break;
++
++        case 3: // 2 half floats: half(x) << 16 | half(y)
++            println("\t{}.u32[{}] = (uint32_t(PPCFloatToHalf({}.f32[3])) << 16) | PPCFloatToHalf({}.f32[2]);",
++                v(insn.operands[0]), insn.operands[4], v(insn.operands[1]), v(insn.operands[1]));
++            break;
++
++        case 4: // 4 normalized shorts: (x << 16 | y), (z << 16 | w)
++            println("\t{}.u32[{}] = (PPCClampBits({}.u32[3], 0x403F8001u, 0x40407FFFu) << 16) | (PPCClampBits({}.u32[2], 0x403F8001u, 0x40407FFFu) & 0xFFFF);",
++                v(insn.operands[0]), insn.operands[4] + 1, v(insn.operands[1]), v(insn.operands[1]));
++            println("\t{}.u32[{}] = (PPCClampBits({}.u32[1], 0x403F8001u, 0x40407FFFu) << 16) | (PPCClampBits({}.u32[0], 0x403F8001u, 0x40407FFFu) & 0xFFFF);",
++                v(insn.operands[0]), insn.operands[4], v(insn.operands[1]), v(insn.operands[1]));
++            break;
++
+         default:
+             println("\t__builtin_debugtrap();");
+             break;
+@@ -2088,6 +2321,7 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_VSEL:
++    case PPC_INST_VSEL128:
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_or_si128(simde_mm_andnot_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)), simde_mm_and_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8))));", v(insn.operands[0]), v(insn.operands[3]), v(insn.operands[1]), v(insn.operands[3]), v(insn.operands[2]));
+         break;
+ 
+@@ -2212,6 +2446,40 @@ bool Recompiler::Recompile(
+             println("\t{} = {};", v(insn.operands[0]), vTemp());
+             break;
+ 
++        // ---- Added for NFL Head Coach 09: remaining vupkd3d128 formats ----
++        // The packed data is in the source's last element(s): host u32[0] holds PPC element 3,
++        // u32[1] element 2. Results are written in PPC order x..w = host u32[3]..u32[0].
++        // Normalized integers unpack as 3.0 + v * 2^-22 (1.0 + v * 2^-22 for the 2-bit W).
++        case 2: // 2_10_10_10 (x, y, z signed 10-bit; w unsigned 2-bit)
++            println("\t{}.u32[3] = 0x40400000u + uint32_t(int32_t({}.u32[0] << 22) >> 22);", vTemp(), v(insn.operands[1]));
++            println("\t{}.u32[2] = 0x40400000u + uint32_t(int32_t({}.u32[0] << 12) >> 22);", vTemp(), v(insn.operands[1]));
++            println("\t{}.u32[1] = 0x40400000u + uint32_t(int32_t({}.u32[0] << 2) >> 22);", vTemp(), v(insn.operands[1]));
++            println("\t{}.u32[0] = 0x3F800000u + ({}.u32[0] >> 30);", vTemp(), v(insn.operands[1]));
++            println("\t{} = {};", v(insn.operands[0]), vTemp());
++            break;
++
++        case 3: // 2 half floats
++            println("\t{}.f32[3] = PPCHalfToFloat(uint16_t({}.u32[0] >> 16));", vTemp(), v(insn.operands[1]));
++            println("\t{}.f32[2] = PPCHalfToFloat(uint16_t({}.u32[0]));", vTemp(), v(insn.operands[1]));
++            println("\t{}.f32[1] = 0.0f;", vTemp());
++            println("\t{}.f32[0] = 1.0f;", vTemp());
++            println("\t{} = {};", v(insn.operands[0]), vTemp());
++            break;
++
++        case 4: // 4 normalized shorts
++            for (size_t i = 0; i < 4; i++)
++                println("\t{}.u32[{}] = 0x40400000u + uint32_t(int32_t({}.s16[{}]));", vTemp(), 3 - i, v(insn.operands[1]), 3 - i);
++            println("\t{} = {};", v(insn.operands[0]), vTemp());
++            break;
++
++        case 5: // 4 half floats
++            println("\t{}.f32[3] = PPCHalfToFloat(uint16_t({}.u32[1] >> 16));", vTemp(), v(insn.operands[1]));
++            println("\t{}.f32[2] = PPCHalfToFloat(uint16_t({}.u32[1]));", vTemp(), v(insn.operands[1]));
++            println("\t{}.f32[1] = PPCHalfToFloat(uint16_t({}.u32[0] >> 16));", vTemp(), v(insn.operands[1]));
++            println("\t{}.f32[0] = PPCHalfToFloat(uint16_t({}.u32[0]));", vTemp(), v(insn.operands[1]));
++            println("\t{} = {};", v(insn.operands[0]), vTemp());
++            break;
++
+         default:
+             println("\t__builtin_debugtrap();");
+             break;
+diff --git a/XenonUtils/ppc_context.h b/XenonUtils/ppc_context.h
+index 31a86cd..0ad216a 100644
+--- a/XenonUtils/ppc_context.h
++++ b/XenonUtils/ppc_context.h
+@@ -682,6 +682,80 @@ inline simde__m128i simde_mm_vctsxs(simde__m128 src1)
+     return simde_mm_andnot_si128(simde_mm_castps_si128(xmm2), simde_mm_castps_si128(dest));
+ }
+ 
++// ---- Added for NFL Head Coach 09 ----
++// IEEE half -> single conversion for vupkd3d128's half-float formats.
++inline float PPCHalfToFloat(uint16_t h)
++{
++    const uint32_t sign = uint32_t(h & 0x8000u) << 16;
++    uint32_t exponent = (h >> 10) & 0x1F;
++    uint32_t mantissa = h & 0x3FF;
++    uint32_t bits;
++    if (exponent == 0)
++    {
++        if (mantissa == 0)
++        {
++            bits = sign;
++        }
++        else
++        {
++            exponent = 113;  // renormalize the subnormal
++            while (!(mantissa & 0x400))
++            {
++                mantissa <<= 1;
++                exponent--;
++            }
++            bits = sign | (exponent << 23) | ((mantissa & 0x3FF) << 13);
++        }
++    }
++    else if (exponent == 31)
++    {
++        bits = sign | 0x7F800000u | (mantissa << 13);
++    }
++    else
++    {
++        bits = sign | ((exponent + 112) << 23) | (mantissa << 13);
++    }
++    float value;
++    memcpy(&value, &bits, sizeof(value));
++    return value;
++}
++
++// Single -> half for vpkd3d128, saturating like XenonRecomp's float16_4 packing:
++// NaN and |x| > 65504 become 0x7FFF (with sign), small values flush through the
++// subnormal range, the mantissa is truncated.
++inline uint16_t PPCFloatToHalf(float f)
++{
++    uint32_t bits;
++    memcpy(&bits, &f, sizeof(bits));
++    const uint32_t sign = (bits >> 16) & 0x8000;
++    const uint32_t magnitude = bits & 0x7FFFFFFF;
++    float absolute;
++    memcpy(&absolute, &magnitude, sizeof(absolute));
++    if (absolute != absolute || absolute > 65504.0f)
++        return uint16_t(sign | 0x7FFF);
++    const uint32_t exponent = magnitude >> 23;
++    const uint32_t mantissa = (magnitude >> 13) & 0x3FF;
++    if (exponent > 0x70)
++        return uint16_t(sign | (((exponent - 0x70) << 10) + mantissa));
++    const uint32_t shift = 0x71 - exponent;
++    return uint16_t(sign | (shift > 31 ? 0 : ((0x400 + mantissa) >> shift)));
++}
++
++// Clamps a float (given and returned as bits) between two float bounds (as bits);
++// used by vpkd3d128's normalized-integer formats. NaN clamps to the lower bound.
++inline uint32_t PPCClampBits(uint32_t valueBits, uint32_t lowBits, uint32_t highBits)
++{
++    float value, low, high;
++    memcpy(&value, &valueBits, sizeof(value));
++    memcpy(&low, &lowBits, sizeof(low));
++    memcpy(&high, &highBits, sizeof(high));
++    if (!(value >= low))
++        return lowBits;
++    if (value > high)
++        return highBits;
++    return valueBits;
++}
++
+ inline simde__m128i simde_mm_vsr(simde__m128i a, simde__m128i b)
+ {
+     b = simde_mm_srli_epi64(simde_mm_slli_epi64(b, 61), 61);
