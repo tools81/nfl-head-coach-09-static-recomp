@@ -47,6 +47,9 @@ namespace hc09
         virtual bool SetSize(uint64_t /*size*/) { return false; }
         virtual bool Writable() const { return false; }
         virtual std::vector<DirectoryEntry> List() const { return {}; }
+        // FileDispositionInformation / FILE_DELETE_ON_CLOSE: delete when the last handle closes.
+        // Returns an NTSTATUS (a non-empty directory cannot be deleted; the disc is read-only).
+        virtual uint32_t SetDeleteOnClose(bool /*remove*/) { return 0xC0000121; }  // STATUS_CANNOT_DELETE
     };
 
     class FileObject : public KernelObject

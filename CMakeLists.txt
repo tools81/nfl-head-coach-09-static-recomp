@@ -1,20 +1,24 @@
 cmake_minimum_required(VERSION 3.20)
-project(HC09Recomp VERSION 0.5.0 LANGUAGES C CXX)
+project(HC09Recomp VERSION 0.6.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# The installer wizard (HC09Setup.exe) contains no game code and builds without ppc/.
+add_subdirectory(tools/installer)
+
+# Recompiled PowerPC code, generated into ppc/ by XenonRecomp (never committed).
+file(GLOB HC09_PPC_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/ppc/*.cpp)
+if(NOT HC09_PPC_SOURCES)
+    message(WARNING "ppc/ is empty: only HC09Setup is configured (run XenonRecomp on config/HC09.toml for the game)")
+    return()
+endif()
 
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     message(FATAL_ERROR "The recompiled code requires Clang (use clang-cl on Windows)")
 endif()
 
 set(SIMDE_DIR ${CMAKE_SOURCE_DIR}/thirdparty/XenonRecomp/thirdparty/simde)
-
-# Recompiled PowerPC code, generated into ppc/ by XenonRecomp (never committed).
-file(GLOB HC09_PPC_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/ppc/*.cpp)
-if(NOT HC09_PPC_SOURCES)
-    message(FATAL_ERROR "ppc/ is empty: run XenonRecomp on config/HC09.toml first")
-endif()
 
 add_library(HC09RecompLib STATIC ${HC09_PPC_SOURCES})
 target_include_directories(HC09RecompLib PUBLIC ${CMAKE_SOURCE_DIR}/ppc ${SIMDE_DIR})
@@ -30,6 +34,8 @@ target_compile_options(HC09RecompLib PRIVATE
 
 add_executable(HC09
     src/main.cpp
+    src/common/settings.cpp
+    src/common/updates.cpp
     src/memory.cpp
     src/thread.cpp
     src/debug/hooks.cpp
@@ -68,7 +74,7 @@ target_include_directories(HC09 PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_D
 target_compile_definitions(HC09 PRIVATE HC09_VERSION="${PROJECT_VERSION}" NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 target_compile_options(HC09 PRIVATE /arch:AVX /clang:-fno-strict-aliasing -gline-tables-only)
 target_link_options(HC09 PRIVATE /DEBUG)
-target_link_libraries(HC09 PRIVATE HC09RecompLib dbghelp xinput d3d12 dxgi d3dcompiler ole32 winmm)
+target_link_libraries(HC09 PRIVATE HC09RecompLib dbghelp xinput d3d12 dxgi d3dcompiler ole32 winmm winhttp shell32)
 
 # FFmpeg (LGPL shared build in thirdparty/ffmpeg) for XMA audio decoding.
 set(HC09_FFMPEG ${CMAKE_SOURCE_DIR}/thirdparty/ffmpeg)

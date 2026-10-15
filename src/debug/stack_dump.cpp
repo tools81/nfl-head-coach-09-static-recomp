@@ -44,8 +44,17 @@ namespace hc09::debug
             });
         }
 
-        void PrintStack(HANDLE process, HANDLE thread, CONTEXT context)
+        void PrintStack(HANDLE process, HANDLE thread, CONTEXT context, std::string* out = nullptr)
         {
+            // With `out`, the frames are appended there instead of printed.
+            auto emit = [out](const char* format, auto... args) {
+                char line[512];
+                std::snprintf(line, sizeof(line), format, args...);
+                if (out)
+                    *out += line;
+                else
+                    std::fputs(line, stderr);
+            };
             STACKFRAME64 frame{};
             frame.AddrPC.Offset = context.Rip;
             frame.AddrPC.Mode = AddrModeFlat;
@@ -72,16 +81,16 @@ namespace hc09::debug
                     if (SymGetLineFromAddr64(process, frame.AddrPC.Offset, &lineDisplacement, &line))
                     {
                         const char* file = std::strrchr(line.FileName, '\\');
-                        std::fprintf(stderr, "    %s+0x%llX (%s:%lu)\n", symbol->Name, (unsigned long long)displacement,
+                        emit("    %s+0x%llX (%s:%lu)\n", symbol->Name, (unsigned long long)displacement,
                             file ? file + 1 : line.FileName, line.LineNumber);
                     }
                     else
                     {
-                        std::fprintf(stderr, "    %s+0x%llX\n", symbol->Name, (unsigned long long)displacement);
+                        emit("    %s+0x%llX\n", symbol->Name, (unsigned long long)displacement);
                     }
                 }
                 else
-                    std::fprintf(stderr, "    0x%016llX\n", (unsigned long long)frame.AddrPC.Offset);
+                    emit("    0x%016llX\n", (unsigned long long)frame.AddrPC.Offset);
             }
         }
 
@@ -116,13 +125,27 @@ namespace hc09::debug
             {
                 if (!(dr6 & (1ull << i)))
                     continue;
-                EnsureSymbols();
                 uint64_t value = 0;
                 for (uint32_t b = 0; b < g_watches[i].length; b++)  // big-endian guest bytes
                     value = (value << 8) | GuestToHost(g_watches[i].address)[b];
-                std::fprintf(stderr, "[watch] write to 0x%08X, value now 0x%llX, host thread %lu:\n",
-                    g_watches[i].address, (unsigned long long)value, GetCurrentThreadId());
-                PrintStack(GetCurrentProcess(), GetCurrentThread(), *info->ContextRecord);
+                // HC09_WATCH_VALUE=<hex>: only writes that leave this value.
+                static const char* valueSpec = std::getenv("HC09_WATCH_VALUE");
+                if (valueSpec && value != std::strtoull(valueSpec, nullptr, 16))
+                    continue;
+                EnsureSymbols();
+                std::string stack;
+                PrintStack(GetCurrentProcess(), GetCurrentThread(), *info->ContextRecord, &stack);
+                // Each distinct writer stack is printed once.
+                static std::mutex seenMutex;
+                static std::vector<std::string> seen;
+                {
+                    std::lock_guard lock(seenMutex);
+                    if (std::find(seen.begin(), seen.end(), stack) != seen.end())
+                        continue;
+                    seen.push_back(stack);
+                }
+                std::fprintf(stderr, "[watch] write to 0x%08X, value now 0x%llX, host thread %lu:\n%s",
+                    g_watches[i].address, (unsigned long long)value, GetCurrentThreadId(), stack.c_str());
                 std::fflush(stderr);
             }
             info->ContextRecord->Dr6 = 0;
@@ -231,11 +254,19 @@ namespace hc09::debug
 
     void StartWatchdogFromEnvironment()
     {
-        // HC09_WATCH entries: "ADDR" watches one byte; "*PTR+OFF" watches 8 bytes at
-        // (big-endian u32 at PTR) + OFF, resolved 5 seconds after startup.
+        // HC09_WATCH entries: "ADDR" watches one byte, "ADDR:LEN" LEN (1, 2, 4 or 8, aligned)
+        // bytes; "*PTR+OFF" watches 8 bytes at (big-endian u32 at PTR) + OFF, resolved 5 seconds
+        // after startup. HC09_WATCH_AFTER=<seconds> arms every watch only after that long.
         if (const char* watches = std::getenv("HC09_WATCH"))
         {
-            std::vector<std::pair<uint32_t, uint32_t>> deferred;
+            const int armAfter = std::getenv("HC09_WATCH_AFTER") ? std::atoi(std::getenv("HC09_WATCH_AFTER")) : 0;
+            struct Deferred
+            {
+                bool indirect;
+                uint32_t value;  // pointer (indirect) or address
+                uint32_t offsetOrLength;
+            };
+            std::vector<Deferred> deferred;
             for (const char* p = watches; *p && g_watches.size() + deferred.size() < 4;)
             {
                 char* end;
@@ -243,12 +274,19 @@ namespace hc09::debug
                 {
                     const uint32_t pointer = uint32_t(std::strtoul(p + 1, &end, 16));
                     const uint32_t offset = *end == '+' ? uint32_t(std::strtoul(end + 1, &end, 16)) : 0;
-                    deferred.emplace_back(pointer, offset);
+                    deferred.push_back({ true, pointer, offset });
                 }
                 else
                 {
-                    g_watches.push_back({ uint32_t(std::strtoul(p, &end, 16)), 1 });
-                    std::fprintf(stderr, "[watch] 0x%08X\n", g_watches.back().address);
+                    const uint32_t address = uint32_t(std::strtoul(p, &end, 16));
+                    const uint32_t length = *end == ':' ? uint32_t(std::strtoul(end + 1, &end, 10)) : 1;
+                    if (armAfter > 0)
+                        deferred.push_back({ false, address, length });
+                    else
+                    {
+                        g_watches.push_back({ address, length });
+                        std::fprintf(stderr, "[watch] 0x%08X (%u bytes)\n", address, length);
+                    }
                 }
                 if (end == p)
                     break;
@@ -257,15 +295,21 @@ namespace hc09::debug
             AddVectoredExceptionHandler(1, OnWatchHit);
             if (!deferred.empty())
             {
-                std::thread([deferred] {
-                    std::this_thread::sleep_for(std::chrono::seconds(5));
-                    for (const auto& [pointer, offset] : deferred)
+                std::thread([deferred, armAfter] {
+                    std::this_thread::sleep_for(std::chrono::seconds(std::max(armAfter, 5)));
+                    for (const auto& item : deferred)
                     {
-                        const uint8_t* bytes = GuestToHost(pointer);
+                        if (!item.indirect)
+                        {
+                            g_watches.push_back({ item.value, item.offsetOrLength });
+                            std::fprintf(stderr, "[watch] 0x%08X (%u bytes) armed\n", item.value, item.offsetOrLength);
+                            continue;
+                        }
+                        const uint8_t* bytes = GuestToHost(item.value);
                         const uint32_t base = (uint32_t(bytes[0]) << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3];
-                        const uint32_t address = base + offset;
+                        const uint32_t address = base + item.offsetOrLength;
                         g_watches.push_back({ address, (address & 7) == 0 ? 8u : 1u });
-                        std::fprintf(stderr, "[watch] *0x%08X+0x%X = 0x%08X\n", pointer, offset, address);
+                        std::fprintf(stderr, "[watch] *0x%08X+0x%X = 0x%08X\n", item.value, item.offsetOrLength, address);
                     }
                     std::lock_guard lock(g_mutex);
                     for (const auto& entry : g_threads)

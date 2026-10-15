@@ -4,16 +4,20 @@
 #include <ppc_recomp_shared.h>
 
 #include <windows.h>
+#include <shellapi.h>
 #include <timeapi.h>
 
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <vector>
 
 #include "memory.h"
+#include "common/settings.h"
+#include "common/updates.h"
 #include "debug/stack_dump.h"
 #include "kernel/guest.h"
 #include "kernel/heap.h"
@@ -138,6 +142,33 @@ namespace
         }
     }
 
+    // With automatic updates enabled (hc09.ini, set by the installer): if GitHub has a newer
+    // release, ask, and on "Yes" start the installer in update mode and return true (the game then
+    // exits; the updater rebuilds it).
+    bool OfferUpdate()
+    {
+        const auto tag = hc09::LatestReleaseTag(3000);
+        if (!tag || !hc09::IsNewerVersion(*tag, HC09_VERSION))
+            return false;
+        char message[512];
+        std::snprintf(message, sizeof(message),
+            "Version %s of the NFL Head Coach 09 recompilation is available (installed: %s).\n\n"
+            "Update now? The updater downloads the new source and rebuilds the game, which takes a few minutes.",
+            tag->c_str(), HC09_VERSION);
+        if (MessageBoxA(nullptr, message, "NFL Head Coach 09", MB_YESNO | MB_ICONINFORMATION) != IDYES)
+            return false;
+        const std::wstring folder = std::filesystem::current_path().wstring();
+        const std::wstring updater = folder + L"\\build\\installer\\HC09Setup.exe";
+        const std::wstring arguments = L"--update \"" + folder + L"\"";
+        if (reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", updater.c_str(), arguments.c_str(), folder.c_str(), SW_SHOWNORMAL)) <= 32)
+        {
+            MessageBoxA(nullptr, "The updater (build\\installer\\HC09Setup.exe) could not be started. Download the latest "
+                "HC09Setup.exe from the project's GitHub releases and run it to update.", "NFL Head Coach 09", MB_OK | MB_ICONWARNING);
+            return false;
+        }
+        return true;
+    }
+
     // Startup failures: printed, and shown in a message box (a double-clicked console window
     // closes before the message can be read).
     int StartupFailure(const char* message)
@@ -154,9 +185,15 @@ int main(int argc, char** argv)
     // 1 ms timer resolution: guest waits and our short sleeps otherwise last ~15 ms.
     timeBeginPeriod(1);
     FindProjectFolder();
+    const hc09::Settings settings = hc09::LoadSettings(std::filesystem::current_path());
+    if (settings.autoUpdate && OfferUpdate())
+        return EXIT_SUCCESS;
     const char* imagePath = argc > 1 ? argv[1] : "build/default.pe";
     const char* xexPath = argc > 2 ? argv[2] : "build/extracted/default.xex";
-    const char* isoPath = argc > 3 ? argv[3] : "iso/NFL Head Coach 09.iso";
+    // The disc image: the command line, else the installer's setting, else the developer layout.
+    const std::filesystem::path isoPath = argc > 3 ? std::filesystem::path(argv[3])
+        : !settings.isoPath.empty()             ? std::filesystem::path(settings.isoPath)
+                                                : std::filesystem::path("iso/NFL Head Coach 09.iso");
     char message[512];
 
     if (!hc09::AllocateGuestMemory())
@@ -165,7 +202,7 @@ int main(int argc, char** argv)
     {
         std::snprintf(message, sizeof(message),
             "Failed to load %s.\n\nRun HC09.exe from the project folder (or anywhere inside it), "
-            "after extracting the game with tools/xexdecrypt.py.", imagePath);
+            "after installing with HC09Setup.exe (or extracting the game with tools/xexdecrypt.py).", imagePath);
         return StartupFailure(message);
     }
     if (!hc09::LoadXexHeader(xexPath))
@@ -175,7 +212,8 @@ int main(int argc, char** argv)
     }
     if (!hc09::InitializeVfs(isoPath, "build/userdata"))
     {
-        std::snprintf(message, sizeof(message), "Failed to open the game disc image:\n%s", isoPath);
+        std::snprintf(message, sizeof(message), "Failed to open the game disc image:\n%s\n\nRun HC09Setup.exe again to select it.",
+            isoPath.string().c_str());
         return StartupFailure(message);
     }
     PopulateFunctionTable();

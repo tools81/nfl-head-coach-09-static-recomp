@@ -8,10 +8,13 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <set>
+#include <string>
 
 #include "gpu/command_processor.h"
+#include "kernel/format.h"
 #include "kernel/guest.h"
 #include "kernel/threads.h"
 
@@ -173,4 +176,37 @@ PPC_FUNC(sub_8233A188)
         std::fprintf(stderr, "[advance] thread 0x%X token@0x%08X = %08X -> 0x%08X, active %d -> %d, mask %08X%c", CurrentThreadId(),
             token, value, ctx.r3.u32, activeBefore, Load<int32_t>(shared + 60), Load<uint32_t>(shared + 56), 10);
     (void)worker;
+}
+
+// The engine's debug print (format, ...), compiled out in retail: the linker folded it into an empty
+// function shared with other empty functions, so only calls whose first argument is printable text in
+// .rdata are treated as prints. HC09_ENGINE_LOG=1 prints them as "[engine] ...", e.g.
+// "GameRenderAsset::SyncResolveRnaTexture: Asset missing, using default: <path>" for each texture a
+// material references that no loaded package provides (such textures render with Missing.dds, a flat
+// grey 32x32 texture).
+PPC_FUNC(sub_8279F208)
+{
+    static const bool enabled = std::getenv("HC09_ENGINE_LOG") != nullptr;
+    if (!enabled)
+        return;
+    constexpr uint32_t kRdataBegin = 0x82000600, kRdataEnd = 0x822D0B8C;
+    const uint32_t format = ctx.r3.u32;
+    if (format < kRdataBegin || format >= kRdataEnd)
+        return;
+    uint32_t length = 0;
+    for (; length < 512 && format + length < kRdataEnd; length++)
+    {
+        const uint8_t c = Load<uint8_t>(format + length);
+        if (c == 0)
+            break;
+        if ((c < 0x20 && c != '\n' && c != '\t') || c >= 0x7F)
+            return;
+    }
+    // Messages end in a newline or carry a format specifier; bare names (profiler markers such as
+    // "FSGameRenderIG::Process" reach the same folded function every frame) are skipped.
+    const char* pattern = GuestCString(format);
+    if (length < 4 || length == 512 || (pattern[length - 1] != '\n' && !std::memchr(pattern, '%', length)))
+        return;
+    const std::string text = FormatGuestString(pattern, GuestArgs::FromRegisters(ctx, 1));
+    std::fprintf(stderr, "[engine] %s%s", text.c_str(), !text.empty() && text.back() == '\n' ? "" : "\n");
 }

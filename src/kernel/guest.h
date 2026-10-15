@@ -94,6 +94,8 @@ namespace hc09
         constexpr uint32_t kMutantNotOwned = 0xC0000046;
         constexpr uint32_t kSemaphoreLimitExceeded = 0xC0000047;
         constexpr uint32_t kNotSupported = 0xC00000BB;
+        constexpr uint32_t kDirectoryNotEmpty = 0xC0000101;
+        constexpr uint32_t kCannotDelete = 0xC0000121;
     }
 
     // Win32 error codes returned by XAM

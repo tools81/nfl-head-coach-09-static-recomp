@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <climits>
 #include <condition_variable>
 #include <deque>
@@ -1280,6 +1281,13 @@ float ps_main(float4 position : SV_Position) : SV_Target
                 std::fprintf(stderr, "[frame]   blend 0x%08X color control 0x%08X color mask 0x%08X depth control 0x%08X stencil 0x%08X depth info 0x%08X\n",
                     ReadRegister(reg::kBlendControl0), ReadRegister(0x2202), ReadRegister(reg::kColorMask), ReadRegister(reg::kDepthControl),
                     ReadRegister(reg::kStencilRefMask), ReadRegister(reg::kDepthInfo));
+            if (g_frame == g_dumpFrame)
+            {
+                std::fprintf(stderr, "[frame]   bools");
+                for (uint32_t i = 0; i < 8; i++)
+                    std::fprintf(stderr, " %08X", ReadRegister(reg::kBoolConstants + i));
+                std::fprintf(stderr, "\n");
+            }
             uint32_t samplerCount = 0;
             for (uint32_t n = 0; n < 32; n++)
                 if (textureMask & (1u << n))
@@ -1345,10 +1353,14 @@ float ps_main(float4 position : SV_Position) : SV_Target
                         fetch.mipFilter(), fetch.anisoFilter(), fetch.lodBias(), fetch.clampX(), fetch.clampY());
                 if (bound)
                 {
-                    // HC09_DUMP_TEXTURES=<frame>: from that frame on, save each distinct RGBA8 texture sampled (up to 64).
-                    static const int dumpTexturesFrame = std::getenv("HC09_DUMP_TEXTURES") ? std::atoi(std::getenv("HC09_DUMP_TEXTURES")) : -1;
+                    // HC09_DUMP_TEXTURES=<frame>: from that frame on, save each distinct RGBA8 texture sampled (up to 64);
+                    // HC09_DUMP_TEXTURES=dump: those sampled in the dump frame.
+                    static const char* dumpTexturesSpec = std::getenv("HC09_DUMP_TEXTURES");
+                    static const bool dumpTexturesInDumpFrame = dumpTexturesSpec && std::strcmp(dumpTexturesSpec, "dump") == 0;
+                    static const int dumpTexturesFrame = dumpTexturesSpec && !dumpTexturesInDumpFrame ? std::atoi(dumpTexturesSpec) : -1;
                     static std::vector<uint32_t> dumpedTextures;
-                    if (dumpTexturesFrame >= 0 && g_frame >= dumpTexturesFrame && dumpedTextures.size() < 64 && texture.view.Format == DXGI_FORMAT_R8G8B8A8_UNORM &&
+                    const bool dumpTextures = dumpTexturesInDumpFrame ? g_frame == g_dumpFrame : dumpTexturesFrame >= 0 && g_frame >= dumpTexturesFrame;
+                    if (dumpTextures && dumpedTextures.size() < 64 && texture.view.Format == DXGI_FORMAT_R8G8B8A8_UNORM &&
                         std::find(dumpedTextures.begin(), dumpedTextures.end(), fetch.baseAddress()) == dumpedTextures.end())
                     {
                         dumpedTextures.push_back(fetch.baseAddress());
@@ -1540,13 +1552,17 @@ float ps_main(float4 position : SV_Position) : SV_Target
             // HC09_DRAW_SNAPSHOTS=1 with HC09_DUMP_FRAME: save the render target after every
             // visible draw of that frame as build/draw_<index>.bmp.
             Phase(-1);
-            // HC09_DRAW_SNAPSHOTS=1 (every draw) or <first>-<last> (draw indices in that range).
+            // HC09_DRAW_SNAPSHOTS=1 (every draw), <first>-<last> (draw indices in that range) or
+            // s<RB_SURFACE_INFO hex> (draws to that surface).
             static const char* snapshotSpec = std::getenv("HC09_DRAW_SNAPSHOTS");
             static int snapshotFirst = 0, snapshotLast = INT_MAX;
+            static uint32_t snapshotSurface = 0;
             static const bool drawSnapshots = [] {
                 if (!snapshotSpec)
                     return false;
-                if (std::strchr(snapshotSpec, '-'))
+                if (snapshotSpec[0] == 's')
+                    snapshotSurface = uint32_t(std::strtoul(snapshotSpec + 1, nullptr, 16));
+                else if (std::strchr(snapshotSpec, '-'))
                     std::sscanf(snapshotSpec, "%d-%d", &snapshotFirst, &snapshotLast);
                 return true;
             }();
@@ -1596,7 +1612,8 @@ float ps_main(float4 position : SV_Position) : SV_Target
                 std::snprintf(path, sizeof(path), "build/surface_%03d_depth.bmp", surfaceDraw++);
                 SaveDepth(depth, path);
             }
-            if (drawSnapshots && g_frame == g_dumpFrame && target.samples == 1 && g_drawInFrame >= snapshotFirst && g_drawInFrame <= snapshotLast)
+            if (drawSnapshots && g_frame == g_dumpFrame && target.samples == 1 && g_drawInFrame >= snapshotFirst && g_drawInFrame <= snapshotLast &&
+                (snapshotSurface == 0 || ReadRegister(reg::kSurfaceInfo) == snapshotSurface))
             {
                 char path[64];
                 std::snprintf(path, sizeof(path), "build/draw_%03d.bmp", g_drawInFrame);
@@ -1722,13 +1739,14 @@ float ps_main(float4 position : SV_Position) : SV_Target
                     std::fprintf(stderr, "[frame] will dump frame %d\n", g_dumpFrame);
                 }
             }
-            // HC09_SAVE_RESOLVES=<width>x<height>: save every colour resolve of that size as
-            // build/resolve_<frame>_<address>.bmp.
+            // HC09_SAVE_RESOLVES=<width>x<height>[@<first frame>-<last frame>]: save every colour resolve of
+            // that size (in those frames) as build/resolve_<frame>_<address>.bmp.
             if (static const char* saveSpec = std::getenv("HC09_SAVE_RESOLVES"); saveSpec)
             {
                 unsigned saveWidth = 0, saveHeight = 0;
-                std::sscanf(saveSpec, "%ux%u", &saveWidth, &saveHeight);
-                if (width == saveWidth && height == saveHeight)
+                int firstFrame = 0, lastFrame = INT_MAX;
+                std::sscanf(saveSpec, "%ux%u@%d-%d", &saveWidth, &saveHeight, &firstFrame, &lastFrame);
+                if (width == saveWidth && height == saveHeight && g_frame >= firstFrame && g_frame <= lastFrame)
                 {
                     char path[96];
                     std::snprintf(path, sizeof(path), "build/resolve_%d_%08X.bmp", g_frame, destBase);
@@ -2144,6 +2162,13 @@ float ps_main(float4 position : SV_Position) : SV_Target
                 std::fprintf(stderr, "[gpu] cannot save %s: format %u\n", path, unsigned(format));
                 return;
             }
+            // The copy takes the whole of mip 0, so the footprint must match the resource (a fetch
+            // can describe a smaller texture than the resolve target it samples).
+            const D3D12_RESOURCE_DESC desc = resource->GetDesc();
+            if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D)
+                return;
+            width = uint32_t(desc.Width);
+            height = desc.Height;
             auto* list = context_.list();
             const uint32_t rowPitch = (width * texelBytes + 255) & ~255u;
             auto readback = CreateReadbackBuffer(uint64_t(rowPitch) * height);
@@ -2160,7 +2185,11 @@ float ps_main(float4 position : SV_Position) : SV_Target
             context_.Flush();
 
             uint8_t* pixels = nullptr;
-            readback->Map(0, nullptr, reinterpret_cast<void**>(&pixels));
+            if (FAILED(readback->Map(0, nullptr, reinterpret_cast<void**>(&pixels))) || !pixels)
+            {
+                std::fprintf(stderr, "[gpu] cannot save %s: readback failed\n", path);
+                return;
+            }
             FILE* file = std::fopen(path, "wb");
             if (file)
             {
@@ -2323,8 +2352,44 @@ float ps_main(float4 position : SV_Position) : SV_Target
             }
         }
 
+        // HC09_FIND_STRING=<text> (with a frame dump): every case-insensitive occurrence of that text in
+        // guest memory, with the surrounding printable bytes.
+        void FindString()
+        {
+            const char* spec = std::getenv("HC09_FIND_STRING");
+            if (!spec || !*spec)
+                return;
+            const size_t length = std::strlen(spec);
+            const struct { uint32_t begin, end; } ranges[] = {
+                { kPoolHeapBase, kVirtualHeapEnd }, { uint32_t(PPC_IMAGE_BASE), uint32_t(PPC_IMAGE_BASE + PPC_IMAGE_SIZE) },
+                { kPhysicalHeapBase, kPhysicalHeapEnd },
+            };
+            int matches = 0;
+            for (const auto& range : ranges)
+            {
+                const uint8_t* bytes = GuestToHost(range.begin);
+                for (uint32_t offset = 0; offset + length <= range.end - range.begin && matches < 200; offset++)
+                {
+                    if (std::tolower(bytes[offset]) != std::tolower(uint8_t(spec[0])) || _strnicmp(reinterpret_cast<const char*>(bytes + offset), spec, length) != 0)
+                        continue;
+                    uint32_t start = offset;
+                    while (start > 0 && offset - start < 120 && bytes[start - 1] >= 0x20 && bytes[start - 1] < 0x7F)
+                        start--;
+                    uint32_t end = offset + uint32_t(length);
+                    while (end < range.end - range.begin && end - offset < 120 && bytes[end] >= 0x20 && bytes[end] < 0x7F)
+                        end++;
+                    std::fprintf(stderr, "[find] \"%s\" at 0x%08X: %.*s\n", spec, range.begin + offset, int(end - start),
+                        reinterpret_cast<const char*>(bytes + start));
+                    matches++;
+                    offset = end;
+                }
+            }
+            std::fprintf(stderr, "[find] %d matches for \"%s\"\n", matches, spec);
+        }
+
         void FindDwords()
         {
+            FindString();
             const char* spec = std::getenv("HC09_FIND_DWORDS");
             if (!spec)
                 return;

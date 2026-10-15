@@ -20,6 +20,7 @@ namespace hc09
 
         constexpr uint64_t kUseFilePointerPosition = 0xFFFFFFFFFFFFFFFEull;
         constexpr uint32_t kFileDirectoryFile = 0x00000001;
+        constexpr uint32_t kFileDeleteOnClose = 0x00001000;
         constexpr uint32_t kWriteAccessMask = 0x40000000 | 0x10000000 | 0x00000002 | 0x00000004;
 
         std::string PathFromAttributes(uint32_t objectAttributes)
@@ -71,6 +72,8 @@ namespace hc09
             const std::string path = PathFromAttributes(objectAttributes);
             auto result = OpenFile(path, disposition, (options & kFileDirectoryFile) != 0, (access & kWriteAccessMask) != 0);
             std::fprintf(stderr, "[io] open \"%s\" -> 0x%08X\n", path.c_str(), result.status);
+            if (result.object && (options & kFileDeleteOnClose))
+                result.object->file->SetDeleteOnClose(true);
             if (result.object)
                 Store<uint32_t>(handlePtr, CreateHandle(result.object));
             CompleteIo(ioStatus, result.status, result.information, 0);
@@ -264,8 +267,10 @@ PPC_FUNC(__imp__NtSetInformationFile)
     {
     case 4:  // FileBasicInformation: timestamps/attributes are not persisted
         break;
-    case 13:  // FileDispositionInformation
-        std::fprintf(stderr, "[io] delete-on-close of %s ignored\n", file->path.c_str());
+    case 13:  // FileDispositionInformation: BOOLEAN DeleteFile
+        result = file->file->SetDeleteOnClose(Load<uint8_t>(info) != 0);
+        if (result != status::kSuccess)
+            std::fprintf(stderr, "[io] delete-on-close of %s refused: 0x%08X\n", file->path.c_str(), result);
         break;
     case 14:  // FilePositionInformation
     {

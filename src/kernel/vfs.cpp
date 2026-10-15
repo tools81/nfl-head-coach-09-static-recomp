@@ -223,7 +223,18 @@ namespace hc09
         public:
             HostFile(HANDLE handle, std::filesystem::path path, bool writable)
                 : handle_(handle), path_(std::move(path)), writable_(writable) {}
-            ~HostFile() override { CloseHandle(handle_); }
+            ~HostFile() override
+            {
+                CloseHandle(handle_);
+                if (deleteOnClose_)
+                    DeleteFileW(path_.c_str());
+            }
+
+            uint32_t SetDeleteOnClose(bool remove) override
+            {
+                deleteOnClose_ = remove;
+                return status::kSuccess;
+            }
 
             FileInfo Info() const override
             {
@@ -263,12 +274,31 @@ namespace hc09
             HANDLE handle_;
             std::filesystem::path path_;
             bool writable_;
+            bool deleteOnClose_ = false;
         };
 
         class HostDirectory : public File
         {
         public:
-            explicit HostDirectory(std::filesystem::path path) : path_(std::move(path)) {}
+            // The root of a host device (e.g. cache:\.) is never deleted.
+            HostDirectory(std::filesystem::path path, bool deviceRoot)
+                : path_(std::move(path).lexically_normal()), deviceRoot_(deviceRoot) {}
+            ~HostDirectory() override
+            {
+                if (deleteOnClose_)
+                    RemoveDirectoryW(path_.c_str());
+            }
+
+            uint32_t SetDeleteOnClose(bool remove) override
+            {
+                if (remove && deviceRoot_)
+                    return status::kCannotDelete;
+                std::error_code ec;
+                if (remove && !std::filesystem::is_empty(path_, ec))
+                    return status::kDirectoryNotEmpty;
+                deleteOnClose_ = remove;
+                return status::kSuccess;
+            }
 
             FileInfo Info() const override
             {
@@ -294,6 +324,8 @@ namespace hc09
 
         private:
             std::filesystem::path path_;
+            bool deviceRoot_;
+            bool deleteOnClose_ = false;
         };
 
         // ---- Devices and links ---------------------------------------------------------------
@@ -345,6 +377,18 @@ namespace hc09
         OpenResult OpenOnHost(const Device& device, const std::string& canonical, const std::string& relative,
             OpenDisposition disposition, bool directory, bool write)
         {
+            // FATX has no "." or ".." entries and rejects them as names. The title's replay cleanup
+            // ends by deleting "cache:\Replays\.", which must fail and leave the directory in place.
+            for (size_t start = 0; start <= relative.size();)
+            {
+                size_t end = relative.find('\\', start);
+                if (end == std::string::npos)
+                    end = relative.size();
+                const std::string_view part(relative.data() + start, end - start);
+                if (part == "." || part == "..")
+                    return { status::kObjectNameInvalid };
+                start = end + 1;
+            }
             const auto path = HostPath(device, relative);
             std::error_code ec;
             const bool exists = std::filesystem::exists(path, ec);
@@ -363,7 +407,8 @@ namespace hc09
                 if (!exists && !std::filesystem::create_directories(path, ec))
                     return { status::kObjectPathNotFound };
                 return { status::kSuccess, exists ? 1u : 2u,
-                    std::make_shared<FileObject>(canonical, std::make_unique<HostDirectory>(path)) };
+                    std::make_shared<FileObject>(canonical, std::make_unique<HostDirectory>(path,
+                        path.lexically_normal() == device.hostRoot.lexically_normal())) };
             }
 
             DWORD creation = OPEN_EXISTING;

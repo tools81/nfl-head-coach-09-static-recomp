@@ -7,3 +7,4 @@ thirdparty/XenonRecomp/
 thirdparty/ffmpeg/
 __pycache__/
 *.pyc
+hc09.ini
