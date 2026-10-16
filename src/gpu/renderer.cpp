@@ -438,6 +438,7 @@ float ps_main(float4 position : SV_Position) : SV_Target
         std::chrono::steady_clock::duration g_phaseTime[9]{};
         std::chrono::steady_clock::time_point g_phaseStart, g_phaseReport = std::chrono::steady_clock::now();
         int g_phase = -1;
+        uint64_t g_evictedResolveTargets = 0;  // HC09_GPU_STATS
 
         void Phase(int next)
         {
@@ -496,6 +497,7 @@ float ps_main(float4 position : SV_Position) : SV_Target
             uint32_t height = 0;
             D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COPY_DEST;
             D3D12_CPU_DESCRIPTOR_HANDLE rtv{};  // depth resolve targets only
+            int lastResolved = -1;              // frame of the latest resolve into it
         };
 
         class Renderer
@@ -574,6 +576,9 @@ float ps_main(float4 position : SV_Position) : SV_Target
             uint64_t samplerTableGeneration_ = ~0ull;
             uint64_t vertexUploadGeneration_ = ~0ull;
             std::unordered_map<uint32_t, ResolveTarget> resolveTargets_;
+            std::vector<std::pair<int, ComPtr<ID3D12Resource>>> retiredTargets_;  // (frame released, resource)
+            // Releases resolve targets neither resolved to nor sampled for a while, and stale textures.
+            void EvictIdleResources(uint32_t frontBuffer);
             uint32_t skippedDraws_ = 0;
         };
 
@@ -1659,15 +1664,14 @@ float ps_main(float4 position : SV_Position) : SV_Target
             {
                 const uint32_t bytesPerPixel = target.format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4;
                 const uint32_t surfaceBytes = ((width + 31) & ~31u) * ((height + 31) & ~31u) * bytesPerPixel;
+                // Only a target the first strip resolved into this frame qualifies: targets left from
+                // earlier scenes can overlap the strip's address too.
+                uint32_t owner = destBase;
                 for (const auto& [base, existing] : resolveTargets_)
-                {
-                    if (base < destBase && destBase < base + surfaceBytes && existing.width == width &&
-                        existing.height == height && existing.format == target.format)
-                    {
-                        destBase = base;
-                        break;
-                    }
-                }
+                    if (base < destBase && destBase < base + surfaceBytes && existing.width == width && existing.height == height &&
+                        existing.format == target.format && existing.lastResolved == g_frame && (owner == destBase || base > owner))
+                        owner = base;
+                destBase = owner;
             }
 
             ResolveTarget& dest = resolveTargets_[destBase];
@@ -1754,6 +1758,7 @@ float ps_main(float4 position : SV_Position) : SV_Target
                 }
             }
             // RB_COPY_DEST_INFO bit 24: copy_dest_swap (red and blue exchanged in memory).
+            dest.lastResolved = g_frame;
             textures_->SetResolved(destBase, dest.resource.Get(), dest.format, width, height, (ReadRegister(0x231B) >> 24) & 1);
 
             Transition(list, target.resource.Get(), target.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -1843,15 +1848,12 @@ float ps_main(float4 position : SV_Position) : SV_Target
             uint32_t destBase = rawDestBase;
             {
                 const uint32_t surfaceBytes = ((width + 31) & ~31u) * ((height + 31) & ~31u) * 4;
+                uint32_t owner = destBase;
                 for (const auto& [base, existing] : resolveTargets_)
-                {
-                    if (base < destBase && destBase < base + surfaceBytes && existing.width == width &&
-                        existing.height == height && existing.format == DXGI_FORMAT_R32_FLOAT)
-                    {
-                        destBase = base;
-                        break;
-                    }
-                }
+                    if (base < destBase && destBase < base + surfaceBytes && existing.width == width && existing.height == height &&
+                        existing.format == DXGI_FORMAT_R32_FLOAT && existing.lastResolved == g_frame && (owner == destBase || base > owner))
+                        owner = base;
+                destBase = owner;
             }
 
             ResolveTarget& dest = resolveTargets_[destBase];
@@ -1908,6 +1910,7 @@ float ps_main(float4 position : SV_Position) : SV_Target
             }
             Transition(list, dest.resource.Get(), dest.state,
                 D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            dest.lastResolved = g_frame;
             textures_->SetResolved(destBase, dest.resource.Get(), dest.format, width, height);
 
             // As for colour resolves: during tiling, clear the shared depth buffer only after the
@@ -1948,9 +1951,50 @@ float ps_main(float4 position : SV_Position) : SV_Target
             return { clamp(minX, limitX), clamp(minY, limitY), 0, clamp(maxX, limitX), clamp(maxY, limitY), 1 };
         }
 
+        void Renderer::EvictIdleResources(uint32_t frontBuffer)
+        {
+            constexpr int kIdleFrames = 1800;  // ~1 minute
+            textures_->Evict(g_frame);
+            std::erase_if(retiredTargets_, [&](const auto& item) { return g_frame - item.first > 4; });
+            if (g_frame % 300 != 0)
+                return;
+            for (auto it = resolveTargets_.begin(); it != resolveTargets_.end();)
+            {
+                const int lastUse = std::max(it->second.lastResolved, textures_->ResolvedLastUse(it->first));
+                // Depth targets own a render-target descriptor (never freed), and the front buffer is shown every frame.
+                if (it->second.rtv.ptr == 0 && it->first != (frontBuffer & 0x1FFFFFFF) && g_frame - lastUse > kIdleFrames)
+                {
+                    textures_->ForgetResolved(it->first);
+                    retiredTargets_.emplace_back(g_frame, std::move(it->second.resource));
+                    it = resolveTargets_.erase(it);
+                    g_evictedResolveTargets++;
+                }
+                else
+                {
+                    ++it;
+                }
+            }
+        }
+
         void Renderer::Swap(uint32_t frontBuffer)
         {
             ReportPhases();
+            EvictIdleResources(frontBuffer);
+            // HC09_GPU_STATS: GPU memory and cache sizes every 2 s (they must stay bounded over many games).
+            if (g_phaseStats)
+            {
+                static auto reported = std::chrono::steady_clock::now();
+                if (std::chrono::steady_clock::now() - reported > std::chrono::seconds(2))
+                {
+                    reported = std::chrono::steady_clock::now();
+                    const auto stats = textures_->GetStats();
+                    std::fprintf(stderr, "[gpu] memory: frame %d, video memory %.0f MB, %zu cached textures (%llu evicted), %zu resolve targets "
+                        "(%llu evicted), %zu resolved addresses (%llu stale), %llu mismatched resolve fetches\n", g_frame,
+                        context_.VideoMemoryUsage() / 1048576.0, stats.textures, (unsigned long long)stats.evictedTextures,
+                        resolveTargets_.size(), (unsigned long long)g_evictedResolveTargets, stats.resolved,
+                        (unsigned long long)stats.staleResolves, (unsigned long long)stats.mismatchedResolveHits);
+                }
+            }
             auto* list = context_.list();
             const D3D12_CPU_DESCRIPTOR_HANDLE backBuffer = context_.BackBufferRtv();
             auto resolved = resolveTargets_.find(frontBuffer & 0x1FFFFFFF);

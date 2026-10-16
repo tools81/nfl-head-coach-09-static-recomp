@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <set>
 #include <vector>
 
 #define XXH_INLINE_ALL
@@ -137,10 +139,97 @@ namespace hc09::gpu
         return fetch;
     }
 
+    namespace
+    {
+        constexpr int kEvictAfterFrames = 1800;  // ~1 minute without being sampled
+
+        uint32_t ResolveTexelBytes(DXGI_FORMAT format)
+        {
+            return format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4;
+        }
+
+        // Fingerprint of the guest memory a resolve of this size covers (a tiled surface: 32x32-texel
+        // aligned). Large regions are sampled: whole-texture loads change many of the samples.
+        uint64_t MemoryFingerprint(uint32_t address, uint32_t width, uint32_t height, DXGI_FORMAT format)
+        {
+            const uint32_t physical = address & 0x1FFFFFFF;
+            uint64_t bytes = uint64_t((width + 31) & ~31u) * ((height + 31) & ~31u) * ResolveTexelBytes(format);
+            bytes = std::min<uint64_t>(bytes, 0x20000000ull - physical);
+            const uint8_t* memory = GuestToHost(PhysicalToGuest(physical));
+            constexpr uint64_t kChunk = 256, kChunks = 64;
+            if (bytes <= kChunk * kChunks)
+                return XXH3_64bits(memory, size_t(bytes));
+            uint64_t hash = 0;
+            const uint64_t step = (bytes - kChunk) / (kChunks - 1);
+            for (uint64_t i = 0; i < kChunks; i++)
+                hash = XXH3_64bits_withSeed(memory + i * step, kChunk, hash);
+            return hash;
+        }
+    }
+
     void TextureCache::SetResolved(uint32_t address, ID3D12Resource* resource, DXGI_FORMAT format, uint32_t width, uint32_t height,
         bool swapRedBlue)
     {
-        resolved_[address & 0x1FFFFFFF] = { resource, format, width, height, swapRedBlue };
+        Resolved resolved{ resource, format, width, height, swapRedBlue };
+        resolved.memoryFingerprint = MemoryFingerprint(address, width, height, format);
+        resolved.checkedFrame = FrameNumber();
+        resolved.lastUsedFrame = FrameNumber();
+        resolved_[address & 0x1FFFFFFF] = resolved;
+    }
+
+    bool TextureCache::ResolveStillValid(uint32_t address, Resolved& resolved, int frame)
+    {
+        if (resolved.checkedFrame == frame)
+            return true;
+        resolved.checkedFrame = frame;
+        if (MemoryFingerprint(address, resolved.width, resolved.height, resolved.format) == resolved.memoryFingerprint)
+            return true;
+        // The title has written other data over this address since the resolve.
+        static const bool trace = std::getenv("HC09_GPU_STATS") != nullptr;
+        if (trace)
+            std::fprintf(stderr, "[texture] resolve at 0x%08X (%ux%u) is stale: the memory now holds other data (frame %d)\n", address,
+                resolved.width, resolved.height, frame);
+        staleResolves_++;
+        ForgetResolved(address);
+        return false;
+    }
+
+    int TextureCache::ResolvedLastUse(uint32_t address) const
+    {
+        auto it = resolved_.find(address & 0x1FFFFFFF);
+        return it == resolved_.end() ? -1 : it->second.lastUsedFrame;
+    }
+
+    void TextureCache::ForgetResolved(uint32_t address)
+    {
+        address &= 0x1FFFFFFF;
+        resolved_.erase(address);
+        if (auto it = composed_.find(address); it != composed_.end())
+        {
+            retired_.emplace_back(FrameNumber(), std::move(it->second.resource));
+            composed_.erase(it);
+        }
+    }
+
+    void TextureCache::Evict(int frame)
+    {
+        std::erase_if(retired_, [&](const auto& item) { return frame - item.first > 4; });
+        if (frame % 300 != 0)
+            return;
+        // Resources may still be referenced by command lists in flight: retire, release later.
+        for (auto it = entries_.begin(); it != entries_.end();)
+        {
+            if (frame - it->second.hashedFrame > kEvictAfterFrames)
+            {
+                retired_.emplace_back(frame, std::move(it->second.resource));
+                it = entries_.erase(it);
+                evictedTextures_++;
+            }
+            else
+            {
+                ++it;
+            }
+        }
     }
 
     ID3D12Resource* TextureCache::FindResolved(uint32_t address, uint32_t* width, uint32_t* height) const
@@ -187,8 +276,9 @@ namespace hc09::gpu
         for (uint32_t level = 1; level < wantedLevels; level++)
         {
             auto found = resolved_.find(address);
-            if (found == resolved_.end() || found->second.format != base.format)
+            if (found == resolved_.end() || found->second.format != base.format || !ResolveStillValid(found->first, found->second, FrameNumber()))
                 break;
+            found->second.lastUsedFrame = FrameNumber();
             levels.push_back(&found->second);
             uint32_t pitch = (std::max((1u << log2W) >> level, 1u) + blockSize - 1) / blockSize;
             uint32_t rows = (std::max((1u << log2H) >> level, 1u) + blockSize - 1) / blockSize;
@@ -267,8 +357,9 @@ namespace hc09::gpu
         if ((format == 22 || format == 23) && fetch.dimension() == 1)
         {
             auto it = resolved_.find(fetch.baseAddress() & 0x1FFFFFFF);
-            if (it == resolved_.end())
+            if (it == resolved_.end() || !ResolveStillValid(it->first, it->second, FrameNumber()))
                 return false;
+            it->second.lastUsedFrame = FrameNumber();
             out = {};
             out.width = it->second.width;
             out.height = it->second.height;
@@ -315,9 +406,23 @@ namespace hc09::gpu
         }
         out.view.Shader4ComponentMapping = EncodeMapping(fetch.swizzle(), info.remap);
 
-        // Render-to-texture: a resolve wrote this address.
-        if (auto it = resolved_.find(fetch.baseAddress() & 0x1FFFFFFF); !cube && !volume && !stacked && it != resolved_.end())
+        // Render-to-texture: a resolve wrote this address. A fetch with another texel size (or a
+        // compressed format) cannot be reading that resolve; neither can one after the title has
+        // loaded other data over it.
+        auto it = resolved_.find(fetch.baseAddress() & 0x1FFFFFFF);
+        if (it != resolved_.end() && (cube || volume || stacked || info.compressed || info.blockBytes != ResolveTexelBytes(it->second.format)))
         {
+            mismatchedResolveHits_++;
+            static std::set<uint64_t> logged;
+            const uint64_t id = (uint64_t(it->first) << 32) ^ (uint64_t(width) << 16) ^ height ^ (uint64_t(format) << 26);
+            if (std::getenv("HC09_GPU_STATS") && logged.size() < 40 && logged.insert(id).second)
+                std::fprintf(stderr, "[texture] fetch 0x%08X fmt %u %ux%u does not match the resolve there (%ux%u dxgi %d); sampling memory (frame %d)\n",
+                    fetch.baseAddress(), format, width, height, it->second.width, it->second.height, int(it->second.format), FrameNumber());
+            it = resolved_.end();
+        }
+        if (it != resolved_.end() && ResolveStillValid(it->first, it->second, FrameNumber()))
+        {
+            it->second.lastUsedFrame = FrameNumber();
             out.resource = it->second.resource;
             out.view.Format = it->second.format;
             // The target holds red, green, blue, alpha; memory has red and blue exchanged when

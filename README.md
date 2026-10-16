@@ -198,7 +198,11 @@ tag, re-patches XenonRecomp if the pin changed, and recompiles and rebuilds the 
   or patch them; the original stays callable as `__imp__sub_<address>`.
 - `set HC09_GPU_STATS=1` prints command-processor throughput, packet counts and its time split
   (draw / swap / idle) every 2 s, plus the share of wall time in each phase of a draw and
-  texture-cache counters.
+  texture-cache counters, and a `[gpu] memory` line: video memory in use, cached textures and
+  resolve targets (with how many were released after a minute unused), resolves dropped as stale
+  (the title loaded other data over their memory) and fetches a resolve could not serve.
+- `set HC09_USERDATA=C:\path\folder` keeps saves and the cache in another folder (e.g. a fresh
+  profile for `HC09_PRESS` scripts, which assume the first-start prompts).
 - `set HC09_DUMP_FRAME=300` traces every packet and draw of frame 300;
   `HC09_FIND_DWORDS=<hex,...>` searches guest memory for a dword sequence at that frame and
   `HC09_FIND_STRING=<text>` for that text (case-insensitive), printing the surrounding characters.

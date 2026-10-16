@@ -319,6 +319,16 @@ namespace hc09::gpu
         list_->SetDescriptorHeaps(2, heaps);
     }
 
+    uint64_t D3D12Context::VideoMemoryUsage() const
+    {
+        ComPtr<IDXGIAdapter3> adapter;
+        DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+        if (!factory_ || FAILED(factory_->EnumAdapterByLuid(device_->GetAdapterLuid(), IID_PPV_ARGS(&adapter))) ||
+            FAILED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)))
+            return 0;
+        return info.CurrentUsage;
+    }
+
     UploadAllocation D3D12Context::Upload(uint64_t size, uint64_t alignment)
     {
         uploadOffset_ = (uploadOffset_ + alignment - 1) & ~(alignment - 1);

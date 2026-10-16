@@ -69,6 +69,9 @@ namespace hc09::gpu
         // Submits recorded work and waits for the GPU to go idle.
         void Flush();
 
+        // Bytes of local video memory this process uses (DXGI budget query), or 0 if unknown.
+        uint64_t VideoMemoryUsage() const;
+
     private:
         void BeginFrame();
         void WaitForFrame(uint32_t frame);

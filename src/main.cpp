@@ -210,7 +210,9 @@ int main(int argc, char** argv)
         std::snprintf(message, sizeof(message), "Failed to load the XEX header from %s.", xexPath);
         return StartupFailure(message);
     }
-    if (!hc09::InitializeVfs(isoPath, "build/userdata"))
+    // HC09_USERDATA=<folder>: saves and cache elsewhere (e.g. a fresh profile for scripted tests).
+    const char* userData = std::getenv("HC09_USERDATA") ? std::getenv("HC09_USERDATA") : "build/userdata";
+    if (!hc09::InitializeVfs(isoPath, userData))
     {
         std::snprintf(message, sizeof(message), "Failed to open the game disc image:\n%s\n\nRun HC09Setup.exe again to select it.",
             isoPath.string().c_str());

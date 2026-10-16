@@ -73,6 +73,25 @@ namespace hc09::gpu
             bool swapRedBlue = false);
         ID3D12Resource* FindResolved(uint32_t address, uint32_t* width = nullptr, uint32_t* height = nullptr) const;
 
+        // Last frame a fetch sampled the resolve at `address` (-1 if none or unknown).
+        int ResolvedLastUse(uint32_t address) const;
+        // Drops the record of a resolve (its target is being released).
+        void ForgetResolved(uint32_t address);
+        // Releases textures no draw has sampled for a while (called once per frame).
+        void Evict(int frame);
+
+        // HC09_GPU_STATS: cache sizes, and fetches that found a resolve whose size or format differ
+        // (the address was resolved to earlier, and the title now keeps a different texture there).
+        struct Stats
+        {
+            size_t textures = 0;
+            size_t resolved = 0;
+            uint64_t mismatchedResolveHits = 0;  // fetches with a texel size the resolve cannot provide
+            uint64_t staleResolves = 0;          // resolves dropped because the title reused their memory
+            uint64_t evictedTextures = 0;
+        };
+        Stats GetStats() const { return { entries_.size(), resolved_.size(), mismatchedResolveHits_, staleResolves_, evictedTextures_ }; }
+
     private:
         struct Entry
         {
@@ -90,7 +109,15 @@ namespace hc09::gpu
             uint32_t width;
             uint32_t height;
             bool swapRedBlue;
+            // Resolves are not written back to guest memory, so the memory under a resolve keeps
+            // whatever it held. A fingerprint of it, taken at each resolve, shows when the title
+            // has since loaded something else there (the resolve is then stale).
+            uint64_t memoryFingerprint = 0;
+            int checkedFrame = -1;
+            int lastUsedFrame = -1;
         };
+        // True when the resolve still describes the memory at `address` (checked once per frame).
+        bool ResolveStillValid(uint32_t address, Resolved& resolved, int frame);
 
         // A render-to-texture whose mip levels the title also renders (each resolved to its place
         // in the mip area): the base and those levels copied into one texture with a mip chain.
@@ -110,5 +137,8 @@ namespace hc09::gpu
         std::unordered_map<uint32_t, Composed> composed_;
         std::vector<std::pair<int, ComPtr<ID3D12Resource>>> retired_;  // (frame replaced, resource)
         bool loggedUnsupported_[64]{};
+        uint64_t mismatchedResolveHits_ = 0;
+        uint64_t staleResolves_ = 0;
+        uint64_t evictedTextures_ = 0;
     };
 }
