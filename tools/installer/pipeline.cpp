@@ -197,6 +197,15 @@ namespace hc09::setup
         return text.str().find("project(HC09Recomp") != std::string::npos;
     }
 
+    bool IsReleaseInstall(const std::filesystem::path& folder)
+    {
+        // Setup checks out a release tag, leaving HEAD detached (a commit id); a development
+        // clone's HEAD names a branch ("ref: refs/heads/...").
+        std::ifstream head(folder / L".git" / L"HEAD");
+        std::string line;
+        return IsProjectFolder(folder) && std::getline(head, line) && line.rfind("ref:", 0) != 0;
+    }
+
     void Pipeline::Log(const std::wstring& line)
     {
         if (logPath_.empty())
@@ -341,10 +350,13 @@ namespace hc09::setup
     {
         const std::filesystem::path& root = options_.root;
         const std::wstring repository = L"https://github.com/" + Widen(kRepository) + L".git";
-        if (options_.update)
+        // Updating: requested (--update), or setup run again on an installation it made earlier.
+        if (options_.update || IsReleaseInstall(root))
         {
             if (!IsProjectFolder(root))
                 return Fail(root.wstring() + L" does not contain an HC09 installation.");
+            if (!options_.update)
+                Log(L"Updating the existing installation in " + root.wstring());
             const auto tag = LatestReleaseTag(15000);
             if (!tag)
                 return Fail(L"The latest release could not be determined (no connection to GitHub?).");
@@ -356,7 +368,7 @@ namespace hc09::setup
         }
         if (IsProjectFolder(root))
         {
-            Log(L"Using the source already in " + root.wstring());
+            Log(L"Using the development copy already in " + root.wstring() + L" as it is (it is on a branch)");
             return true;
         }
         std::error_code ec;

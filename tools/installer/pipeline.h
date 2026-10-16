@@ -47,6 +47,9 @@ namespace hc09::setup
 
     // True when `folder` already holds this project's source (a git clone).
     bool IsProjectFolder(const std::filesystem::path& folder);
+    // True when `folder` is an installation setup made (a release checkout, not a development
+    // branch): running setup on it again updates it to the latest release.
+    bool IsReleaseInstall(const std::filesystem::path& folder);
 
     struct PipelineCallbacks
     {

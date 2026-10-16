@@ -1,6 +1,6 @@
 # NFL Head Coach 09 — static recompilation
 
-Version 0.6.1
+Version 0.6.2
 
 A native Windows port of NFL Head Coach 09 (Xbox 360, title ID `45410841`), built by
 statically recompiling the game's PowerPC executable to C++ with
@@ -28,8 +28,10 @@ and run it. The wizard:
 
 The game is built on your PC because the recompiled executable is derived from the game's own code,
 which this project does not distribute. The disc image stays where it is: the game reads its data
-from it while you play. Settings live in `hc09.ini` in the install folder (`IsoPath`, `AutoUpdate`);
-run setup again to change the disc image. The setup log is `%TEMP%\HC09Setup.log`.
+from it while you play. Settings live in `hc09.ini` in the install folder (`IsoPath`, `AutoUpdate`).
+Running setup again and choosing the same folder updates that installation to the latest release
+(keeping your saves), and is also how to change the disc image; a development clone on a git branch
+is built as it is instead. The setup log is `%TEMP%\HC09Setup.log`.
 
 ## Status
 

@@ -390,8 +390,10 @@ namespace
         std::error_code ec;
         if (folder.empty() || !folder.is_absolute())
             info = L"Enter a full folder path, such as C:\\Games\\HC09Recomp.";
+        else if (IsReleaseInstall(folder))
+            info = L"An existing installation was found. Setup will update it to the latest release and rebuild it; your saves are kept.";
         else if (IsProjectFolder(folder))
-            info = L"This folder already holds the project's source; it will be used as it is.";
+            info = L"This folder holds a development copy of the project (a git branch); it will be built as it is.";
         else if (std::filesystem::exists(folder, ec) && !std::filesystem::is_empty(folder, ec))
             info = L"This folder is not empty. Choose a new or empty folder.";
         else
@@ -458,6 +460,9 @@ namespace
                     SetResult(dialog, -1);
                     return TRUE;
                 }
+                // Choosing an existing installation keeps its update preference unless changed later.
+                if (folder.lexically_normal() != g.options.root && IsProjectFolder(folder))
+                    g.options.autoUpdate = LoadSettings(folder).autoUpdate;
                 g.options.root = folder.lexically_normal();
                 return TRUE;
             }
@@ -542,6 +547,8 @@ namespace
             switch (reinterpret_cast<NMHDR*>(lParam)->code)
             {
             case PSN_SETACTIVE:
+                // Reflects an existing installation's setting when its folder was chosen.
+                CheckDlgButton(dialog, IDC_OPT_UPDATES, g.options.autoUpdate ? BST_CHECKED : BST_UNCHECKED);
                 SetButtons(dialog, PSWIZB_BACK | PSWIZB_NEXT);
                 return TRUE;
             case PSN_WIZNEXT:
@@ -558,7 +565,7 @@ namespace
     {
         if (message == WM_APP_NEXT_TEXT)
         {
-            SetNextLabel(dialog, g.updateMode ? L"&Update" : L"&Install");
+            SetNextLabel(dialog, g.updateMode || IsReleaseInstall(g.options.root) ? L"&Update" : L"&Install");
             return TRUE;
         }
         if (message != WM_NOTIFY)
@@ -576,12 +583,18 @@ namespace
             }
             else
             {
-                text = L"Install folder:\r\n    " + g.options.root.wstring() + L"\r\n\r\n";
+                const bool existing = IsReleaseInstall(g.options.root);
+                HWND sheet = GetParent(dialog);
+                PropSheet_SetHeaderTitle(sheet, PropSheet_HwndToIndex(sheet, dialog), existing ? L"Ready to Update" : L"Ready to Install");
+                text = (existing ? L"Update the existing installation in:\r\n    " : L"Install folder:\r\n    ") + g.options.root.wstring() + L"\r\n\r\n";
                 text += L"Disc image:\r\n    " + g.options.iso.wstring() + L"\r\n\r\n";
                 text += L"Automatic update checks: " + std::wstring(g.options.autoUpdate ? L"on" : L"off") + L"\r\n";
                 text += L"Desktop shortcut: " + std::wstring(g.options.desktopShortcut ? L"yes" : L"no") + L"\r\n\r\n";
-                text += L"Setup will download the project and its build tools (XenonRecomp, FFmpeg), import the game's "
-                        L"executable from the disc image, recompile it and build HC09.exe.";
+                text += existing
+                    ? L"Setup will move the source to the latest release, import the game's executable from the disc image, "
+                      L"recompile it and rebuild HC09.exe. Your saves (build\\userdata) are kept."
+                    : L"Setup will download the project and its build tools (XenonRecomp, FFmpeg), import the game's "
+                      L"executable from the disc image, recompile it and build HC09.exe.";
             }
             SetDlgItemTextW(dialog, IDC_READY_TEXT, text.c_str());
             SetButtons(dialog, (g.updateMode ? 0 : PSWIZB_BACK) | PSWIZB_NEXT);
@@ -682,7 +695,7 @@ namespace
                 {
                     // Try again after a failure.
                     SetButtons(dialog, 0);
-                    SetNextLabel(dialog, g.updateMode ? L"&Update" : L"&Install");
+                    SetNextLabel(dialog, g.updateMode || IsReleaseInstall(g.options.root) ? L"&Update" : L"&Install");
                     StartPipeline(dialog);
                     SetResult(dialog, -1);
                 }
