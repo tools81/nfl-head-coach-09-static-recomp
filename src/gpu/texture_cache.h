@@ -39,7 +39,8 @@ namespace hc09::gpu
         uint32_t anisoFilter() const { return (words[3] >> 25) & 7; }  // 0 off, n: up to 2^(n-1):1
         uint32_t mipMinLevel() const { return (words[4] >> 2) & 0xF; }
         uint32_t mipMaxLevel() const { return (words[4] >> 6) & 0xF; }
-        int32_t lodBias() const { return int32_t(words[4] << 12) >> 22; }  // signed, 1/32 steps
+        // Bits 10-11 are the mag/min anisotropic walk flags; the signed bias (1/32 steps) is bits 12-21.
+        int32_t lodBias() const { return int32_t(words[4] << 10) >> 22; }
         bool packedMips() const { return (words[5] >> 11) & 1; }        // small levels share one tile
         uint32_t borderColor() const { return words[5] & 3; }           // 0 transparent black, 1 white, 2/3 opaque black
         uint32_t mipAddress() const { return words[5] & 0xFFFFF000; }   // physical; levels 1..n

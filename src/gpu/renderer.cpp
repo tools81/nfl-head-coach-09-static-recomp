@@ -101,6 +101,12 @@ namespace hc09::gpu
 
         // Can also be set at run time by HC09_DUMP_AFTER_RESOLVE.
         int g_dumpFrame = std::getenv("HC09_DUMP_FRAME") ? std::atoi(std::getenv("HC09_DUMP_FRAME")) : -1;
+        // HC09_DUMP_FRAME=<first>/<every>: dump that frame and every <every>th one after it.
+        const int g_dumpEvery = [] {
+            const char* spec = std::getenv("HC09_DUMP_FRAME");
+            const char* slash = spec ? std::strchr(spec, '/') : nullptr;
+            return slash ? std::max(std::atoi(slash + 1), 0) : 0;
+        }();
         // HC09_SCREENSHOT=<frame>[,<frame>...]: frames to save as build/screenshot_<frame>.bmp
         const std::vector<int> g_screenshotFrames = [] {
             std::vector<int> frames;
@@ -2529,6 +2535,8 @@ float ps_main(float4 position : SV_Position) : SV_Target
         }
         g_frame++;
         g_drawInFrame = 0;
+        if (g_dumpEvery > 0 && g_dumpFrame >= 0 && g_frame > g_dumpFrame)
+            g_dumpFrame += g_dumpEvery;
         if (Renderer* renderer = GetRenderer())
             renderer->Swap(frontBuffer);
     }

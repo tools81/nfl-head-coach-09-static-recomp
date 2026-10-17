@@ -1,6 +1,6 @@
 # NFL Head Coach 09 — static recompilation
 
-Version 0.6.2
+Version 0.6.3
 
 A native Windows port of NFL Head Coach 09 (Xbox 360, title ID `45410841`), built by
 statically recompiling the game's PowerPC executable to C++ with
@@ -205,7 +205,7 @@ tag, re-patches XenonRecomp if the pin changed, and recompiles and rebuilds the 
   (the title loaded other data over their memory) and fetches a resolve could not serve.
 - `set HC09_USERDATA=C:\path\folder` keeps saves and the cache in another folder (e.g. a fresh
   profile for `HC09_PRESS` scripts, which assume the first-start prompts).
-- `set HC09_DUMP_FRAME=300` traces every packet and draw of frame 300;
+- `set HC09_DUMP_FRAME=300` traces every packet and draw of frame 300 (`13500/150`: frame 13500 and every 150th after it);
   `HC09_FIND_DWORDS=<hex,...>` searches guest memory for a dword sequence at that frame and
   `HC09_FIND_STRING=<text>` for that text (case-insensitive), printing the surrounding characters.
   Frame dumps also log each draw's shader bool constants (`[frame]   bools`).
@@ -255,6 +255,10 @@ tag, re-patches XenonRecomp if the pin changed, and recompiles and rebuilds the 
   (the command processor is 0xC0, the XMA decoder 0xA0).
 - `set HC09_DUMP_MEMORY=1AD1D000:8000` (with `HC09_DUMP_FRAME`) saves raw physical memory
   as `build/mem_<addr>.bin`; `HC09_NO_E_WINDOW=1` leaves the 0xE0000000 view unmapped.
+- `set HC09_DUMP_MIPS=256x256f2` saves every mip level of textures of that size and Xenos format,
+  as stored by the game (untiled, byte-swapped), to `build/mip_<base>_<level>_<w>x<h>.bin`.
+  `HC09_ORIGINAL_MIPS=1` keeps the stored mip levels of textures whose levels are not downscales of
+  level 0 (such as the field's grass noise); by default those are rebuilt from level 0 (`[gpu] texture ... rebuilding them`).
 
 ## Analysis tools
 

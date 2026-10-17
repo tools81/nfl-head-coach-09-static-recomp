@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -26,6 +27,19 @@ namespace hc09::gpu
             bool compressed;
             uint8_t remap[4];      // DXGI component holding Xenos component X, Y, Z, W
         };
+
+        // True when a comma-separated list of "<width>x<height>f<format>" entries names this texture.
+        bool MatchesTextureSpec(const char* spec, uint32_t width, uint32_t height, uint32_t format)
+        {
+            if (!spec)
+                return false;
+            char wanted[32];
+            const int length = std::snprintf(wanted, sizeof(wanted), "%ux%uf%u", width, height, format);
+            for (const char* at = std::strstr(spec, wanted); at; at = std::strstr(at + 1, wanted))
+                if ((at == spec || at[-1] == ',') && (at[length] == 0 || at[length] == ','))
+                    return true;
+            return false;
+        }
 
         bool LookupFormat(uint32_t format, FormatInfo& info)
         {
@@ -609,6 +623,32 @@ namespace hc09::gpu
         {
             g_textureUploads++;
             entry.contentHash = hash;
+            // HC09_DUMP_MIPS=<width>x<height>f<format>[,...]: save every level of matching textures as
+            // uploaded (untiled, byte-swapped, rows packed) to build/mip_<base>_<level>_<w>x<h>.bin.
+            std::FILE* mipDump[16]{};
+            static const char* mipDumpSpec = std::getenv("HC09_DUMP_MIPS");
+            if (MatchesTextureSpec(mipDumpSpec, width, height, fetch.format()))
+            {
+                for (uint32_t level = 0; level < levels && level < 16; level++)
+                {
+                    char path[96];
+                    std::snprintf(path, sizeof(path), "build/mip_%08X_%u_%ux%u.bin", fetch.baseAddress(), level,
+                        layouts[level].blocksWide, layouts[level].blocksHigh);
+                    mipDump[level] = std::fopen(path, "wb");
+                }
+            }
+            // Some textures (the field's grass detail noise) store levels 1..n that are not downscales of
+            // level 0 but fresh full-contrast noise, which makes distant surfaces sparkle and repeat.
+            // For 8-bit-per-channel 2D textures, level 1 is compared with a box-filtered level 0, and
+            // when they are unrelated every level is rebuilt from level 0 instead.
+            // HC09_ORIGINAL_MIPS=1 keeps the stored levels.
+            static const bool originalMips = std::getenv("HC09_ORIGINAL_MIPS") != nullptr;
+            const bool rebuildCandidate = !originalMips && !info.compressed && levels > 1 && faces == 1 && !volume && !stacked &&
+                (info.dxgi == DXGI_FORMAT_R8_UNORM || info.dxgi == DXGI_FORMAT_R8G8_UNORM || info.dxgi == DXGI_FORMAT_R8G8B8A8_UNORM);
+            bool rebuild = false;
+            std::vector<uint8_t> previous;  // the level just uploaded (rows packed), for candidates
+            std::vector<uint8_t> filtered;  // box-filtered previous level
+            uint32_t previousWide = 0, previousHigh = 0;
             Transition(list, entry.resource.Get(), entry.state, D3D12_RESOURCE_STATE_COPY_DEST);
             entry.state = D3D12_RESOURCE_STATE_COPY_DEST;
             for (uint32_t faceIndex = 0; faceIndex < faces; faceIndex++)
@@ -650,6 +690,65 @@ namespace hc09::gpu
                                 std::memcpy(row + i, &word, 4);
                             }
                         }
+                        if (faceIndex == 0 && level < 16 && mipDump[level])
+                            std::fwrite(row, 1, rowBytes, mipDump[level]);
+                    }
+                    if (rebuildCandidate && (level == 0 || rebuild || level == 1))
+                    {
+                        if (level > 0)
+                        {
+                            // Average each 2x2 footprint of the previous level (edges clamp on odd sizes).
+                            filtered.resize(uint64_t(rowBytes) * layout.blocksHigh);
+                            for (uint32_t y = 0; y < layout.blocksHigh; y++)
+                            {
+                                const uint32_t y0 = std::min(y * 2, previousHigh - 1), y1 = std::min(y * 2 + 1, previousHigh - 1);
+                                for (uint32_t x = 0; x < layout.blocksWide; x++)
+                                {
+                                    const uint32_t x0 = std::min(x * 2, previousWide - 1), x1 = std::min(x * 2 + 1, previousWide - 1);
+                                    for (uint32_t c = 0; c < unit; c++)
+                                    {
+                                        const auto at = [&](uint32_t px, uint32_t py) {
+                                            return uint32_t(previous[(uint64_t(py) * previousWide + px) * unit + c]);
+                                        };
+                                        filtered[(uint64_t(y) * layout.blocksWide + x) * unit + c] =
+                                            uint8_t((at(x0, y0) + at(x1, y0) + at(x0, y1) + at(x1, y1) + 2) / 4);
+                                    }
+                                }
+                            }
+                            if (level == 1)
+                            {
+                                // Correlate the stored level 1 with the filtered level 0, per channel; any
+                                // channel with real contrast that does not match marks the chain unrelated.
+                                for (uint32_t c = 0; c < unit && !rebuild; c++)
+                                {
+                                    double sumA = 0, sumB = 0, sumAA = 0, sumBB = 0, sumAB = 0;
+                                    const uint64_t count = uint64_t(layout.blocksWide) * layout.blocksHigh;
+                                    for (uint32_t y = 0; y < layout.blocksHigh; y++)
+                                        for (uint32_t x = 0; x < layout.blocksWide; x++)
+                                        {
+                                            const double a = filtered[(uint64_t(y) * layout.blocksWide + x) * unit + c];
+                                            const double b = dest[uint64_t(y) * rowPitch + x * unit + c];
+                                            sumA += a, sumB += b, sumAA += a * a, sumBB += b * b, sumAB += a * b;
+                                        }
+                                    const double varA = sumAA - sumA * sumA / count, varB = sumBB - sumB * sumB / count;
+                                    const double cov = sumAB - sumA * sumB / count;
+                                    // Standard deviation above 8 (of 255) in both, correlation under 0.25.
+                                    if (count >= 64 && varA > 64.0 * count && varB > 64.0 * count && cov < 0.25 * std::sqrt(varA * varB))
+                                        rebuild = true;
+                                }
+                                if (rebuild)
+                                    std::fprintf(stderr, "[gpu] texture 0x%08X (%ux%u format %u): stored mips do not match level 0; rebuilding them\n",
+                                        fetch.baseAddress(), width, height, fetch.format());
+                            }
+                            if (rebuild)
+                                for (uint32_t y = 0; y < layout.blocksHigh; y++)
+                                    std::memcpy(dest + uint64_t(y) * rowPitch, filtered.data() + uint64_t(y) * rowBytes, rowBytes);
+                        }
+                        previous.resize(uint64_t(rowBytes) * layout.blocksHigh);
+                        for (uint32_t y = 0; y < layout.blocksHigh; y++)
+                            std::memcpy(previous.data() + uint64_t(y) * rowBytes, dest + uint64_t(y) * rowPitch, rowBytes);
+                        previousWide = layout.blocksWide;
+                        previousHigh = layout.blocksHigh;
                     }
 
                     D3D12_TEXTURE_COPY_LOCATION dst{ entry.resource.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
@@ -662,6 +761,9 @@ namespace hc09::gpu
                     list->CopyTextureRegion(&dst, 0, 0, (volume || stacked) ? faceIndex : 0, &src, nullptr);
                 }
             }
+            for (std::FILE* file : mipDump)
+                if (file)
+                    std::fclose(file);
         }
         Transition(list, entry.resource.Get(), entry.state, kShaderReadable);
         entry.state = kShaderReadable;
