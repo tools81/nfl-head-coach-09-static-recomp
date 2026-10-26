@@ -1323,8 +1323,8 @@ float ps_main(float4 position : SV_Position) : SV_Target
                 // memory once as build/texmem_<base>_f<format>_<width>x<height>_p<pitch>.bin.
                 if (g_frame == g_dumpFrame && std::getenv("HC09_DUMP_TEXTURE_MEMORY"))
                 {
-                    static std::set<uint32_t> saved;
-                    if (saved.insert(fetch.baseAddress()).second)
+                    static std::set<uint64_t> saved;  // once per texture per dumped frame
+                    if (saved.insert((uint64_t(g_frame) << 32) | fetch.baseAddress()).second)
                     {
                         const bool compressed = fetch.format() == 18 || fetch.format() == 19 || fetch.format() == 20 ||
                             fetch.format() == 49 || fetch.format() == 59;
@@ -1332,7 +1332,7 @@ float ps_main(float4 position : SV_Position) : SV_Target
                         const uint32_t pitchUnits = (std::max(fetch.pitchTexels(), fetch.width()) / (compressed ? 4 : 1) + 31) & ~31u;
                         const uint32_t rows = ((fetch.height() / (compressed ? 4 : 1)) + 31) & ~31u;
                         char path[96];
-                        std::snprintf(path, sizeof(path), "build/texmem_%08X_f%u_%ux%u_p%u.bin", fetch.baseAddress(), fetch.format(),
+                        std::snprintf(path, sizeof(path), "build/texmem_%d_%08X_f%u_%ux%u_p%u.bin", g_frame, fetch.baseAddress(), fetch.format(),
                             fetch.width(), fetch.height(), pitchUnits);
                         if (FILE* file = std::fopen(path, "wb"))
                         {

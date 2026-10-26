@@ -1,5 +1,7 @@
 #include "gpu/d3d12_context.h"
 
+#include "common/edition.h"
+
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -95,7 +97,7 @@ namespace hc09::gpu
 
                 RECT rect{ 0, 0, LONG(width), LONG(height) };
                 AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
-                HWND window = CreateWindowExW(0, windowClass.lpszClassName, L"NFL Head Coach 09", WS_OVERLAPPEDWINDOW,
+                HWND window = CreateWindowExW(0, windowClass.lpszClassName, edition::kWindowTitle, WS_OVERLAPPEDWINDOW,
                     CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left, rect.bottom - rect.top, nullptr, nullptr,
                     windowClass.hInstance, nullptr);
                 ShowWindow(window, SW_SHOW);

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(HC09Recomp VERSION 0.6.3 LANGUAGES C CXX)
+project(HC09Recomp VERSION 0.7.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -32,8 +32,11 @@ target_compile_options(HC09RecompLib PRIVATE
     -Wno-unused-but-set-variable
     -Wno-unused-function)
 
-add_executable(HC09
+# Host sources, built twice: HC09.exe (the original game) and HC27.exe (the same game with the
+# modern roster and coaches from tools/roster_import; see src/common/edition.h).
+set(HC09_HOST_SOURCES
     src/main.cpp
+    src/common/edition.cpp
     src/common/settings.cpp
     src/common/updates.cpp
     src/memory.cpp
@@ -43,6 +46,7 @@ add_executable(HC09
     src/gpu/command_processor.cpp
     src/gpu/d3d12_context.cpp
     src/gpu/hlsl_translator.cpp
+    src/gpu/swappable_images.cpp
     src/gpu/texture_cache.cpp
     src/gpu/renderer.cpp
     src/gpu/shaders.cpp
@@ -70,20 +74,25 @@ add_executable(HC09
     src/kernel/xam_notify.cpp
     src/kernel/xam_user.cpp
     src/kernel/xex.cpp)
-target_include_directories(HC09 PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/thirdparty/XenonRecomp/thirdparty/xxHash)
-target_compile_definitions(HC09 PRIVATE HC09_VERSION="${PROJECT_VERSION}" NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
-target_compile_options(HC09 PRIVATE /arch:AVX /clang:-fno-strict-aliasing -gline-tables-only)
-target_link_options(HC09 PRIVATE /DEBUG)
-target_link_libraries(HC09 PRIVATE HC09RecompLib dbghelp xinput d3d12 dxgi d3dcompiler ole32 winmm winhttp shell32)
 
 # FFmpeg (LGPL shared build in thirdparty/ffmpeg) for XMA audio decoding.
 set(HC09_FFMPEG ${CMAKE_SOURCE_DIR}/thirdparty/ffmpeg)
-target_include_directories(HC09 PRIVATE ${HC09_FFMPEG}/include)
-target_link_libraries(HC09 PRIVATE ${HC09_FFMPEG}/lib/avcodec.lib ${HC09_FFMPEG}/lib/avutil.lib)
-add_custom_command(TARGET HC09 POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${HC09_FFMPEG}/bin/avcodec-62.dll ${HC09_FFMPEG}/bin/avutil-60.dll ${HC09_FFMPEG}/bin/swresample-6.dll
-        $<TARGET_FILE_DIR:HC09>)
+
+foreach(game HC09 HC27)
+    add_executable(${game} ${HC09_HOST_SOURCES})
+    target_include_directories(${game} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/thirdparty/XenonRecomp/thirdparty/xxHash
+        ${HC09_FFMPEG}/include)
+    target_compile_definitions(${game} PRIVATE HC09_VERSION="${PROJECT_VERSION}" NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(${game} PRIVATE /arch:AVX /clang:-fno-strict-aliasing -gline-tables-only)
+    target_link_options(${game} PRIVATE /DEBUG)
+    target_link_libraries(${game} PRIVATE HC09RecompLib dbghelp xinput d3d12 dxgi d3dcompiler ole32 windowscodecs winmm winhttp shell32
+        ${HC09_FFMPEG}/lib/avcodec.lib ${HC09_FFMPEG}/lib/avutil.lib)
+    add_custom_command(TARGET ${game} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${HC09_FFMPEG}/bin/avcodec-62.dll ${HC09_FFMPEG}/bin/avutil-60.dll ${HC09_FFMPEG}/bin/swresample-6.dll
+            $<TARGET_FILE_DIR:${game}>)
+endforeach()
+target_compile_definitions(HC27 PRIVATE HC09_EDITION_HC27)
 
 # Standalone Xenos shader disassembler for dumped microcode (HC09_DUMP_SHADERS).
 add_executable(XenosDisasm tools/xenos_disasm.cpp src/gpu/ucode.cpp src/gpu/hlsl_translator.cpp)

@@ -8,3 +8,10 @@ thirdparty/ffmpeg/
 __pycache__/
 *.pyc
 hc09.ini
+
+# User-supplied roster data (EA ratings, game roster saves, player images) for tools/roster_import
+tools/roster_import/*.csv
+tools/roster_import/ROSTER-*
+tools/roster_import/data/
+textures/
+hc27/

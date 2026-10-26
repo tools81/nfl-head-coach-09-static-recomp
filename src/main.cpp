@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "memory.h"
+#include "common/edition.h"
 #include "common/settings.h"
 #include "common/updates.h"
 #include "debug/stack_dump.h"
@@ -155,7 +156,7 @@ namespace
             "Version %s of the NFL Head Coach 09 recompilation is available (installed: %s).\n\n"
             "Update now? The updater downloads the new source and rebuilds the game, which takes a few minutes.",
             tag->c_str(), HC09_VERSION);
-        if (MessageBoxA(nullptr, message, "NFL Head Coach 09", MB_YESNO | MB_ICONINFORMATION) != IDYES)
+        if (MessageBoxA(nullptr, message, hc09::edition::kTitle, MB_YESNO | MB_ICONINFORMATION) != IDYES)
             return false;
         const std::wstring folder = std::filesystem::current_path().wstring();
         const std::wstring updater = folder + L"\\build\\installer\\HC09Setup.exe";
@@ -163,7 +164,7 @@ namespace
         if (reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", updater.c_str(), arguments.c_str(), folder.c_str(), SW_SHOWNORMAL)) <= 32)
         {
             MessageBoxA(nullptr, "The updater (build\\installer\\HC09Setup.exe) could not be started. Download the latest "
-                "HC09Setup.exe from the project's GitHub releases and run it to update.", "NFL Head Coach 09", MB_OK | MB_ICONWARNING);
+                "HC09Setup.exe from the project's GitHub releases and run it to update.", hc09::edition::kTitle, MB_OK | MB_ICONWARNING);
             return false;
         }
         return true;
@@ -174,14 +175,14 @@ namespace
     int StartupFailure(const char* message)
     {
         std::fprintf(stderr, "%s\n", message);
-        MessageBoxA(nullptr, message, "NFL Head Coach 09", MB_OK | MB_ICONERROR);
+        MessageBoxA(nullptr, message, hc09::edition::kTitle, MB_OK | MB_ICONERROR);
         return EXIT_FAILURE;
     }
 }
 
 int main(int argc, char** argv)
 {
-    std::fprintf(stderr, "[boot] HC09 recomp " HC09_VERSION "\n");
+    std::fprintf(stderr, "[boot] %s recomp " HC09_VERSION "\n", hc09::edition::kName);
     // 1 ms timer resolution: guest waits and our short sleeps otherwise last ~15 ms.
     timeBeginPeriod(1);
     FindProjectFolder();
@@ -201,8 +202,8 @@ int main(int argc, char** argv)
     if (!LoadImage(imagePath))
     {
         std::snprintf(message, sizeof(message),
-            "Failed to load %s.\n\nRun HC09.exe from the project folder (or anywhere inside it), "
-            "after installing with HC09Setup.exe (or extracting the game with tools/xexdecrypt.py).", imagePath);
+            "Failed to load %s.\n\nRun %s.exe from the project folder (or anywhere inside it), "
+            "after installing with HC09Setup.exe (or extracting the game with tools/xexdecrypt.py).", imagePath, hc09::edition::kName);
         return StartupFailure(message);
     }
     if (!hc09::LoadXexHeader(xexPath))
@@ -211,13 +212,15 @@ int main(int argc, char** argv)
         return StartupFailure(message);
     }
     // HC09_USERDATA=<folder>: saves and cache elsewhere (e.g. a fresh profile for scripted tests).
-    const char* userData = std::getenv("HC09_USERDATA") ? std::getenv("HC09_USERDATA") : "build/userdata";
+    const char* userData = std::getenv("HC09_USERDATA") ? std::getenv("HC09_USERDATA") : hc09::edition::kUserData;
     if (!hc09::InitializeVfs(isoPath, userData))
     {
         std::snprintf(message, sizeof(message), "Failed to open the game disc image:\n%s\n\nRun HC09Setup.exe again to select it.",
             isoPath.string().c_str());
         return StartupFailure(message);
     }
+    if (std::string error; !hc09::edition::Apply(error))
+        return StartupFailure(error.c_str());
     PopulateFunctionTable();
     hc09::PatchImportSlots();
     AddVectoredExceptionHandler(1, ReportGuestFault);

@@ -9,11 +9,15 @@
 #include <set>
 #include <vector>
 
+#include <wincodec.h>
+
 #define XXH_INLINE_ALL
 #include <xxhash.h>
 
+#include "common/edition.h"
 #include "gpu/command_processor.h"
 #include "gpu/draw.h"
+#include "gpu/swappable_images.h"
 #include "kernel/guest.h"
 
 namespace hc09::gpu
@@ -79,6 +83,151 @@ namespace hc09::gpu
             case 3: return (value << 16) | (value >> 16);
             default: return value;
             }
+        }
+
+        // Untiled, byte-swapped texels (rows `pitch` bytes apart) as RGBA8 holding Xenos components
+        // X, Y, Z, W (before the fetch swizzle). Common formats only.
+        bool DecodeTexels(uint32_t format, const FormatInfo& info, const uint8_t* rows, uint32_t pitch, uint32_t width, uint32_t height,
+            std::vector<uint8_t>& out)
+        {
+            out.assign(size_t(width) * height * 4, 0);
+            auto put = [&](uint32_t x, uint32_t y, const uint8_t dxgi[4]) {
+                if (x < width && y < height)
+                    for (int c = 0; c < 4; c++)
+                        out[(size_t(y) * width + x) * 4 + c] = dxgi[info.remap[c]];
+            };
+            auto color565 = [](uint16_t v, uint8_t rgba[4]) {
+                rgba[0] = uint8_t((v >> 11) * 255 / 31);
+                rgba[1] = uint8_t(((v >> 5) & 63) * 255 / 63);
+                rgba[2] = uint8_t((v & 31) * 255 / 31);
+                rgba[3] = 255;
+            };
+            switch (format)
+            {
+            case 18: case 19: case 20:  // DXT1, DXT2/3, DXT4/5
+            {
+                const uint32_t blockBytes = info.blockBytes;
+                for (uint32_t by = 0; by < (height + 3) / 4; by++)
+                    for (uint32_t bx = 0; bx < (width + 3) / 4; bx++)
+                    {
+                        const uint8_t* block = rows + size_t(by) * pitch + size_t(bx) * blockBytes;
+                        const uint8_t* colorBlock = format == 18 ? block : block + 8;
+                        const uint16_t c0 = uint16_t(colorBlock[0] | (colorBlock[1] << 8)), c1 = uint16_t(colorBlock[2] | (colorBlock[3] << 8));
+                        uint8_t palette[4][4];
+                        color565(c0, palette[0]);
+                        color565(c1, palette[1]);
+                        const bool fourColors = format != 18 || c0 > c1;
+                        for (int c = 0; c < 3; c++)
+                        {
+                            palette[2][c] = uint8_t(fourColors ? (2 * palette[0][c] + palette[1][c]) / 3 : (palette[0][c] + palette[1][c]) / 2);
+                            palette[3][c] = uint8_t(fourColors ? (palette[0][c] + 2 * palette[1][c]) / 3 : 0);
+                        }
+                        palette[2][3] = 255;
+                        palette[3][3] = fourColors ? 255 : 0;
+                        uint8_t alphas[8];
+                        if (format == 20)
+                        {
+                            alphas[0] = block[0];
+                            alphas[1] = block[1];
+                            for (int i = 2; i < 8; i++)
+                                alphas[i] = block[0] > block[1] ? uint8_t(((8 - i) * block[0] + (i - 1) * block[1]) / 7)
+                                    : i < 6 ? uint8_t(((6 - i) * block[0] + (i - 1) * block[1]) / 5) : i == 6 ? 0 : 255;
+                        }
+                        uint64_t alphaBits = 0;
+                        for (int i = 0; i < 6; i++)
+                            alphaBits |= uint64_t(block[2 + i]) << (8 * i);
+                        const uint32_t indices = colorBlock[4] | (colorBlock[5] << 8) | (colorBlock[6] << 16) | (uint32_t(colorBlock[7]) << 24);
+                        for (uint32_t i = 0; i < 16; i++)
+                        {
+                            uint8_t texel[4];
+                            std::memcpy(texel, palette[(indices >> (2 * i)) & 3], 4);
+                            if (format == 19)
+                                texel[3] = uint8_t(((block[i / 2] >> (4 * (i & 1))) & 15) * 17);
+                            else if (format == 20)
+                                texel[3] = alphas[(alphaBits >> (3 * i)) & 7];
+                            put(bx * 4 + i % 4, by * 4 + i / 4, texel);
+                        }
+                    }
+                return true;
+            }
+            case 49: case 59:  // DXN (two channels), DXT5A (one): blocks like DXT5's alpha
+            {
+                const int channels = format == 49 ? 2 : 1;
+                for (uint32_t by = 0; by < (height + 3) / 4; by++)
+                    for (uint32_t bx = 0; bx < (width + 3) / 4; bx++)
+                    {
+                        uint8_t values[2][16]{};
+                        for (int channel = 0; channel < channels; channel++)
+                        {
+                            const uint8_t* block = rows + size_t(by) * pitch + size_t(bx) * info.blockBytes + channel * 8;
+                            uint8_t levels[8] = { block[0], block[1] };
+                            for (int i = 2; i < 8; i++)
+                                levels[i] = block[0] > block[1] ? uint8_t(((8 - i) * block[0] + (i - 1) * block[1]) / 7)
+                                    : i < 6 ? uint8_t(((6 - i) * block[0] + (i - 1) * block[1]) / 5) : i == 6 ? 0 : 255;
+                            uint64_t bits = 0;
+                            for (int i = 0; i < 6; i++)
+                                bits |= uint64_t(block[2 + i]) << (8 * i);
+                            for (int i = 0; i < 16; i++)
+                                values[channel][i] = levels[(bits >> (3 * i)) & 7];
+                        }
+                        for (uint32_t i = 0; i < 16; i++)
+                        {
+                            const uint8_t texel[4] = { values[0][i], values[1][i], 0, 255 };
+                            put(bx * 4 + i % 4, by * 4 + i / 4, texel);
+                        }
+                    }
+                return true;
+            }
+            case 2: case 3: case 4: case 6: case 15:
+                for (uint32_t y = 0; y < height; y++)
+                    for (uint32_t x = 0; x < width; x++)
+                    {
+                        const uint8_t* at = rows + size_t(y) * pitch + size_t(x) * info.blockBytes;
+                        const uint16_t v = info.blockBytes == 2 ? uint16_t(at[0] | (at[1] << 8)) : 0;
+                        uint8_t texel[4] = { 0, 0, 0, 255 };
+                        if (format == 2)
+                            texel[0] = at[0];
+                        else if (format == 6)
+                            std::memcpy(texel, at, 4);
+                        else if (format == 4)
+                            color565(v, texel);
+                        else if (format == 15)  // B4G4R4A4
+                            texel[0] = uint8_t(((v >> 8) & 15) * 17), texel[1] = uint8_t(((v >> 4) & 15) * 17),
+                            texel[2] = uint8_t((v & 15) * 17), texel[3] = uint8_t((v >> 12) * 17);
+                        else  // B5G5R5A1
+                            texel[0] = uint8_t(((v >> 10) & 31) * 255 / 31), texel[1] = uint8_t(((v >> 5) & 31) * 255 / 31),
+                            texel[2] = uint8_t((v & 31) * 255 / 31), texel[3] = (v >> 15) ? 255 : 0;
+                        put(x, y, texel);
+                    }
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        void SavePng(const wchar_t* path, uint32_t width, uint32_t height, const std::vector<uint8_t>& rgba)
+        {
+            thread_local const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            (void)com;
+            ComPtr<IWICImagingFactory> factory;
+            ComPtr<IWICStream> stream;
+            ComPtr<IWICBitmapEncoder> encoder;
+            ComPtr<IWICBitmapFrameEncode> frame;
+            // The PNG encoder takes BGRA (SetPixelFormat changes the format asked for to that).
+            WICPixelFormatGUID pixelFormat = GUID_WICPixelFormat32bppBGRA;
+            std::vector<uint8_t> bgra(rgba);
+            for (size_t i = 0; i < bgra.size(); i += 4)
+                std::swap(bgra[i], bgra[i + 2]);
+            if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) ||
+                FAILED(factory->CreateStream(&stream)) || FAILED(stream->InitializeFromFilename(path, GENERIC_WRITE)) ||
+                FAILED(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder)) ||
+                FAILED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)) ||
+                FAILED(encoder->CreateNewFrame(&frame, nullptr)) || FAILED(frame->Initialize(nullptr)) ||
+                FAILED(frame->SetSize(width, height)) || FAILED(frame->SetPixelFormat(&pixelFormat)) ||
+                pixelFormat != GUID_WICPixelFormat32bppBGRA ||
+                FAILED(frame->WritePixels(height, width * 4, UINT(bgra.size()), bgra.data())) ||
+                FAILED(frame->Commit()) || FAILED(encoder->Commit()))
+                std::fprintf(stderr, "[texture] cannot write %ls\n", path);
         }
 
         // Offset in units of texels (or blocks) of (x, y) in a 2D tiled surface whose
@@ -420,6 +569,9 @@ namespace hc09::gpu
         }
         out.view.Shader4ComponentMapping = EncodeMapping(fetch.swizzle(), info.remap);
 
+        if (!cube && !volume && !stacked && GetReplacement(fetch, out))
+            return true;
+
         // Render-to-texture: a resolve wrote this address. A fetch with another texel size (or a
         // compressed format) cannot be reading that resolve; neither can one after the title has
         // loaded other data over it.
@@ -624,7 +776,7 @@ namespace hc09::gpu
             g_textureUploads++;
             entry.contentHash = hash;
             // HC09_DUMP_MIPS=<width>x<height>f<format>[,...]: save every level of matching textures as
-            // uploaded (untiled, byte-swapped, rows packed) to build/mip_<base>_<level>_<w>x<h>.bin.
+            // uploaded (untiled, byte-swapped, rows packed) to build/mip_<frame>_<base>_<level>_<w>x<h>.bin.
             std::FILE* mipDump[16]{};
             static const char* mipDumpSpec = std::getenv("HC09_DUMP_MIPS");
             if (MatchesTextureSpec(mipDumpSpec, width, height, fetch.format()))
@@ -632,7 +784,7 @@ namespace hc09::gpu
                 for (uint32_t level = 0; level < levels && level < 16; level++)
                 {
                     char path[96];
-                    std::snprintf(path, sizeof(path), "build/mip_%08X_%u_%ux%u.bin", fetch.baseAddress(), level,
+                    std::snprintf(path, sizeof(path), "build/mip_%d_%08X_%u_%ux%u.bin", frame, fetch.baseAddress(), level,
                         layouts[level].blocksWide, layouts[level].blocksHigh);
                     mipDump[level] = std::fopen(path, "wb");
                 }
@@ -649,6 +801,12 @@ namespace hc09::gpu
             std::vector<uint8_t> previous;  // the level just uploaded (rows packed), for candidates
             std::vector<uint8_t> filtered;  // box-filtered previous level
             uint32_t previousWide = 0, previousHigh = 0;
+            // HC09_DUMP_HASHED=1: save each 2D texture's base level once per content as
+            // build/hashed/<content hash>.png, in the channel order a replacement of it uses.
+            static const bool dumpHashedEnabled = std::getenv("HC09_DUMP_HASHED") != nullptr;
+            static std::set<uint64_t> dumpedHashes;
+            const bool dumpHashed = dumpHashedEnabled && !cube && !volume && !stacked && dumpedHashes.insert(hash).second;
+            std::vector<uint8_t> dumpRows;
             Transition(list, entry.resource.Get(), entry.state, D3D12_RESOURCE_STATE_COPY_DEST);
             entry.state = D3D12_RESOURCE_STATE_COPY_DEST;
             for (uint32_t faceIndex = 0; faceIndex < faces; faceIndex++)
@@ -690,6 +848,8 @@ namespace hc09::gpu
                                 std::memcpy(row + i, &word, 4);
                             }
                         }
+                        if (dumpHashed && faceIndex == 0 && level == 0)
+                            dumpRows.insert(dumpRows.end(), row, row + rowBytes);
                         if (faceIndex == 0 && level < 16 && mipDump[level])
                             std::fwrite(row, 1, rowBytes, mipDump[level]);
                     }
@@ -764,10 +924,233 @@ namespace hc09::gpu
             for (std::FILE* file : mipDump)
                 if (file)
                     std::fclose(file);
+            std::vector<uint8_t> pixels;
+            if (dumpHashed && !DecodeTexels(format, info, dumpRows.data(), blocksWide * unit, width, height, pixels))
+                std::fprintf(stderr, "[texture] not dumped %016llX: format %u %ux%u\n", (unsigned long long)hash, format, width, height);
+            else if (dumpHashed)
+            {
+                // As the shader sees it (the fetch swizzle applied), which is how replacements are drawn.
+                for (size_t i = 0; i < pixels.size(); i += 4)
+                {
+                    uint8_t texel[4];
+                    for (int c = 0; c < 4; c++)
+                    {
+                        const uint32_t select = (fetch.swizzle() >> (c * 3)) & 7;
+                        texel[c] = select < 4 ? pixels[i + select] : select == 5 ? 255 : 0;
+                    }
+                    std::memcpy(&pixels[i], texel, 4);
+                }
+                CreateDirectoryW(L"build\\hashed", nullptr);
+                wchar_t path[64];
+                std::swprintf(path, 64, L"build\\hashed\\%016llX.png", (unsigned long long)hash);
+                SavePng(path, width, height, pixels);
+                const auto image = FindSwappableImage(fetch.baseAddress() & 0x1FFFFFFF);
+                std::fprintf(stderr, "[texture] dumped %016llX: format %u swizzle 0x%03X %s/%u\n", (unsigned long long)hash, format,
+                    fetch.swizzle(), image ? image->library.c_str() : "-", image ? image->id : 0);
+            }
         }
         Transition(list, entry.resource.Get(), entry.state, kShaderReadable);
         entry.state = kShaderReadable;
         out.resource = entry.resource.Get();
+        // HC09_TRACE_HASHES=<frame>: the content hash of each texture drawn in that frame.
+        static const int traceHashesFrame = std::getenv("HC09_TRACE_HASHES") ? std::atoi(std::getenv("HC09_TRACE_HASHES")) : -1;
+        if (frame == traceHashesFrame)
+        {
+            static std::set<uint64_t> traced;
+            if (traced.insert(entry.contentHash).second)
+                std::fprintf(stderr, "[texture] frame %d draws %016llX (%ux%u format %u)\n", frame,
+                    (unsigned long long)entry.contentHash, width, height, format);
+        }
+        if (!cube && !volume && !stacked)
+            GetHashedReplacement(entry.contentHash, fetch, levels, out);
+        return true;
+    }
+
+    bool TextureCache::GetReplacement(const TextureFetch& fetch, BoundTexture& out)
+    {
+        // HC09_NO_REPLACEMENTS=1 draws the game's own images.
+        static const bool disabled = std::getenv("HC09_NO_REPLACEMENTS") != nullptr;
+        if (disabled)
+            return false;
+        const auto image = FindSwappableImage(fetch.baseAddress() & 0x1FFFFFFF);
+        if (!image)
+            return false;
+        const std::wstring name = L"textures\\swappables\\" + std::wstring(image->library.begin(), image->library.end()) +
+            L"\\" + std::to_wstring(image->id) + L".png";
+        auto [it, inserted] = replacements_.try_emplace(name);
+        if (inserted)
+        {
+            // The edition's own images (hc27\textures\...) come before the shared ones.
+            std::wstring path = name;
+            if (edition::kModFolder)
+            {
+                const std::wstring modded = std::wstring(edition::kModFolder) + L"\\" + name;
+                if (GetFileAttributesW(modded.c_str()) != INVALID_FILE_ATTRIBUTES)
+                    path = modded;
+            }
+            if (LoadReplacement(path, fetch.width(), fetch.height(), it->second))
+                std::fprintf(stderr, "[texture] %ls replaces %s/%u (%ux%u, the game's is %ux%u)\n", path.c_str(), image->library.c_str(),
+                    image->id, it->second.width, it->second.height, fetch.width(), fetch.height());
+        }
+        if (!it->second.resource)
+            return false;
+        // Sizes stay the game's: shaders scale unnormalized coordinates by them.
+        out.resource = it->second.resource.Get();
+        out.view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        // The image holds the colours as drawn: the fetch swizzle (which puts a texture's stored
+        // channels in order) does not apply to it.
+        out.view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        return true;
+    }
+
+    bool TextureCache::LoadReplacement(const std::wstring& path, uint32_t originalWidth, uint32_t originalHeight, Replacement& out,
+        bool mips)
+    {
+        if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
+            return false;
+        // Decode with WIC (any PNG, converted to straight RGBA8).
+        thread_local const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        (void)com;
+        ComPtr<IWICImagingFactory> factory;
+        ComPtr<IWICBitmapDecoder> decoder;
+        ComPtr<IWICBitmapFrameDecode> frame;
+        ComPtr<IWICFormatConverter> converter;
+        UINT width = 0, height = 0;
+        if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) ||
+            FAILED(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder)) ||
+            FAILED(decoder->GetFrame(0, &frame)) || FAILED(factory->CreateFormatConverter(&converter)) ||
+            FAILED(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0,
+                WICBitmapPaletteTypeCustom)) ||
+            FAILED(converter->GetSize(&width, &height)) || width == 0 || height == 0)
+        {
+            std::fprintf(stderr, "[texture] cannot read %ls\n", path.c_str());
+            return false;
+        }
+        std::vector<uint8_t> pixels(size_t(width) * height * 4);
+        if (FAILED(converter->CopyPixels(nullptr, width * 4, UINT(pixels.size()), pixels.data())))
+            return false;
+
+        // These front-end images are sampled without mips, so a much larger image would alias:
+        // halve it (2x2 box filter) until it is at most twice the game's size.
+        while (width > 2 * originalWidth && height > 2 * originalHeight && width > 1 && height > 1)
+        {
+            const UINT halfWidth = width / 2, halfHeight = height / 2;
+            std::vector<uint8_t> half(size_t(halfWidth) * halfHeight * 4);
+            for (UINT y = 0; y < halfHeight; y++)
+                for (UINT x = 0; x < halfWidth; x++)
+                    for (int c = 0; c < 4; c++)
+                    {
+                        const auto at = [&](UINT px, UINT py) { return uint32_t(pixels[(size_t(py) * width + px) * 4 + c]); };
+                        half[(size_t(y) * halfWidth + x) * 4 + c] =
+                            uint8_t((at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) + at(2 * x + 1, 2 * y + 1) + 2) / 4);
+                    }
+            pixels.swap(half);
+            width = halfWidth;
+            height = halfHeight;
+        }
+
+        // With mips, the full chain down to 1x1 (2x2 box filter, edges clamped on odd sizes).
+        uint32_t levels = 1;
+        if (mips)
+            while ((std::max(width, height) >> levels) != 0)
+                levels++;
+
+        D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = width;
+        desc.Height = height;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = UINT16(levels);
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        if (FAILED(context_.device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&out.resource))))
+            return false;
+        auto* list = context_.list();
+        UINT levelWidth = width, levelHeight = height;
+        for (uint32_t level = 0; level < levels; level++)
+        {
+            if (level > 0)
+            {
+                const UINT nextWidth = std::max(levelWidth / 2, 1u), nextHeight = std::max(levelHeight / 2, 1u);
+                std::vector<uint8_t> next(size_t(nextWidth) * nextHeight * 4);
+                for (UINT y = 0; y < nextHeight; y++)
+                    for (UINT x = 0; x < nextWidth; x++)
+                        for (int c = 0; c < 4; c++)
+                        {
+                            const auto at = [&](UINT px, UINT py) {
+                                return uint32_t(pixels[(size_t(std::min(py, levelHeight - 1)) * levelWidth + std::min(px, levelWidth - 1)) * 4 + c]);
+                            };
+                            next[(size_t(y) * nextWidth + x) * 4 + c] =
+                                uint8_t((at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) + at(2 * x + 1, 2 * y + 1) + 2) / 4);
+                        }
+                pixels.swap(next);
+                levelWidth = nextWidth;
+                levelHeight = nextHeight;
+            }
+            const uint32_t rowBytes = levelWidth * 4;
+            const uint32_t rowPitch = (rowBytes + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+            auto upload = context_.Upload(uint64_t(rowPitch) * levelHeight, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+            for (UINT y = 0; y < levelHeight; y++)
+                std::memcpy(static_cast<uint8_t*>(upload.cpu) + uint64_t(y) * rowPitch, pixels.data() + size_t(y) * rowBytes, rowBytes);
+            D3D12_TEXTURE_COPY_LOCATION dst{ out.resource.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+            dst.SubresourceIndex = level;
+            D3D12_TEXTURE_COPY_LOCATION src{ upload.resource, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
+            src.PlacedFootprint.Offset = upload.offset;
+            src.PlacedFootprint.Footprint = { DXGI_FORMAT_R8G8B8A8_UNORM, levelWidth, levelHeight, 1, rowPitch };
+            list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        }
+        Transition(list, out.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, kShaderReadable);
+        out.width = width;
+        out.height = height;
+        out.levels = levels;
+        return true;
+    }
+
+    bool TextureCache::GetHashedReplacement(uint64_t contentHash, const TextureFetch& fetch, uint32_t originalLevels, BoundTexture& out)
+    {
+        static const bool disabled = std::getenv("HC09_NO_REPLACEMENTS") != nullptr;
+        if (disabled)
+            return false;
+        // The folders are listed once: textures\hashed and the edition's own (which wins).
+        if (!hashedListed_)
+        {
+            hashedListed_ = true;
+            auto list = [this](const std::wstring& folder) {
+                WIN32_FIND_DATAW found;
+                HANDLE search = FindFirstFileW((folder + L"\\*.png").c_str(), &found);
+                if (search == INVALID_HANDLE_VALUE)
+                    return;
+                do
+                {
+                    wchar_t* end = nullptr;
+                    const uint64_t hash = std::wcstoull(found.cFileName, &end, 16);
+                    if (end && _wcsicmp(end, L".png") == 0 && end - found.cFileName == 16)
+                        hashedFiles_[hash] = folder + L"\\" + found.cFileName;
+                } while (FindNextFileW(search, &found));
+                FindClose(search);
+            };
+            list(L"textures\\hashed");
+            if (edition::kModFolder)
+                list(std::wstring(edition::kModFolder) + L"\\textures\\hashed");
+            if (!hashedFiles_.empty())
+                std::fprintf(stderr, "[texture] %zu replacements by content hash\n", hashedFiles_.size());
+        }
+        auto file = hashedFiles_.find(contentHash);
+        if (file == hashedFiles_.end())
+            return false;
+        auto [it, inserted] = replacements_.try_emplace(file->second);
+        if (inserted && LoadReplacement(file->second, fetch.width(), fetch.height(), it->second, true))
+            std::fprintf(stderr, "[texture] %ls replaces texture %016llX (%ux%u, the game's is %ux%u)\n", file->second.c_str(),
+                (unsigned long long)contentHash, it->second.width, it->second.height, fetch.width(), fetch.height());
+        if (!it->second.resource)
+            return false;
+        out.resource = it->second.resource.Get();
+        out.view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        out.view.Texture2D.MipLevels = originalLevels > 1 ? it->second.levels : 1;
+        // The image holds the colours as drawn (the swizzle already applied, as dumps are saved).
+        out.view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         return true;
     }
 }

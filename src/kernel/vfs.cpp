@@ -170,6 +170,13 @@ namespace hc09
 
         DiscImage g_disc;
 
+        // Bytes that replace part of a disc file (installed at startup, before the game runs).
+        struct DiscOverlay
+        {
+            uint64_t offset = 0;
+            std::vector<uint8_t> bytes;
+        };
+        std::unordered_map<const DiscNode*, std::vector<DiscOverlay>> g_overlays;
         class DiscFile : public File
         {
         public:
@@ -190,7 +197,19 @@ namespace hc09
                 if (node_->directory || offset >= node_->size)
                     return 0;
                 length = uint32_t(std::min<uint64_t>(length, node_->size - offset));
-                return g_disc.ReadAt(g_disc.SectorOffset(node_->sector) + offset, buffer, length);
+                const uint32_t read = g_disc.ReadAt(g_disc.SectorOffset(node_->sector) + offset, buffer, length);
+                if (auto it = g_overlays.find(node_); it != g_overlays.end())
+                {
+                    for (const auto& overlay : it->second)
+                    {
+                        const uint64_t start = std::max(offset, overlay.offset);
+                        const uint64_t end = std::min(offset + read, overlay.offset + overlay.bytes.size());
+                        if (start < end)
+                            std::memcpy(static_cast<uint8_t*>(buffer) + (start - offset), overlay.bytes.data() + (start - overlay.offset),
+                                size_t(end - start));
+                    }
+                }
+                return read;
             }
 
             std::vector<DirectoryEntry> List() const override
@@ -455,6 +474,23 @@ namespace hc09
     std::filesystem::path UserDataPath()
     {
         return g_userData;
+    }
+
+    bool ReadDiscFile(const std::string& path, uint64_t offset, void* buffer, uint32_t length)
+    {
+        const DiscNode* node = g_disc.Find(path);
+        if (!node || node->directory || offset + length > node->size)
+            return false;
+        return g_disc.ReadAt(g_disc.SectorOffset(node->sector) + offset, buffer, length) == length;
+    }
+
+    bool OverlayDiscFile(const std::string& path, uint64_t offset, std::vector<uint8_t> bytes)
+    {
+        const DiscNode* node = g_disc.Find(path);
+        if (!node || node->directory || offset + bytes.size() > node->size)
+            return false;
+        g_overlays[node].push_back({ offset, std::move(bytes) });
+        return true;
     }
 
     void MountHostDirectory(const std::string& device, const std::filesystem::path& directory)

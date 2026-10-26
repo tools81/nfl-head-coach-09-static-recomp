@@ -4,6 +4,9 @@
 #include <cstdlib>
 #include <vector>
 
+#include <windows.h>
+
+#include "debug/stack_dump.h"
 #include "kernel/guest.h"
 #include "kernel/objects.h"
 #include "kernel/vfs.h"
@@ -72,6 +75,14 @@ namespace hc09
             const std::string path = PathFromAttributes(objectAttributes);
             auto result = OpenFile(path, disposition, (options & kFileDirectoryFile) != 0, (access & kWriteAccessMask) != 0);
             std::fprintf(stderr, "[io] open \"%s\" -> 0x%08X\n", path.c_str(), result.status);
+            // HC09_STACK_ON_OPEN=<text>: print the call stack of opens whose path contains it.
+            static const char* stackOnOpen = std::getenv("HC09_STACK_ON_OPEN");
+            if (stackOnOpen && path.find(stackOnOpen) != std::string::npos)
+            {
+                CONTEXT context{};
+                RtlCaptureContext(&context);
+                debug::PrintStackFromContext(&context);
+            }
             if (result.object && (options & kFileDeleteOnClose))
                 result.object->file->SetDeleteOnClose(true);
             if (result.object)
@@ -145,8 +156,8 @@ PPC_FUNC(__imp__NtReadFile)
     const uint32_t result = ReadInto(*file, offset, Arg32(ctx, 5), Arg32(ctx, 6), read);
     static const bool traceIo = std::getenv("HC09_TRACE_IO") != nullptr;
     if (traceIo || result != status::kSuccess || read < Arg32(ctx, 6) || Arg32(ctx, 2) != 0)
-        std::fprintf(stderr, "[io] read %s @0x%llX len 0x%X -> 0x%08X (%u bytes)%s\n", file->path.c_str(),
-            (unsigned long long)offset, Arg32(ctx, 6), result, read, Arg32(ctx, 2) ? " [APC routine ignored]" : "");
+        std::fprintf(stderr, "[io] read %s @0x%llX len 0x%X into 0x%08X -> 0x%08X (%u bytes)%s\n", file->path.c_str(),
+            (unsigned long long)offset, Arg32(ctx, 6), Arg32(ctx, 5), result, read, Arg32(ctx, 2) ? " [APC routine ignored]" : "");
     CompleteIo(Arg32(ctx, 4), result, read, Arg32(ctx, 1));
     Return(ctx, result);
 }
@@ -174,6 +185,10 @@ PPC_FUNC(__imp__NtReadFileScatter)
             break;
     }
     const uint32_t result = total == 0 && length > 0 ? status::kEndOfFile : status::kSuccess;
+    static const bool traceIo = std::getenv("HC09_TRACE_IO") != nullptr;
+    if (traceIo)
+        std::fprintf(stderr, "[io] scatter read %s @0x%llX len 0x%X into 0x%08X... -> %u bytes\n", file->path.c_str(),
+            (unsigned long long)offset, length, length ? uint32_t(Load<uint64_t>(segments)) : 0u, total);
     CompleteIo(Arg32(ctx, 4), result, total, Arg32(ctx, 1));
     Return(ctx, result);
 }

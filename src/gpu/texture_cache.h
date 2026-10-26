@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <map>
+#include <string>
 #include <unordered_map>
 
 #include "gpu/d3d12_context.h"
@@ -132,7 +133,25 @@ namespace hc09::gpu
         // Number of levels composed for a resolved base (1 when the title rendered no mips).
         uint32_t ComposeResolvedMips(const TextureFetch& fetch, const Resolved& base, BoundTexture& out);
 
+        // Replacement images (textures/...png) for swappable front-end images, loaded once.
+        struct Replacement
+        {
+            ComPtr<ID3D12Resource> resource;  // null when the file is missing or unreadable
+            uint32_t width = 0, height = 0, levels = 1;
+        };
+        // The replacement for the texture at `fetch`'s address, if it holds a swappable image
+        // and a file for it exists.
+        bool GetReplacement(const TextureFetch& fetch, BoundTexture& out);
+        // The replacement for any 2D texture by its contents: textures\hashed\<content hash>.png
+        // (16 hex digits, as HC09_DUMP_HASHED names the game's images).
+        bool GetHashedReplacement(uint64_t contentHash, const TextureFetch& fetch, uint32_t originalLevels, BoundTexture& out);
+        bool LoadReplacement(const std::wstring& path, uint32_t originalWidth, uint32_t originalHeight, Replacement& out,
+            bool mips = false);
+
         D3D12Context& context_;
+        std::unordered_map<std::wstring, Replacement> replacements_;
+        std::unordered_map<uint64_t, std::wstring> hashedFiles_;  // content hash -> replacement file
+        bool hashedListed_ = false;
         std::unordered_map<uint64_t, Entry> entries_;
         std::map<uint32_t, Resolved> resolved_;
         std::unordered_map<uint32_t, Composed> composed_;

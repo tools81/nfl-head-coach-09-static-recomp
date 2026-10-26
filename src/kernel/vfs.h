@@ -95,6 +95,11 @@ namespace hc09
     void AddSymbolicLink(const std::string& link, const std::string& target);
     void RemoveSymbolicLink(const std::string& link);
 
+    // Reads `length` bytes of a disc file (path relative to the disc root) as stored on the disc.
+    bool ReadDiscFile(const std::string& path, uint64_t offset, void* buffer, uint32_t length);
+    // From now on, reads of a disc file return `bytes` at `offset` instead of the disc's contents.
+    bool OverlayDiscFile(const std::string& path, uint64_t offset, std::vector<uint8_t> bytes);
+
     // Maps an extra device (e.g. a content package) onto a host directory.
     void MountHostDirectory(const std::string& device, const std::filesystem::path& directory);
     void Unmount(const std::string& device);

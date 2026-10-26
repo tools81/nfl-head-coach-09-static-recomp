@@ -1,6 +1,6 @@
 # NFL Head Coach 09 — static recompilation
 
-Version 0.6.3
+Version 0.7.0
 
 A native Windows port of NFL Head Coach 09 (Xbox 360, title ID `45410841`), built by
 statically recompiling the game's PowerPC executable to C++ with
@@ -76,6 +76,39 @@ keeps its 16:9 shape, with black bars where the window's shape differs.
 `set HC09_RESOLUTION_SCALE=2` (up to 4) renders at that multiple of the game's 1280x720, e.g.
 2560x1440, for a sharper picture in fullscreen on a high-resolution display. Menus and gameplay
 held 30-35 fps at 2x in testing; 1x is the default.
+
+## Rosters and replacement images
+
+`tools/roster_import` builds a roster from a modern ratings export and current coaching staffs
+(see its [README](tools/roster_import/README.md)), with player and coach portraits.
+
+**HC27.exe**, built alongside HC09.exe, is the game with that roster: it reads `hc27\ROSTER` in
+place of the disc's default roster (so new careers and the roster screens start with it, nothing
+to load), lays the patches in `hc27\disc` (`<archive>@<hex offset>.bin`, such as the league's
+finances that `league_salaries.py` writes) over the disc's files, draws the images in
+`hc27\textures` before those in `textures`, and keeps its saves apart in `build\userdata-hc27`. Without `hc27\ROSTER` it reports what to build and exits.
+HC09.exe is unaffected by the `hc27` folder.
+
+The front end's "swappable" images (player and coach portraits, team logos, helmets and the
+other `headcoach/swappables/...` libraries) can be replaced without touching the disc: a PNG at
+`textures/swappables/<library>/<id>.png` in the install folder (for HC27, also
+`hc27/textures/swappables/...`) is drawn instead of image `<id>` of that library, at its own resolution (images more than twice the game's size are halved until
+they fit, since these are drawn without mip maps). A player's portrait id is `PSXP` in the
+roster. `HC09_NO_REPLACEMENTS=1` draws the game's own images; `HC09_TRACE_SWAPPABLES=1` logs
+each image the game loads (`[swappable] PlayerPortraits/1650 -> texture 0x161CF000`).
+
+Any other 2D texture (a logo in a menu, a helmet decal, a sign at the career campus) can be
+replaced by its contents: a PNG at `textures/hashed/<content hash>.png` (for HC27, also
+`hc27/textures/hashed/...`) is drawn wherever the game uses that texture, with mip maps built for
+it. `HC09_DUMP_HASHED=1` saves every texture the game draws, once, as
+`build/hashed/<content hash>.png`, in the colours it is drawn with, so the one to replace can be
+found and edited; the log names the swappable image a dumped texture holds, if any. Both kinds of
+replacement image hold the colours as drawn (a texture's channel order does not matter).
+
+HC27 can also rename a team (`TEAM_RENAMES` in `tools/roster_import/import_roster.py`; the
+Redskins are the Commanders): the game names a team's uniforms, helmets and career campus after
+its name in the roster and finds them by a hash of that name, so HC27 hashes the old name for
+them (`kRenamedTeams` in `src/common/edition.cpp`).
 
 ## Known issues
 
@@ -221,6 +254,8 @@ tag, re-patches XenonRecomp if the pin changed, and recompiles and rebuilds the 
   `HC09_NO_AUDIO=1` disables audio output; `HC09_XMA_DUMP=1` saves one context's packets to
   `build/xma_dump.bin` for `build\hc09\XmaTest.exe`.
 - `set HC09_PRESS=1800:start,1900:a` presses buttons at those frames (held 6 frames).
+- `set HC09_STACK_ON_OPEN=campus` prints the call stack of every file open whose path contains
+  that text.
 - `set HC09_DRAW_SNAPSHOTS=1` with `HC09_DUMP_FRAME` saves the render target after every
   visible draw of that frame (`build/draw_<n>.bmp`); `HC09_DUMP_TEXTURES=<frame>` saves the
   RGBA8 textures sampled from that frame on (`HC09_DUMP_TEXTURES=dump`: those sampled in the dump
@@ -243,7 +278,7 @@ tag, re-patches XenonRecomp if the pin changed, and recompiles and rebuilds the 
   one (`build/surface_<n>.bmp`, `build/surface_<n>_depth.bmp`). Debugging overrides:
   `HC09_SAMPLER_TEST=lod0|wrap|point`, `HC09_NO_DEPTH_TEST=1`, `HC09_FORCE_INDEXED=1`.
 - With a frame dump, `HC09_DUMP_TEXTURE_MEMORY=1` saves every sampled texture's raw guest memory
-  (`build/texmem_<base>_f<format>_<w>x<h>_p<pitch>.bin`), `HC09_DUMP_VERTEX_MEMORY=1` every vertex
+  (`build/texmem_<frame>_<base>_f<format>_<w>x<h>_p<pitch>.bin`), `HC09_DUMP_VERTEX_MEMORY=1` every vertex
   buffer read (endian-swapped, `build/vbmem_<address>_s<stride>.bin`), and
   `HC09_PROBE_PIXEL=<x>,<y>` logs which draws change that render-target pixel (`[probe]`).
 - `set HC09_TRACE_RING=<seconds>` logs ring-buffer batches from that time;
@@ -256,7 +291,7 @@ tag, re-patches XenonRecomp if the pin changed, and recompiles and rebuilds the 
 - `set HC09_DUMP_MEMORY=1AD1D000:8000` (with `HC09_DUMP_FRAME`) saves raw physical memory
   as `build/mem_<addr>.bin`; `HC09_NO_E_WINDOW=1` leaves the 0xE0000000 view unmapped.
 - `set HC09_DUMP_MIPS=256x256f2` saves every mip level of textures of that size and Xenos format,
-  as stored by the game (untiled, byte-swapped), to `build/mip_<base>_<level>_<w>x<h>.bin`.
+  as stored by the game (untiled, byte-swapped), to `build/mip_<frame>_<base>_<level>_<w>x<h>.bin` (frame of the upload).
   `HC09_ORIGINAL_MIPS=1` keeps the stored mip levels of textures whose levels are not downscales of
   level 0 (such as the field's grass noise); by default those are rebuilt from level 0 (`[gpu] texture ... rebuilding them`).
 
