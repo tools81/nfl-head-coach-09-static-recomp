@@ -16,23 +16,13 @@ more than once):
 
 The cap, minimums and tenders are set to the season's (CAP, MINIMUMS, TENDERS); the scales grow
 with the cap. The changed tables, with their checksums fixed, are written as patches to
-hc27/disc (one file per table: <archive>@<offset>.bin), which HC27 lays over the disc's files at
-startup. Rerun after changing the values; the folder is rebuilt each time.
+hc27/disc (one file per table: <archive>@<offset>.bin, see disc_patches.py), which HC27 lays over
+the disc's files at startup. Rerun after changing the values; its earlier patches are replaced.
 """
 
 import argparse
-import glob
-import mmap
-import os
-import struct
-import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(os.path.dirname(HERE))
-sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.dirname(HERE))
-from tdb import Database  # noqa: E402
-import xdvdfs  # noqa: E402
+import disc_patches
 
 SEASON = 2026
 CAP = 301_200_000
@@ -95,49 +85,20 @@ def update(db, scale):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--iso", required=True, help="the game's disc image")
-    parser.add_argument("--out", default=os.path.join(ROOT, "hc27", "disc"))
+    parser.add_argument("--out", default=disc_patches.OUT)
     args = parser.parse_args()
 
-    base, entries = xdvdfs.entries(args.iso)
-    archives = [(base + start * xdvdfs.SECTOR, length, path) for path, is_dir, start, length in entries
-                if not is_dir and path.lower().endswith(".ast")]
-    os.makedirs(args.out, exist_ok=True)
-    for old in glob.glob(os.path.join(args.out, "*.bin")):
-        os.remove(old)
-
-    patches, cap_2008 = [], None
-    with open(args.iso, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
-        for start, length, path in archives:
-            at = m.find(b"DB\x00\x08", start, start + length)
-            while at >= 0:
-                try:
-                    size = struct.unpack_from(">I", m, at + 8)[0]
-                    db = Database(bytearray(m[at:at + size]), 0) if 0 < size <= start + length - at else None
-                except (ValueError, struct.error):
-                    db = None
-                if db and any(name in db.tables and db.tables[name].count for name in TABLES):
-                    slri = db.tables.get("SLRI")
-                    if slri and slri.count:
-                        cap_2008 = slri.get(0, "SCAD")
-                    patches.append((path, at - start, db))
-                at = m.find(b"DB\x00\x08", at + 4, start + length)
-    if not patches or not cap_2008:
+    found = disc_patches.databases(args.iso, TABLES)
+    cap_2008 = next((db.tables["SLRI"].get(0, "SCAD") for _, _, db in found
+                     if "SLRI" in db.tables and db.tables["SLRI"].count), None)
+    if not found or not cap_2008:
         raise SystemExit(f"no salary tables found in {args.iso}")
 
     scale = CAP / cap_2008
-    written = 0
-    for path, offset, db in patches:
-        changed = update(db, scale)
-        db.fix_table_crcs()
-        for table, end in db.table_extents():
-            if table.name in changed:
-                # The table's records and the checksum that ends it.
-                at = table.data_start
-                name = f"{os.path.basename(path)}@{offset + at:X}.bin"
-                open(os.path.join(args.out, name), "wb").write(bytes(db.data[at:end]))
-                written += 1
+    written = disc_patches.write_patches("league_salaries", [(path, offset, db, update(db, scale)) for path, offset, db in found],
+                                         args.out)
     print(f"{SEASON} cap ${CAP:,} (2008 ${cap_2008:,}, scales x{scale:.2f}); "
-          f"{written} tables in {len(patches)} databases patched in {args.out}")
+          f"{written} tables in {len(found)} databases patched in {args.out}")
 
 
 if __name__ == "__main__":

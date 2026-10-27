@@ -7,10 +7,13 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <mutex>
+#include <set>
 #include <utility>
 #include <vector>
 
 #include "kernel/guest.h"
+#include "kernel/heap.h"
 #include "kernel/vfs.h"
 
 namespace hc09::edition
@@ -131,12 +134,90 @@ namespace hc09::edition
 }
 
 #ifdef HC09_EDITION_HC27
+namespace
+{
+    // New Career's Team Select draws each head coach whole: a body package named after his head
+    // (<head>body_big, <head>bodywarm_big, the model <HEAD>BODY) and the head. The 2008 head
+    // coaches' heads have bodies; the create-a-coach presets HC27 gives most coaches
+    // (2_h_n_242, 3_m_gm_095: <skin>_<build>_<...>_<number>) have none, so those coaches were not
+    // drawn. They get the body the game itself gives a preset (on create-a-coach's screens): the
+    // generic warm-weather body, genericwarmbasebody for a thin head (build t) and
+    // genericwarmmuscularbody for the others (m, h), a polo in the team's colours.
+    // Heads that wear a 2008 coach's body: Mike Nolan's head (Ben Johnson's in HC27) gets Tony
+    // Sparano's polo and khakis, and preset 88 (Brian Schottenheimer's) Sean Payton's polo and
+    // visor.
+    constexpr std::pair<const char*, const char*> kBodySwaps[] = {
+        { "nolanmike", "sparanotony" },
+        { "2_t_b_231", "paytonsean" },
+    };
+
+    std::string PresetBodyName(const char* name)
+    {
+        for (const auto& [head, body] : kBodySwaps)
+        {
+            const size_t length = std::strlen(head);
+            if (_strnicmp(name, head, length) != 0 || _strnicmp(name + length, "body", 4) != 0)
+                continue;
+            std::string swapped = std::string(body) + (name + length);
+            if (std::isupper(static_cast<unsigned char>(name[0])))
+                for (char& c : swapped)
+                    c = char(std::toupper(static_cast<unsigned char>(c)));
+            return swapped;
+        }
+        const char* p = name;
+        auto run = [&p](bool digits) {
+            const char* start = p;
+            while (digits ? std::isdigit(static_cast<unsigned char>(*p)) : std::isalpha(static_cast<unsigned char>(*p)))
+                p++;
+            return size_t(p - start);
+        };
+        // <digit>_<build>_<letters>_<3 digits>body...
+        if (run(true) != 1 || *p++ != '_')
+            return {};
+        const bool thin = std::tolower(static_cast<unsigned char>(*p)) == 't';
+        if (!run(false) || *p++ != '_' || !run(false) || *p++ != '_' || run(true) != 3 || _strnicmp(p, "body", 4) != 0)
+            return {};
+        const bool upper = std::isupper(static_cast<unsigned char>(p[0]));
+        std::string body = std::string("genericwarm") + (thin ? "base" : "muscular") + "body";
+        if (_strnicmp(p + 4, "warm", 4) == 0)
+            p += 4;  // <head>bodywarm_big and <head>body_big are both the generic body's one package
+        body += p + 4;
+        if (upper)  // in the case the name is written in
+            for (char& c : body)
+                c = char(std::toupper(static_cast<unsigned char>(c)));
+        return body;
+    }
+}
+
 // The game's name hash (r3 a NUL-terminated name, r4 the seed; 64-bit FNV-1a of the name in upper
-// case), which finds files among those of the loaded archives.
+// case), which finds files among those of the loaded archives. HC09_TRACE_NAMES=1 prints each
+// distinct name hashed.
 extern "C" PPC_FUNC(__imp__sub_82998B08);
 PPC_FUNC(sub_82998B08)
 {
     char* name = reinterpret_cast<char*>(hc09::GuestToHost(ctx.r3.u32));
+    static const bool traceNames = std::getenv("HC09_TRACE_NAMES") != nullptr;
+    if (traceNames)
+    {
+        static std::mutex mutex;
+        static std::set<std::string> seen;
+        std::lock_guard lock(mutex);
+        if (seen.insert(name).second)
+            std::fprintf(stderr, "[name] %s (caller 0x%08X)\n", name, uint32_t(ctx.lr));
+    }
+    // A preset's body is hashed under another name, from a buffer of this thread's own.
+    const std::string body = PresetBodyName(name);
+    if (!body.empty() && body.size() < 256)
+    {
+        thread_local uint32_t buffer = hc09::PoolHeap().Allocate(256);
+        if (buffer)
+        {
+            std::memcpy(hc09::GuestToHost(buffer), body.c_str(), body.size() + 1);
+            ctx.r3.u64 = buffer;
+            __imp__sub_82998B08(ctx, base);  // the hash comes back in r3
+            return;
+        }
+    }
     const std::string original = hc09::edition::RenameTeamAsset(name);
     __imp__sub_82998B08(ctx, base);
     if (!original.empty())

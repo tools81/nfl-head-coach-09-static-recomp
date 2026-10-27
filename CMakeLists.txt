@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(HC09Recomp VERSION 0.7.1 LANGUAGES C CXX)
+project(HC09Recomp VERSION 0.7.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -49,6 +49,7 @@ set(HC09_HOST_SOURCES
     src/gpu/swappable_images.cpp
     src/gpu/texture_cache.cpp
     src/gpu/renderer.cpp
+    src/gpu/shader_compiler.cpp
     src/gpu/shaders.cpp
     src/gpu/ucode.cpp
     src/kernel/format.cpp
@@ -75,6 +76,30 @@ set(HC09_HOST_SOURCES
     src/kernel/xam_user.cpp
     src/kernel/xex.cpp)
 
+# DXC (dxcompiler.dll and dxil.dll) from the newest Windows SDK that has them, copied next to the
+# games: shaders compile up to 30 times faster than with D3DCompile, which the games use instead
+# when the DLLs are missing (see src/gpu/shader_compiler.h).
+set(HC09_DXC_DIR "")
+if(DEFINED ENV{WindowsSdkDir})
+    file(TO_CMAKE_PATH "$ENV{WindowsSdkDir}" HC09_WINDOWS_KITS)
+else()
+    set(HC09_WINDOWS_KITS "C:/Program Files (x86)/Windows Kits/10")
+endif()
+file(GLOB HC09_DXC_CANDIDATES "${HC09_WINDOWS_KITS}/bin/10.*/x64/dxcompiler.dll")
+list(SORT HC09_DXC_CANDIDATES COMPARE NATURAL ORDER DESCENDING)
+foreach(candidate ${HC09_DXC_CANDIDATES})
+    get_filename_component(candidate_dir "${candidate}" DIRECTORY)
+    if(EXISTS "${candidate_dir}/dxil.dll")
+        set(HC09_DXC_DIR "${candidate_dir}")
+        break()
+    endif()
+endforeach()
+if(HC09_DXC_DIR)
+    message(STATUS "DXC: ${HC09_DXC_DIR}")
+else()
+    message(STATUS "DXC: not found in the Windows SDK; the games compile shaders with D3DCompile")
+endif()
+
 # FFmpeg (LGPL shared build in thirdparty/ffmpeg) for XMA audio decoding.
 set(HC09_FFMPEG ${CMAKE_SOURCE_DIR}/thirdparty/ffmpeg)
 
@@ -91,6 +116,11 @@ foreach(game HC09 HC27)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${HC09_FFMPEG}/bin/avcodec-62.dll ${HC09_FFMPEG}/bin/avutil-60.dll ${HC09_FFMPEG}/bin/swresample-6.dll
             $<TARGET_FILE_DIR:${game}>)
+    if(HC09_DXC_DIR)
+        add_custom_command(TARGET ${game} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${HC09_DXC_DIR}/dxcompiler.dll" "${HC09_DXC_DIR}/dxil.dll"
+                $<TARGET_FILE_DIR:${game}>)
+    endif()
 endforeach()
 target_compile_definitions(HC27 PRIVATE HC09_EDITION_HC27)
 

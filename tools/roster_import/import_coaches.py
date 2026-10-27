@@ -325,23 +325,32 @@ def apply_ratings(coch, record, values):
 
 
 def load_heads(path):
-    heads = {}
+    """(team, role) -> (kind, number) heads and (team, role) -> wears a hat, from the CSV (columns
+    team, role, head, and an optional hat column of yes or no; empty keeps the record's)."""
+    heads, hats = {}, {}
     if not path:
-        return heads
+        return heads, hats
     with open(path, encoding="utf-8", newline="") as f:
         for row in csv.DictReader(f):
-            kind, _, number = row["head"].strip().lower().partition(" ")
-            if kind not in ("preset", "likeness") or not number.strip().isdigit():
-                raise SystemExit(f"{path}: head {row['head']!r} is not 'preset N' or 'likeness N'")
-            heads[(row["team"].strip().lower(), row["role"].strip().lower())] = (kind, int(number))
-    return heads
+            key = (row["team"].strip().lower(), row["role"].strip().lower())
+            if row.get("head", "").strip():
+                kind, _, number = row["head"].strip().lower().partition(" ")
+                if kind not in ("preset", "likeness") or not number.strip().isdigit():
+                    raise SystemExit(f"{path}: head {row['head']!r} is not 'preset N' or 'likeness N'")
+                heads[key] = (kind, int(number))
+            hat = (row.get("hat") or "").strip().lower()
+            if hat:
+                if hat not in ("yes", "no"):
+                    raise SystemExit(f"{path}: hat {row['hat']!r} is not yes or no")
+                hats[key] = hat == "yes"
+    return heads, hats
 
 
 def import_coaches(roster_path, coaches_dir, heads_path, iso_path, out_path, textures_dir, ratings_path=None):
     save = SaveFile(roster_path)
     coch, team_table = save.db.tables["COCH"], save.db.tables["TEAM"]
     teams = {team_table.get(i, "TDNA").lower(): team_table.get(i, "TGID") for i in range(team_table.count)}
-    heads = load_heads(heads_path)
+    heads, hats = load_heads(heads_path)
     ratings = load_ratings(ratings_path)
     presets = []
     if any(kind == "preset" for kind, _ in heads.values()) and not iso_path:
@@ -390,6 +399,8 @@ def import_coaches(roster_path, coaches_dir, heads_path, iso_path, out_path, tex
         photo = os.path.join(coaches_dir, name)
         portrait = os.path.join(portraits_dir, f"{coch.get(record, 'PNPt')}.png")
         portrait_picture(photo, portrait)
+        if (team, role) in hats:
+            coch.set(record, "CHTY", int(hats[(team, role)]))  # the cap New Career's Team Select shows
         choice = heads.get((team, role))
         if not choice and presets:
             choice = skin_preset(portrait, presets, f"{first} {last}")

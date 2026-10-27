@@ -71,8 +71,9 @@ the game's default: everything it needs goes in the `hc27` folder of the install
    `skin` is `light`, `medium` or `dark`; `head` (optional) is a generic head number (`PGHE`).
 4. Coaches: put a photo of each coach in `data/coaches/`, named `<team>_<role>_<first>_<last>.png`
    (e.g. `bears_hc_Ben_Johnson.png`; roles `hc`, `oc`, `dc`, `sc`), list the 3D head each should
-   use in `data/coaches.csv` (columns `team,role,head`, head `preset N` for create-a-coach
-   appearance N or `likeness N` for a 2008 head coach's head 0-36), then write HC27's roster:
+   use in `data/coaches.csv` (columns `team,role,head,hat`, head `preset N` for create-a-coach
+   appearance N or `likeness N` for a 2008 head coach's head 0-36, and hat `yes` or `no` for the
+   cap he wears on New Career's Team Select, empty to keep the 2008 coach's), then write HC27's roster:
 
    ```sh
    python tools/roster_import/import_coaches.py --roster tools/roster_import/data/ROSTER-M27        --out hc27/ROSTER --heads tools/roster_import/data/coaches.csv --iso "iso/NFL Head Coach 09.iso"
@@ -93,8 +94,9 @@ the game's default: everything it needs goes in the `hc27` folder of the install
    cut-out picture on Coach Now's Team Select (home and away, in
    `hc27/textures/swappables/TeamSelect/`): the plain background is removed and the coach framed
    like the game's own pictures. That needs Pillow (`pip install pillow`); a photo that already
-   has a transparent background is used as it is. New Career's Team Select can
-   only show likeness heads: a head coach with a preset head is blank there. Without coaches,
+   has a transparent background is used as it is. On New Career's Team Select, where the game draws each head coach in 3D with a body
+   made for his head, a coach with a preset head wears the generic polo the game gives presets
+   when creating a coach. Without coaches,
    copy `data/ROSTER-M27` to `hc27/ROSTER` instead.
 5. Team logos (optional; so far the Commanders, Bears and Rams): the game's images of a team's logo and name
    are textures inside the disc's archives, so they are replaced by their contents. Run HC27 once
@@ -140,7 +142,19 @@ the game's default: everything it needs goes in the `hc27` folder of the install
    draft picks, re-signing players and hired coaches ask for) with the cap. They are tables in the
    disc's databases (listed in the script); it writes them, changed, to `hc27/disc`, which HC27
    lays over the disc's files at startup. The values are at the top of the script.
-8. Run `build/hc09/HC27.exe`. Its saves are kept in `build/userdata-hc27`, apart from HC09's.
+8. Last season and team descriptions (New Career's Team Select):
+
+   ```sh
+   python tools/roster_import/last_season.py --iso "iso/NFL Head Coach 09.iso"
+   python tools/roster_import/team_descriptions.py --iso "iso/NFL Head Coach 09.iso"
+   ```
+
+   The first writes each team's 2025 record and how its season ended into the career history
+   (`import_roster.py` also puts the record in the roster, which is what Team Select shows); the
+   second replaces each team's description with a 2026 one. Both are at the top of the scripts
+   (descriptions at most 255 characters, and all 32 must fit in the space the game's own took).
+   They write their tables to `hc27/disc` too; each tool replaces only its own files there.
+9. Run `build/hc09/HC27.exe`. Its saves are kept in `build/userdata-hc27`, apart from HC09's.
 
 The roster can also be played in HC09 as a save: copy it to
 `build/userdata/content/00000001/ROSTER-M27/ROSTER-M27`, create `ROSTER-M27.name` beside that

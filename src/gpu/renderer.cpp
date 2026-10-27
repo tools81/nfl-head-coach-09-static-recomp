@@ -36,6 +36,7 @@
 #include "gpu/d3d12_context.h"
 #include "gpu/draw.h"
 #include "gpu/hlsl_translator.h"
+#include "gpu/shader_compiler.h"
 #include "gpu/shaders.h"
 #include "gpu/texture_cache.h"
 #include "kernel/guest.h"
@@ -230,19 +231,6 @@ namespace hc09::gpu
             state = after;
         }
 
-        ComPtr<ID3DBlob> CompileHlsl(const std::string& source, const char* target, const char* name)
-        {
-            ComPtr<ID3DBlob> code, errors;
-            const HRESULT hr = D3DCompile(source.data(), source.size(), name, nullptr, nullptr, "main", target,
-                D3DCOMPILE_OPTIMIZATION_LEVEL1, 0, &code, &errors);
-            if (FAILED(hr))
-            {
-                std::fprintf(stderr, "[gpu] %s compile failed:\n%s\n", name, errors ? static_cast<const char*>(errors->GetBufferPointer()) : "");
-                return nullptr;
-            }
-            return code;
-        }
-
         const char* const kRectangleGs = R"(
 struct Vertex
 {
@@ -346,7 +334,8 @@ float ps_main(float4 position : SV_Position) : SV_Target
             uint64_t cacheKey = 0;                    // hash of the HLSL (disk cache file name)
         };
 
-        // Background shader compilation: D3DCompile takes 0.1-6 s per translated shader, so new
+        // Background shader compilation: a translated shader takes up to 0.2 s with DXC (0.1-6 s
+        // with D3DCompile), so new
         // shaders compile on worker threads while the title keeps running (draws needing them are
         // skipped until they are ready). HC09_SYNC_SHADERS=1 compiles on first use instead.
         class ShaderCompilerPool
@@ -359,10 +348,10 @@ float ps_main(float4 position : SV_Position) : SV_Target
                     std::thread([this] { Work(); }).detach();
             }
 
-            void Submit(std::string source, const char* target, std::string name, std::shared_ptr<PendingCompile> result)
+            void Submit(std::string source, ShaderStage stage, std::string name, std::shared_ptr<PendingCompile> result)
             {
                 std::lock_guard lock(mutex_);
-                jobs_.push_back({ std::move(source), target, std::move(name), std::move(result) });
+                jobs_.push_back({ std::move(source), stage, std::move(name), std::move(result) });
                 ready_.notify_one();
             }
 
@@ -370,7 +359,7 @@ float ps_main(float4 position : SV_Position) : SV_Target
             struct Job
             {
                 std::string source;
-                const char* target;
+                ShaderStage stage;
                 std::string name;
                 std::shared_ptr<PendingCompile> result;
             };
@@ -386,15 +375,7 @@ float ps_main(float4 position : SV_Position) : SV_Target
                         job = std::move(jobs_.front());
                         jobs_.pop_front();
                     }
-                    ComPtr<ID3DBlob> code, errors;
-                    if (FAILED(D3DCompile(job.source.data(), job.source.size(), job.name.c_str(), nullptr, nullptr, "main", job.target,
-                            D3DCOMPILE_OPTIMIZATION_LEVEL1, 0, &code, &errors)))
-                    {
-                        std::fprintf(stderr, "[gpu] %s compile failed:\n%s\n", job.name.c_str(),
-                            errors ? static_cast<const char*>(errors->GetBufferPointer()) : "");
-                        code.Reset();
-                    }
-                    job.result->code = code;
+                    job.result->code = CompileShader(job.source, job.stage, "main", job.name.c_str());
                     job.result->done = true;
                 }
             }
@@ -404,11 +385,13 @@ float ps_main(float4 position : SV_Position) : SV_Target
             std::deque<Job> jobs_;
         };
 
-        // Compiled shaders persist in build/shadercache/<HLSL hash>.<vs|ps> across sessions.
+        // Compiled shaders persist in build/shadercache/<HLSL hash>.<vs|ps>[.dxil] across sessions
+        // (DXC's apart from D3DCompile's: a pipeline takes one kind only).
         std::string ShaderCachePath(uint64_t key, bool pixel)
         {
             char path[96];
-            std::snprintf(path, sizeof(path), "build/shadercache/%016llX.%s", (unsigned long long)key, pixel ? "ps" : "vs");
+            std::snprintf(path, sizeof(path), "build/shadercache/%016llX.%s%s", (unsigned long long)key, pixel ? "ps" : "vs",
+                UsingDxc() ? ".dxil" : "");
             return path;
         }
 
@@ -514,8 +497,21 @@ float ps_main(float4 position : SV_Position) : SV_Target
                 if (!context_.Initialize(kTargetWidth, kTargetHeight))
                     return false;
                 textures_ = std::make_unique<TextureCache>(context_);
-                return CreateRootSignatures() && CreatePresentPipeline() && CreateNullViews() && CreateDepthCopyPipeline() &&
-                    (rectangleGs_ = CompileHlsl(kRectangleGs, "gs_5_1", "rectangle_gs")) != nullptr;
+                InitializeShaderCompiler(context_.device());
+                if (!CreateRootSignatures())
+                    return false;
+                // The first pipeline also tests the compiler: a device or driver that refuses
+                // DXC's shaders gets D3DCompile's.
+                if (!CreatePresentPipeline())
+                {
+                    if (!UsingDxc())
+                        return false;
+                    FallBackToD3DCompile();
+                    if (!CreatePresentPipeline())
+                        return false;
+                }
+                return CreateNullViews() && CreateDepthCopyPipeline() &&
+                    (rectangleGs_ = CompileShader(kRectangleGs, ShaderStage::Geometry, "main", "rectangle_gs")) != nullptr;
             }
 
             void Draw(const DrawInfo& draw);
@@ -631,9 +627,9 @@ float ps_main(float4 position : SV_Position) : SV_Target
 
         bool Renderer::CreatePresentPipeline()
         {
-            ComPtr<ID3DBlob> vs, ps, errors;
-            if (FAILED(D3DCompile(kPresentShader, std::strlen(kPresentShader), "present", nullptr, nullptr, "vs_main", "vs_5_1", 0, 0, &vs, &errors)) ||
-                FAILED(D3DCompile(kPresentShader, std::strlen(kPresentShader), "present", nullptr, nullptr, "ps_main", "ps_5_1", 0, 0, &ps, &errors)))
+            ComPtr<ID3DBlob> vs = CompileShader(kPresentShader, ShaderStage::Vertex, "vs_main", "present");
+            ComPtr<ID3DBlob> ps = CompileShader(kPresentShader, ShaderStage::Pixel, "ps_main", "present");
+            if (!vs || !ps)
                 return false;
             D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
             desc.pRootSignature = presentRootSignature_.Get();
@@ -730,7 +726,7 @@ float ps_main(float4 position : SV_Position) : SV_Target
                 if (synchronous)
                 {
                     const auto compileStart = std::chrono::steady_clock::now();
-                    compiled.code = CompileHlsl(compiled.info.hlsl, pixel ? "ps_5_1" : "vs_5_1", name);
+                    compiled.code = CompileShader(compiled.info.hlsl, pixel ? ShaderStage::Pixel : ShaderStage::Vertex, "main", name);
                     compiled.ok = compiled.code != nullptr;
                     const double compileMs =
                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - compileStart).count();
@@ -746,7 +742,7 @@ float ps_main(float4 position : SV_Position) : SV_Target
                 {
                     static ShaderCompilerPool pool;
                     compiled.pending = std::make_shared<PendingCompile>();
-                    pool.Submit(compiled.info.hlsl, pixel ? "ps_5_1" : "vs_5_1", name, compiled.pending);
+                    pool.Submit(compiled.info.hlsl, pixel ? ShaderStage::Pixel : ShaderStage::Vertex, name, compiled.pending);
                 }
             }
             return compiled;
@@ -1815,13 +1811,10 @@ float ps_main(float4 position : SV_Position) : SV_Target
 
         bool Renderer::CreateDepthCopyPipeline(const char* source, ComPtr<ID3D12PipelineState>& pipeline)
         {
-            ComPtr<ID3DBlob> vs, ps, errors;
-            if (FAILED(D3DCompile(source, std::strlen(source), "depth_copy", nullptr, nullptr, "vs_main", "vs_5_1", 0, 0, &vs, &errors)) ||
-                FAILED(D3DCompile(source, std::strlen(source), "depth_copy", nullptr, nullptr, "ps_main", "ps_5_1", 0, 0, &ps, &errors)))
-            {
-                std::fprintf(stderr, "[gpu] depth copy shader: %s\n", errors ? static_cast<const char*>(errors->GetBufferPointer()) : "");
+            ComPtr<ID3DBlob> vs = CompileShader(source, ShaderStage::Vertex, "vs_main", "depth_copy");
+            ComPtr<ID3DBlob> ps = CompileShader(source, ShaderStage::Pixel, "ps_main", "depth_copy");
+            if (!vs || !ps)
                 return false;
-            }
             D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
             desc.pRootSignature = presentRootSignature_.Get();
             desc.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };

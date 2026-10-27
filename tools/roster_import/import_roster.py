@@ -306,6 +306,20 @@ def rate_teams(play, team_table):
             team_table.set(i, field, round(min(old) + share * (max(old) - min(old))))
 
 
+def set_last_season(team_table):
+    """The record New Career's Team Select shows as last season (TEAM TPSW, TPSL, TPST): the real
+    one of the season before (last_season.py, which also writes it into the career history)."""
+    from last_season import RECORDS, TEAM_IDS
+    records = {TEAM_IDS[name]: record for name, record in RECORDS.items()}
+    for i in range(team_table.count):
+        record = records.get(team_table.get(i, "TGID"))
+        if record:
+            wins, losses, ties, _ = record
+            team_table.set(i, "TPSW", wins)
+            team_table.set(i, "TPSL", losses)
+            team_table.set(i, "TPST", ties)
+
+
 def build_depth_charts(play, dcht, records_by_team):
     """Rewrites DCHT in place: every rostered player at his position, best first, plus the
     special-teams slots (21 KR, 22 PR, 23 kickoff, 24 long snapper, 25 third-down back).
@@ -504,6 +518,7 @@ def import_roster(csv_path, roster_path, out_path, report_path=None, contracts_p
 
     clear_draft_class(db)
     rate_teams(play, team_table)
+    set_last_season(team_table)
 
     for i in range(team_table.count):
         new_name = TEAM_RENAMES.get(team_table.get(i, "TDNA"))

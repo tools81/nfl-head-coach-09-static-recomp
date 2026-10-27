@@ -1,6 +1,6 @@
 # NFL Head Coach 09 — static recompilation
 
-Version 0.7.1
+Version 0.7.2
 
 A native Windows port of NFL Head Coach 09 (Xbox 360, title ID `45410841`), built by
 statically recompiling the game's PowerPC executable to C++ with
@@ -46,7 +46,7 @@ is built as it is instead. The setup log is `%TEMP%\HC09Setup.log`.
 | File system (disc read straight from the ISO, writable `build/userdata`) | implemented |
 | GPU command processor (ring buffer, fences, scratch write-back, per-CPU interrupts, vblank, swaps, shader/constant loads, predicated tiling) | implemented |
 | Physical memory windows (0xA0000000 / 0xC0000000 / 0xE0000000 aliased) | implemented (0xE0000000's 4 KiB offset not reproduced) |
-| Xenos shader microcode → HLSL translator | implemented; all 148 shaders captured from menus and gameplay translate and compile |
+| Xenos shader microcode → HLSL translator | implemented; all 148 shaders captured from menus and gameplay translate and compile. Compiled with DXC (shader model 6.0, `dxcompiler.dll` and `dxil.dll` copied from the Windows SDK at build time) in the background and cached in `build/shadercache`: the 148 take about 5 s in all, at most 0.12 s each, against 52 s and up to 6 s with D3DCompile, which is used when DXC is missing or the GPU lacks shader model 6.0 |
 | D3D12 renderer | draws, depth/stencil, culling, blending, alpha test, textures (linear/tiled, full mip chains incl. packed mip tails, render-to-texture mips, anisotropic filtering, border colours, cube maps, volumes, stacked arrays with normalized layer coordinates, common formats, resolved depth), resolves (incl. tiled colour and depth strips and the red/blue copy swap), present, fast clears through multisampled EDRAM aliases, 4x MSAA for the multisampled surfaces the 3D scenes render to (`HC09_NO_MSAA=1` turns it off) |
 | Audio output | WASAPI shared mode, 5.1 mix downmixed to stereo |
 | XMA decoder | FFmpeg's XMA2 decoder (LGPL build in `thirdparty/ffmpeg`), 16-bit PCM into the title's output rings |
@@ -249,6 +249,10 @@ tag, re-patches XenonRecomp if the pin changed, and recompiles and rebuilds the 
   compiles them.
 - `set HC09_SCREENSHOT=300` saves frame 300 as `build/screenshot.bmp`
   (`python tools/bmp_to_png.py build/screenshot.bmp out.png`).
+- `set HC09_TRACE_NAMES=1` (HC27) prints each distinct asset name the game looks up in its archives
+  (packages, models, textures), with the caller.
+- `set HC09_FXC=1` compiles shaders with D3DCompile instead of DXC; `HC09_SYNC_SHADERS=1` compiles each
+  when first drawn instead of in the background (with `HC09_GPU_STATS=1`, printing how long each took).
 - `set HC09_D3D12_DEBUG=1` enables the D3D12 debug layer and prints each distinct message; `HC09_NO_RENDER=1` disables rendering.
 - `set HC09_AUDIO_RECORD=C:\path\out.wav` records everything sent to the speakers (48 kHz stereo).
 - `set HC09_AUDIO_STATS=1` prints XMA decoder counters, the output peak level and the sound card
