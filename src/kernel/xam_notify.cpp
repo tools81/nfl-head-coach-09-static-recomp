@@ -56,6 +56,7 @@ namespace hc09
             {
                 std::lock_guard lock(WaitMutex());
                 object->signaled = true;
+                object->SyncToGuest();
                 NotifyWaiters();
             }
         }

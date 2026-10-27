@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tdb import SaveFile  # noqa: E402
 
 FREE_AGENTS = 1009
+NO_PLAYER = 32767
 
 POSITIONS = {  # Madden position id -> HC09 PPOS (None: no HC09 equivalent, skipped)
     "QB": 0, "HB": 1, "FB": 2, "WR": 3, "TE": 4, "LT": 5, "LG": 6, "C": 7, "RG": 8, "RT": 9,
@@ -256,6 +257,55 @@ def write_player(play, index, p, team):
         play.set(index, field, value)
 
 
+def clear_draft_class(db):
+    """DRPP lists the 2008 draft class by player id (with team, pick and round). A career started
+    in the preseason takes some of those players off their teams as draft picks still to be
+    signed, and one started in the off-season puts the class back in the draft. The ids now belong
+    to the imported players who took over those records, mostly veterans under contract, so every
+    row is pointed at no player (32767, the id the game's own tables use for none)."""
+    drpp = db.tables["DRPP"]
+    for i in range(drpp.count):
+        drpp.set(i, "PGID", NO_PLAYER)
+
+
+# The team ratings Team Select and the career screens show (TEAM table): position groups from the
+# team's best players at each position (position code, how many), then offense and defense from
+# the groups and overall from those and special teams.
+TEAM_GROUPS = {"TRQB": [(0, 1)], "TRRB": [(1, 1)], "TWRR": [(3, 3), (4, 1)],
+               "TROL": [(5, 1), (6, 1), (7, 1), (8, 1), (9, 1)], "TRDL": [(10, 1), (11, 1), (12, 2)],
+               "TRLB": [(13, 1), (14, 1), (15, 1)], "TRDB": [(16, 2), (17, 1), (18, 1)], "TRST": [(19, 1), (20, 1)]}
+TEAM_OFFENSE = {"TRQB": 0.35, "TWRR": 0.25, "TROL": 0.25, "TRRB": 0.15}
+TEAM_DEFENSE = {"TRDL": 0.35, "TRLB": 0.25, "TRDB": 0.40}
+
+
+def rate_teams(play, team_table):
+    """Rewrites the 32 teams' ratings from their players. The 2008 roster's ratings were set by
+    hand; the new ones keep their range (the best team gets the 2008 best value, the worst the
+    2008 worst) with the teams ordered by their players' overall ratings."""
+    by_team = {}
+    for i in range(play.count):
+        by_team.setdefault(play.get(i, "TGID"), {}).setdefault(play.get(i, "PPOS"), []).append(play.get(i, "POVR"))
+    rows = [i for i in range(team_table.count) if 1 <= team_table.get(i, "TGID") <= 32]
+    raw = {}
+    for i in rows:
+        players = by_team.get(team_table.get(i, "TGID"), {})
+        r = {}
+        for group, spec in TEAM_GROUPS.items():
+            values = [v for position, n in spec for v in sorted(players.get(position, []), reverse=True)[:n]]
+            r[group] = sum(values) / len(values) if values else 0
+        r["TROF"] = sum(r[g] * w for g, w in TEAM_OFFENSE.items())
+        r["TRDE"] = sum(r[g] * w for g, w in TEAM_DEFENSE.items())
+        r["TROV"] = 0.45 * r["TROF"] + 0.45 * r["TRDE"] + 0.10 * r["TRST"]
+        raw[i] = r
+    for field in list(TEAM_GROUPS) + ["TROF", "TRDE", "TROV"]:
+        old = [team_table.get(i, field) for i in rows]
+        new = [raw[i][field] for i in rows]
+        low, high = min(new), max(new)
+        for i in rows:
+            share = (raw[i][field] - low) / (high - low) if high > low else 0.5
+            team_table.set(i, field, round(min(old) + share * (max(old) - min(old))))
+
+
 def build_depth_charts(play, dcht, records_by_team):
     """Rewrites DCHT in place: every rostered player at his position, best first, plus the
     special-teams slots (21 KR, 22 PR, 23 kickoff, 24 long snapper, 25 third-down back).
@@ -451,6 +501,9 @@ def import_roster(csv_path, roster_path, out_path, report_path=None, contracts_p
     for i, _, t in assignments:
         roster.setdefault(t, []).append(i)
     build_depth_charts(play, dcht, roster)
+
+    clear_draft_class(db)
+    rate_teams(play, team_table)
 
     for i in range(team_table.count):
         new_name = TEAM_RENAMES.get(team_table.get(i, "TDNA"))

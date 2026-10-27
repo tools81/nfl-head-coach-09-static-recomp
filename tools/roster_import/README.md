@@ -35,6 +35,14 @@ the game's default: everything it needs goes in the `hc27` folder of the install
    released), so a team that has a lot of it has that much more room than in reality. Without
    `--contracts`, the 2008 contracts are dealt out again (see below).
 
+   The team ratings Team Select shows (overall, offense, defense, and the position groups) are
+   worked out from each team's best players at each position, and spread over the same range
+   as the 2008 ratings (the best team gets 2008's best value, the worst 2008's worst).
+
+   The 2008 draft class the roster lists (by player id) is cleared, since those ids now belong to
+   the imported players. Otherwise a career started in the preseason would take some of them off
+   their teams as unsigned draft picks waiting for a contract.
+
 3. Player portraits:
 
    ```sh
@@ -88,7 +96,7 @@ the game's default: everything it needs goes in the `hc27` folder of the install
    has a transparent background is used as it is. New Career's Team Select can
    only show likeness heads: a head coach with a preset head is blank there. Without coaches,
    copy `data/ROSTER-M27` to `hc27/ROSTER` instead.
-5. Team logos (optional; so far the Commanders): the game's images of a team's logo and name
+5. Team logos (optional; so far the Commanders, Bears and Rams): the game's images of a team's logo and name
    are textures inside the disc's archives, so they are replaced by their contents. Run HC27 once
    with `set HC09_DUMP_HASHED=1` and go through the screens that show the team: Coach Now's Team
    Select and a game with the team (loading screen, Coach Agenda, play calling, score bug), and
@@ -101,7 +109,9 @@ the game's default: everything it needs goes in the `hc27` folder of the install
    ```
 
    (and `--team bears --logo tools/roster_import/data/logos/chicago.png` for the Bears, whose
-   helmets and midfield keep the C) puts the logo (a PNG with a transparent background) and the
+   helmets and midfield keep the C, and `--team rams --logo
+   tools/roster_import/data/logos/losangelesrams.png` for the Rams, whose helmets keep the horns
+   and whose end zones keep the name) puts the logo (a PNG with a transparent background) and the
    name in place of the old ones in
    the team's textures it knows (`TEAMS` in the script): menus, helmets, the coaches' polo shirts,
    the stadium's midfield logo and end zones (`--end-zone`, a PNG with a transparent background;

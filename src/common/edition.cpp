@@ -142,4 +142,47 @@ PPC_FUNC(sub_82998B08)
     if (!original.empty())
         std::memcpy(name, original.c_str(), original.size() + 1);
 }
+
+// The years the game shows. Its calendar counts days from 1 January 2008 and seasons from 2008
+// (season 0); HC27 starts in 2026, so the years it shows are 18 later. The calendar itself, with
+// its weekdays and leap days, is left as it is (it decides when games are played): only the year
+// the functions below give out changes.
+namespace
+{
+    constexpr int kYearShift = 2026 - 2008;
+}
+
+// The first season's year (2008).
+extern "C" PPC_FUNC(__imp__sub_82C93A70);
+PPC_FUNC(sub_82C93A70)
+{
+    __imp__sub_82C93A70(ctx, base);
+    ctx.r3.s64 += kYearShift;
+}
+
+// The current season's year (2008 + the season number).
+extern "C" PPC_FUNC(__imp__sub_82C93A88);
+PPC_FUNC(sub_82C93A88)
+{
+    __imp__sub_82C93A88(ctx, base);
+    ctx.r3.s64 += kYearShift;
+}
+
+// A time (r4, seconds) into a date (r3): month, day, weekday, then the year at +12 (and the years
+// since 2008 at +14, which the game counts with) and the time of day.
+extern "C" PPC_FUNC(__imp__sub_82C92CE0);
+PPC_FUNC(sub_82C92CE0)
+{
+    const uint32_t date = ctx.r3.u32;
+    __imp__sub_82C92CE0(ctx, base);
+    PPC_STORE_U16(date + 12, uint16_t(PPC_LOAD_U16(date + 12) + kYearShift));
+}
+
+// Whether a date's year (+12) is a leap year, which the game asks on 1 March: judged on the
+// calendar's own year, so the days stay those of the calendar.
+PPC_FUNC(sub_82C93150)
+{
+    const int year = PPC_LOAD_U16(ctx.r3.u32 + 12) - kYearShift;
+    ctx.r3.u64 = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+}
 #endif

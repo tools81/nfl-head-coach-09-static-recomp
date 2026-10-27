@@ -154,7 +154,9 @@ namespace hc09::debug
     }
 
     // HC09_SAMPLE_THREAD=<guest id>: samples that thread's stack every 2 ms for its whole
-    // life, printing each distinct call path (top 8 frames) once.
+    // life, printing each distinct call path (top 8 frames, or HC09_SAMPLE_DEPTH) once.
+    // HC09_SAMPLE_AFTER=<seconds> starts sampling that long after the thread starts (sampling
+    // slows the thread, which can hide a race earlier on).
     void SampleThread(HANDLE thread, uint32_t guestId)
     {
         EnsureSymbols();
@@ -162,6 +164,9 @@ namespace hc09::debug
         std::vector<std::string> seen;
         alignas(SYMBOL_INFO) char symbolBuffer[sizeof(SYMBOL_INFO) + 256];
         auto* symbol = reinterpret_cast<SYMBOL_INFO*>(symbolBuffer);
+        const int maxDepth = std::getenv("HC09_SAMPLE_DEPTH") ? std::atoi(std::getenv("HC09_SAMPLE_DEPTH")) : 8;
+        if (const char* after = std::getenv("HC09_SAMPLE_AFTER"))
+            std::this_thread::sleep_for(std::chrono::seconds(std::atoi(after)));
         for (;;)
         {
             DWORD exitCode = 0;
@@ -178,7 +183,7 @@ namespace hc09::debug
                 frame.AddrPC = { context.Rip, 0, AddrModeFlat };
                 frame.AddrFrame = { context.Rbp, 0, AddrModeFlat };
                 frame.AddrStack = { context.Rsp, 0, AddrModeFlat };
-                for (int depth = 0; depth < 8; depth++)
+                for (int depth = 0; depth < maxDepth; depth++)
                 {
                     if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, process, thread, &frame, &context, nullptr,
                             SymFunctionTableAccess64, SymGetModuleBase64, nullptr) || frame.AddrPC.Offset == 0)

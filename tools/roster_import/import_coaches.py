@@ -59,6 +59,10 @@ PHOTO = re.compile(r"^([a-z0-9]+)_([a-z]+)_(.+)\.png$", re.IGNORECASE)
 TEAM_SELECT_SIZE = 512
 TEAM_SELECT_HOME = (190, 10, 512, 321)  # left, top, right, bottom of the coach
 TEAM_SELECT_AWAY = (31, 10, 353, 321)
+# Every coach is framed by his head: this wide (ears included), its top at the top of the box,
+# centred on the box; below it the photo is cut at the bottom of the box (one too short to reach
+# it is made larger until it does).
+TEAM_SELECT_HEAD_WIDTH = 140
 
 # The coach portraits (Staff Status and the other career screens): 256x256 cut-outs, head and
 # shoulders down to the bottom edge, framed like Lovie Smith's: the head 100 pixels wide (ears
@@ -186,19 +190,17 @@ def team_select_picture(photo_path, out_path, placement):
     own Team Select pictures."""
     from PIL import Image
     coach, box = cut_out(photo_path)
+    head_left, head_right = find_head(coach, box)
     left, top, right, bottom = placement
-    # Head and chest, as the game frames its coaches: a waist-up photo is cut down to its top part.
-    box = (box[0], box[1], box[2], min(box[3], box[1] + round(0.8 * (box[2] - box[0]))))
-    coach = coach.crop(box)
-    coach = coach.resize((max(1, round(coach.width * (bottom - top) / coach.height)), bottom - top), Image.LANCZOS)
-    # Centred on the box; anything wider than the picture (a wide shot's arms) is cut off.
-    x = (left + right - coach.width) // 2
-    if x < 0 or x + coach.width > TEAM_SELECT_SIZE:
-        cut = max(-x, x + coach.width - TEAM_SELECT_SIZE)
-        coach = coach.crop((cut, 0, coach.width - cut, coach.height))
-        x += cut
+    # A photo that would end above the bottom of the box (a close-up) is made larger to fill it.
+    scale = max(TEAM_SELECT_HEAD_WIDTH / (head_right - head_left), (bottom - top) / (box[3] - box[1]))
+    coach = coach.resize((max(1, round(coach.width * scale)), max(1, round(coach.height * scale))), Image.LANCZOS)
+    # The head's top at the top of the box and its middle at the box's middle; whatever falls
+    # outside the box (below it, or a wide shot's arms past the picture's edges) is cut off.
+    x = round((left + right) / 2 - (head_left + head_right) / 2 * scale)
+    y = round(top - box[1] * scale)
     picture = Image.new("RGBA", (TEAM_SELECT_SIZE, TEAM_SELECT_SIZE), (0, 0, 0, 0))
-    picture.alpha_composite(coach, (x, top))
+    picture.alpha_composite(coach.crop((-x, -y, TEAM_SELECT_SIZE - x, bottom - y)))
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     picture.save(out_path)
 

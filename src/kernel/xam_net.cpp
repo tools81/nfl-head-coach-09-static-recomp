@@ -109,6 +109,7 @@ PPC_FUNC(__imp__NetDll_WSASetEvent)
         return Return(ctx, 0);
     std::lock_guard lock(WaitMutex());
     event->signaled = true;
+    event->SyncToGuest();
     NotifyWaiters();
     Return(ctx, 1);
 }
@@ -120,6 +121,7 @@ PPC_FUNC(__imp__NetDll_WSAResetEvent)
         return Return(ctx, 0);
     std::lock_guard lock(WaitMutex());
     event->signaled = false;
+    event->SyncToGuest();
     Return(ctx, 1);
 }
 

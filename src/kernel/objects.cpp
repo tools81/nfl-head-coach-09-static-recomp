@@ -91,13 +91,22 @@ namespace hc09
         return g_handles.erase(handle) != 0;
     }
 
+    namespace
+    {
+        // With g_tableMutex held.
+        void RegisterGuestObjectLocked(uint32_t address, std::shared_ptr<KernelObject> object)
+        {
+            object->guestObject = address;
+            if (IsMirroredType(Load<uint8_t>(address)))
+                Store<uint32_t>(address + 8, kMirrorMarker);
+            g_guestObjects[address] = std::move(object);
+        }
+    }
+
     void RegisterGuestObject(uint32_t address, std::shared_ptr<KernelObject> object)
     {
         std::lock_guard lock(g_tableMutex);
-        object->guestObject = address;
-        if (IsMirroredType(Load<uint8_t>(address)))
-            Store<uint32_t>(address + 8, kMirrorMarker);
-        g_guestObjects[address] = std::move(object);
+        RegisterGuestObjectLocked(address, std::move(object));
     }
 
     void EventObject::SyncToGuest()
@@ -124,22 +133,24 @@ namespace hc09
         const bool mirrored = IsMirroredType(type);
         std::shared_ptr<KernelObject> existing;
         {
+            // Looked up and, if need be, created under one lock: two threads meeting a new
+            // structure at once (one waiting on it, one signaling it) must get the same object.
             std::lock_guard lock(g_tableMutex);
             auto it = g_guestObjects.find(address);
             if (it != g_guestObjects.end() && (!mirrored || Load<uint32_t>(address + 8) == kMirrorMarker))
                 existing = it->second;
+            else
+            {
+                // New, or re-initialized by the guest since we mirrored it: mirror it afresh.
+                auto object = CreateFromHeader(address);
+                RegisterGuestObjectLocked(address, object);
+                return object;
+            }
         }
-        if (existing)
-        {
-            // Adopt a signal state the guest changed inline (ours is always written back).
-            std::lock_guard waitLock(g_waitMutex);
-            existing->SyncFromGuest();
-            return existing;
-        }
-        // New, or re-initialized by the guest since we mirrored it: mirror it afresh.
-        auto object = CreateFromHeader(address);
-        RegisterGuestObject(address, object);
-        return object;
+        // Adopt a signal state the guest changed inline (ours is always written back).
+        std::lock_guard waitLock(g_waitMutex);
+        existing->SyncFromGuest();
+        return existing;
     }
 
     uint32_t GuestStructFor(const std::shared_ptr<KernelObject>& object)

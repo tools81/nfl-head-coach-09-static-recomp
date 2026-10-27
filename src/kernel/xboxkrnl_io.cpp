@@ -9,6 +9,7 @@
 #include "debug/stack_dump.h"
 #include "kernel/guest.h"
 #include "kernel/objects.h"
+#include "kernel/threads.h"
 #include "kernel/vfs.h"
 
 namespace hc09
@@ -51,6 +52,7 @@ namespace hc09
                 {
                     std::lock_guard lock(WaitMutex());
                     event->signaled = true;
+                    event->SyncToGuest();
                     NotifyWaiters();
                 }
             }
@@ -156,8 +158,17 @@ PPC_FUNC(__imp__NtReadFile)
     const uint32_t result = ReadInto(*file, offset, Arg32(ctx, 5), Arg32(ctx, 6), read);
     static const bool traceIo = std::getenv("HC09_TRACE_IO") != nullptr;
     if (traceIo || result != status::kSuccess || read < Arg32(ctx, 6) || Arg32(ctx, 2) != 0)
-        std::fprintf(stderr, "[io] read %s @0x%llX len 0x%X into 0x%08X -> 0x%08X (%u bytes)%s\n", file->path.c_str(),
-            (unsigned long long)offset, Arg32(ctx, 6), Arg32(ctx, 5), result, read, Arg32(ctx, 2) ? " [APC routine ignored]" : "");
+        std::fprintf(stderr, "[io] read %s @0x%llX len 0x%X into 0x%08X -> 0x%08X (%u bytes, thread 0x%X)%s\n", file->path.c_str(),
+            (unsigned long long)offset, Arg32(ctx, 6), Arg32(ctx, 5), result, read, CurrentThreadId(),
+            Arg32(ctx, 2) ? " [APC routine ignored]" : "");
+    // HC09_STACK_ON_READ=<hex offset>: print the call stack of reads at that file offset.
+    static const char* stackOnRead = std::getenv("HC09_STACK_ON_READ");
+    if (stackOnRead && offset == std::strtoull(stackOnRead, nullptr, 16))
+    {
+        CONTEXT context{};
+        RtlCaptureContext(&context);
+        debug::PrintStackFromContext(&context);
+    }
     CompleteIo(Arg32(ctx, 4), result, read, Arg32(ctx, 1));
     Return(ctx, result);
 }

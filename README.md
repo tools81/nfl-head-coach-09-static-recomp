@@ -1,6 +1,6 @@
 # NFL Head Coach 09 — static recompilation
 
-Version 0.7.0
+Version 0.7.1
 
 A native Windows port of NFL Head Coach 09 (Xbox 360, title ID `45410841`), built by
 statically recompiling the game's PowerPC executable to C++ with
@@ -86,7 +86,9 @@ held 30-35 fps at 2x in testing; 1x is the default.
 place of the disc's default roster (so new careers and the roster screens start with it, nothing
 to load), lays the patches in `hc27\disc` (`<archive>@<hex offset>.bin`, such as the league's
 finances that `league_salaries.py` writes) over the disc's files, draws the images in
-`hc27\textures` before those in `textures`, and keeps its saves apart in `build\userdata-hc27`. Without `hc27\ROSTER` it reports what to build and exits.
+`hc27\textures` before those in `textures`, and keeps its saves apart in `build\userdata-hc27`.
+Its seasons start in 2026: the game's calendar still runs from 2008, so every year it shows (the
+clipboard's date, the salary cap years, draft classes, important dates) is 18 years later. Without `hc27\ROSTER` it reports what to build and exits.
 HC09.exe is unaffected by the `hc27` folder.
 
 The front end's "swappable" images (player and coach portraits, team logos, helmets and the

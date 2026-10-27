@@ -29,6 +29,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 #   banner    the team's name down a band on the left, the logo on the right
 #   end zone  a field with the team's name in the end zone at its top
 #   field     the stadium's field: midfield logo, and the end zones (--end-zone, else the name)
+#   midfield  the stadium's field: the midfield logo only
 #   decal     the logo alone, mirrored (the helmet's decal)
 #   boxes     logos at the given boxes, see replace_boxes (written ("boxes", box, ...))
 #   ribbon    a ribbon board with the logo repeated along it
@@ -60,6 +61,25 @@ TEAMS = {
         "12399CE37820B4D6": ("boxes", (44, 122, 200, 230)),                       # career campus: "Home of the ..."
         "AEBF6C88B77B2C49": ("boxes", (6, 148, 252, 304, "down")),               # career campus banner
         "E0BB93021F429A64": ("boxes", (3, 79, 35, 113)),                          # career campus banner
+    },
+    # The Rams keep their horns on helmets (the score bug's 06040080E0A6CB4F and the players'
+    # CDF9FA900A84C62D, not listed) and the ram-shaped sign on the career campus building
+    # (1CF24E3C4CE6B901, whose shape is the model's). The "St. Louis Rams" lettering beside a logo
+    # goes with it (one new logo for both); "Rams" alone (end zones, the campus wall) stays.
+    "rams": {
+        "47477AB0E71E123F": "logo",      # large logo: Team Select
+        "B297981FB4B83143": "logo",      # small logo: Team Select, lists, Coach Agenda, clipboard
+        "4F1695F5F8954377": "flat",      # the logo icon
+        "5BBC5F3314361FEE": "midfield",  # the stadium's field
+        "5104F93738182D03": ("boxes", (100, 24, 766, 490)),                       # logo on navy, the horn beside it
+        "FD234BB4F19EAE73": ("boxes", (46, 6, 213, 123), (902, 6, 1069, 123),     # the stadium's ribbon boards
+                             (2982, 6, 3149, 123), (3838, 6, 4005, 123)),
+        "5CAD4F617ADA01F3": ("boxes", (392, 26, 503, 71)),                        # stadium: championship banners
+        "9BBEB0CF8B9AA86B": ("boxes", (100, 478, 208, 592)),                      # coaches' apparel
+        "A52F21BB760B4658": ("boxes", (100, 478, 208, 592)),
+        "27D7950D18DA10E8": ("boxes", (50, 42, 210, 222)),                        # career campus: "Home of the ..."
+        "55A242AB4C86CC67": ("boxes", (3, 27, 61, 102)),                          # career campus banners
+        "75EFA5EEFE3B9D04": ("boxes", (136, 373, 194, 414)),                      # career campus building wall
     },
 }
 
@@ -323,37 +343,23 @@ def replace_end_zone(original, logo, name):
     return picture
 
 
-def replace_field(original, logo, name, end_zone=None):
+def field_white(p):
+    return min(p[:3]) > 150
+
+
+def replace_midfield(original, logo):
     """The stadium's field, end zones at the top and bottom: the midfield logo covered with the
     field a few yard lines away (same lines and hash marks) and the new logo put on it, turned as
-    the old one was; each end zone's art covered with its own grass and the end zone picture put
-    in it (the bottom one turned around)."""
-    from PIL import Image
+    the old one was. The end zones stay."""
+    from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageStat
     width, height = original.size
     pixels = original.load()
-
-    def white(p):
-        return min(p[:3]) > 150
-
-    def grass(p):
-        return p[1] > p[0] + 5 and p[1] > p[2] and not white(p)
-
-    def runs(values):  # (start, end) of each run of True
-        out, start = [], None
-        for i, v in enumerate(values + [False]):
-            if v and start is None:
-                start = i
-            elif not v and start is not None:
-                out.append((start, i))
-                start = None
-        return out
-
     picture = original.copy()
     centre = width // 2
     # Midfield: yard lines down a column beside the logo; the logo is what is redder than the
     # grass (its burgundy, gold and brown) around the centre.
     line_column = centre - width * 8 // 100
-    lines = [start for start, _ in runs([white(pixels[line_column, y]) for y in range(height)])]
+    lines = [start for start, _ in runs_of([field_white(pixels[line_column, y]) for y in range(height)])]
     spacing = min(b - a for a, b in zip(lines, lines[1:]) if b - a > height // 100)
     reach = width // 10
     logo_box = matching_box(original, (centre - reach, height // 2 - reach, centre + reach, height // 2 + reach),
@@ -362,7 +368,6 @@ def replace_field(original, logo, name, end_zone=None):
     box = (logo_box[0] - margin, logo_box[1] - margin, logo_box[2] + margin, logo_box[3] + margin)
     # From whole yard-line gaps away, clear of the logo, up or down the field: the patch whose
     # edges match the field around the box best, blended in at its edges.
-    from PIL import ImageChops, ImageDraw, ImageFilter, ImageStat
     first = -(-(box[3] - box[1]) // spacing)
     ring = Image.new("L", original.size, 0)
     ImageDraw.Draw(ring).rectangle(box, outline=255, width=3)
@@ -388,6 +393,22 @@ def replace_field(original, logo, name, end_zone=None):
     turned = logo.rotate(90, expand=True)  # the logo's top toward the field's left, as the old one
     paste_centred(picture, turned, ((logo_box[0] + logo_box[2] - size) // 2, (logo_box[1] + logo_box[3] - size) // 2,
                                     (logo_box[0] + logo_box[2] + size) // 2, (logo_box[1] + logo_box[3] + size) // 2))
+    return picture
+
+
+def replace_field(original, logo, name, end_zone=None):
+    """The stadium's field: the midfield logo replaced (replace_midfield), and each end zone's art
+    covered with its own grass and the end zone picture put in it (the bottom one turned around)."""
+    from PIL import Image
+    width, height = original.size
+    pixels = original.load()
+    white, runs = field_white, runs_of
+
+    def grass(p):
+        return p[1] > p[0] + 5 and p[1] > p[2] and not white(p)
+
+    picture = replace_midfield(original, logo)
+    centre = width // 2
 
     # End zones: inside the white border at each end, down the centre column.
     column = runs([white(pixels[centre, y]) for y in range(height)])
@@ -472,7 +493,7 @@ def runs_of(values):
 
 RECIPES = {"logo": replace_logo, "flat": replace_flat_logo, "panel": replace_panel, "helmet": replace_helmet,
            "backdrop": replace_backdrop, "wordmark": replace_wordmark, "sign": replace_sign, "banner": replace_banner,
-           "end zone": replace_end_zone, "field": replace_field, "decal": replace_decal,
+           "end zone": replace_end_zone, "field": replace_field, "midfield": replace_midfield, "decal": replace_decal,
            "boxes": replace_boxes, "ribbon": replace_ribbon}
 LETTERED = {"wordmark", "sign", "banner", "end zone", "field"}  # recipes that also letter the team's name
 
