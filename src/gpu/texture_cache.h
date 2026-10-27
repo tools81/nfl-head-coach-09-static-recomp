@@ -101,6 +101,7 @@ namespace hc09::gpu
             uint64_t contentHash = 0;
             int hashedFrame = -1;  // contents are re-checked at most once per frame
             uint64_t sampledHash = 0;  // large textures: hash of sampled chunks
+            bool rewritten = false;    // changed since its first upload: hashed in full every frame
             D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COPY_DEST;
         };
 

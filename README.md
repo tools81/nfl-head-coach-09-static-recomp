@@ -1,6 +1,6 @@
 # NFL Head Coach 09 — static recompilation
 
-Version 0.7.2
+Version 0.7.3
 
 A native Windows port of NFL Head Coach 09 (Xbox 360, title ID `45410841`), built by
 statically recompiling the game's PowerPC executable to C++ with
@@ -237,7 +237,8 @@ tag, re-patches XenonRecomp if the pin changed, and recompiles and rebuilds the 
   (draw / swap / idle) every 2 s, plus the share of wall time in each phase of a draw and
   texture-cache counters, and a `[gpu] memory` line: video memory in use, cached textures and
   resolve targets (with how many were released after a minute unused), resolves dropped as stale
-  (the title loaded other data over their memory) and fetches a resolve could not serve.
+  (the title loaded other data over their memory) and fetches a resolve could not serve. It also
+  logs a large texture whose change its sampled check missed (`changed unseen by its samples`).
 - `set HC09_USERDATA=C:\path\folder` keeps saves and the cache in another folder (e.g. a fresh
   profile for `HC09_PRESS` scripts, which assume the first-start prompts).
 - `set HC09_DUMP_FRAME=300` traces every packet and draw of frame 300 (`13500/150`: frame 13500 and every 150th after it);

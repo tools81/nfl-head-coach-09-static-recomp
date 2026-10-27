@@ -752,11 +752,18 @@ namespace hc09::gpu
         {
             // Large textures: a sampled hash (64 chunks spread over the base level) every frame,
             // which catches whole-image updates such as video, and a full hash every 60 frames.
+            // One that has changed since its first upload is hashed in full every frame: the
+            // samples miss small updates such as the text glyph cache (a 256x512 texture the game
+            // adds each new character to), whose new text would otherwise show other glyphs.
             constexpr uint64_t kFullHashLimit = 256 * 1024, kChunk = 256, kChunks = 64;
             if (sourceBytes + mipBytes <= kFullHashLimit || entry.resource == nullptr || frame % 60 == int(entry.contentHash % 60) ||
-                entry.contentHash == ~0ull)
+                entry.contentHash == ~0ull || entry.rewritten)
             {
                 hash = fullHash();
+                static const bool trace = std::getenv("HC09_GPU_STATS") != nullptr;
+                if (trace && entry.sampledHash != 0 && hash != entry.contentHash)
+                    std::fprintf(stderr, "[texture] 0x%08X %ux%u fmt %u changed unseen by its samples (frame %d)\n",
+                        fetch.baseAddress(), width, height, format, frame);
                 entry.sampledHash = 0;
             }
             else
@@ -774,6 +781,7 @@ namespace hc09::gpu
         if (hash != entry.contentHash)
         {
             g_textureUploads++;
+            entry.rewritten = entry.contentHash != ~0ull;
             entry.contentHash = hash;
             // HC09_DUMP_MIPS=<width>x<height>f<format>[,...]: save every level of matching textures as
             // uploaded (untiled, byte-swapped, rows packed) to build/mip_<frame>_<base>_<level>_<w>x<h>.bin.
