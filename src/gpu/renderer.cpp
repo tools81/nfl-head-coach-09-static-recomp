@@ -36,8 +36,10 @@
 #include "gpu/d3d12_context.h"
 #include "gpu/draw.h"
 #include "gpu/hlsl_translator.h"
+#include "gpu/scene_effects.h"
 #include "gpu/shader_compiler.h"
 #include "gpu/shaders.h"
+#include "gpu/shared_memory.h"
 #include "gpu/texture_cache.h"
 #include "kernel/guest.h"
 
@@ -60,6 +62,7 @@ namespace hc09::gpu
             constexpr uint32_t kBlendControl0 = 0x2201;
             constexpr uint32_t kScModeControl = 0x2205;
             constexpr uint32_t kVteControl = 0x2206;
+            constexpr uint32_t kPolyOffsetFront = 0x2380;  // scale, offset; back at 0x2382
             constexpr uint32_t kModeControl = 0x2208;
             constexpr uint32_t kWindowOffset = 0x2080;
             constexpr uint32_t kWindowScissorTl = 0x2081;
@@ -147,6 +150,20 @@ namespace hc09::gpu
             }
         }
 
+        // Bytes per texel of a texture format a resolve writes to memory (0 when not known).
+        uint32_t MemoryTexelBytes(uint32_t format)
+        {
+            switch (format)
+            {
+            case 2: return 1;                                      // k_8
+            case 3: case 4: case 10: case 15: case 24: case 30: return 2;  // 1_5_5_5, 5_6_5, 8_8, 4_4_4_4, 16, 16_FLOAT
+            case 6: case 7: case 25: case 31: case 36: return 4;   // 8_8_8_8, 2_10_10_10, 16_16, 16_16_FLOAT, 32_FLOAT
+            case 26: case 32: case 37: return 8;                   // 16_16_16_16, 16_16_16_16_FLOAT, 32_32_FLOAT
+            case 38: return 16;                                    // 32_32_32_32_FLOAT
+            default: return 0;
+            }
+        }
+
         uint64_t Mix(uint64_t hash, uint64_t value)
         {
             return (hash ^ value) * 0x100000001B3ull + (hash >> 29);
@@ -167,6 +184,8 @@ namespace hc09::gpu
             uint32_t alphaFunc;  // 7 = always (alpha test disabled)
             float alphaRef;
             uint32_t vertexIndexOffset;  // VGT_INDX_OFFSET, added to every vertex index
+            uint32_t pad0;
+            uint32_t vertexStreams[16];  // per vertex stream: endian swap | byte offset in its view
         };
 
         DXGI_FORMAT ColorFormat(uint32_t format)
@@ -440,7 +459,7 @@ float ps_main(float4 position : SV_Position) : SV_Target
             g_phaseStart = now;
         }
 
-        void ReportPhases()
+        void ReportPhases(D3D12Context& context)
         {
             if (!g_phaseStats)
                 return;
@@ -457,6 +476,17 @@ float ps_main(float4 position : SV_Position) : SV_Target
             std::fprintf(stderr, " | textures: %llu lookups, %llu checks, %llu uploads, %.1f MB hashed%c",
                 (unsigned long long)g_textureLookups.exchange(0), (unsigned long long)g_textureChecks.exchange(0), (unsigned long long)g_textureUploads.exchange(0),
                 g_textureBytesHashed.exchange(0) / 1048576.0, 10);
+            {
+                const D3D12Context::FlushCounts flushes = context.TakeFlushCounts();
+                std::fprintf(stderr, "[gpu] flushes (heap exhausted): uploads %u, views %u, samplers %u\n", flushes.uploads, flushes.views,
+                    flushes.samplers);
+            }
+            if (SharedMemory* memory = GetSharedMemory())
+            {
+                const SharedMemory::Stats stats = memory->TakeStats();
+                std::fprintf(stderr, "[gpu] guest memory on the GPU: %.1f MB copied, %llu write faults\n", stats.pagesCopied / 256.0,
+                    (unsigned long long)stats.faults);
+            }
             g_phaseReport = now;
         }
 
@@ -496,8 +526,10 @@ float ps_main(float4 position : SV_Position) : SV_Target
             {
                 if (!context_.Initialize(kTargetWidth, kTargetHeight))
                     return false;
-                textures_ = std::make_unique<TextureCache>(context_);
                 InitializeShaderCompiler(context_.device());
+                sharedMemory_.Initialize(context_);
+                textures_ = std::make_unique<TextureCache>(context_, sharedMemory_);
+                effects_.Initialize(context_);
                 if (!CreateRootSignatures())
                     return false;
                 // The first pipeline also tests the compiler: a device or driver that refuses
@@ -530,6 +562,11 @@ float ps_main(float4 position : SV_Position) : SV_Target
             ID3D12PipelineState* GetPipeline(const CompiledShader& vs, const CompiledShader& ps, DXGI_FORMAT format,
                 D3D12_PRIMITIVE_TOPOLOGY_TYPE topologyType, bool rectangles, bool colorWrites, uint32_t samples);
             void Resolve();
+            // Ambient occlusion and reflections on the tiled 3D scene, once its first pass is drawn.
+            void ApplySceneEffects();
+            SceneEffects effects_;
+            SceneCamera sceneCamera_;  // from the scene's draws in the current tiling pass
+            int effectsFrame_ = -1;
             void ResolveDepth(uint32_t control);
             bool CreateDepthCopyPipeline();
             bool CreateDepthCopyPipeline(const char* source, ComPtr<ID3D12PipelineState>& pipeline);
@@ -545,6 +582,7 @@ float ps_main(float4 position : SV_Position) : SV_Target
                 D3D12_PRIMITIVE_TOPOLOGY& topology, D3D12_PRIMITIVE_TOPOLOGY_TYPE& type, bool& rectangles);
 
             D3D12Context context_;
+            SharedMemory sharedMemory_;
             std::unique_ptr<TextureCache> textures_;
             ComPtr<ID3D12RootSignature> rootSignature_;
             ComPtr<ID3D12RootSignature> presentRootSignature_;
@@ -576,6 +614,18 @@ float ps_main(float4 position : SV_Position) : SV_Target
             uint64_t lastConstantsGeneration_ = ~0ull;
             bool CreateNullViews();
             uint64_t samplerTableGeneration_ = ~0ull;
+            // A draw's view (t0..t79) before its table is built.
+            struct ViewSlot
+            {
+                uint32_t slot;
+                ID3D12Resource* resource;
+                D3D12_SHADER_RESOURCE_VIEW_DESC desc;
+            };
+            // The table holding these views (the rest null), reused when this frame built the same one.
+            DescriptorRange GetViewTable(const ViewSlot* views, uint32_t count, uint32_t cubeMask, uint32_t volumeMask);
+            // View tables built in this frame's part of the heap, by their contents.
+            std::unordered_map<uint64_t, DescriptorRange> viewTables_;
+            uint64_t viewTableGeneration_ = ~0ull;
             uint64_t vertexUploadGeneration_ = ~0ull;
             std::unordered_map<uint32_t, ResolveTarget> resolveTargets_;
             std::vector<std::pair<int, ComPtr<ID3D12Resource>>> retiredTargets_;  // (frame released, resource)
@@ -826,6 +876,19 @@ float ps_main(float4 position : SV_Position) : SV_Target
             const uint32_t depthControl = ReadRegister(reg::kDepthControl);
             const uint32_t stencilMasks = ReadRegister(reg::kStencilRefMask) & 0xFFFF00;
             const uint32_t cull = ReadRegister(reg::kScModeControl) & 7;
+            // Polygon offset: PA_SU_SC_MODE_CNTL poly_offset_front_enable (bit 11) / back (bit 12), with
+            // PA_SU_POLY_OFFSET_FRONT_SCALE/OFFSET (0x2380/1) and BACK (0x2382/3). The title draws layers
+            // over the field with it; without it they depth-fight the turf. D3D12 has one bias for both
+            // faces, so the front's is taken when enabled. The scale is in 1/16 pixel units; the offset in
+            // depth units, which D3D12 takes as an integer count of 2^-24 for the D24 buffer.
+            const uint32_t polyOffsetEnable = (ReadRegister(reg::kScModeControl) >> 11) & 3;
+            uint32_t polyScale = 0, polyOffset = 0;
+            if (polyOffsetEnable)
+            {
+                const uint32_t base = (polyOffsetEnable & 1) ? reg::kPolyOffsetFront : reg::kPolyOffsetFront + 2;
+                polyScale = ReadRegister(base);
+                polyOffset = ReadRegister(base + 1);
+            }
             const uint32_t blend = ReadRegister(reg::kBlendControl0);
             const uint32_t writeMask = colorWrites ? ReadRegister(reg::kColorMask) & 0xF : 0;
             uint64_t key = Mix(0, reinterpret_cast<uintptr_t>(&vs));
@@ -835,6 +898,8 @@ float ps_main(float4 position : SV_Position) : SV_Target
             // PA_CL_CLIP_CNTL bit 16: clip_disable (no clipping, so no depth clipping either).
             const bool clipDisabled = (ReadRegister(0x2204) >> 16) & 1;
             key = Mix(key, (uint64_t(clipDisabled) << 24) | (uint64_t(samples) << 16) | (uint64_t(rectangles) << 8) | writeMask);
+            if (polyOffsetEnable)
+                key = Mix(key, (uint64_t(polyScale) << 32) | polyOffset);
             auto& pipeline = pipelines_[key];
             if (pipeline)
                 return pipeline.Get();
@@ -865,6 +930,16 @@ float ps_main(float4 position : SV_Position) : SV_Target
                 : (cull & 3) == 2 ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
             desc.RasterizerState.FrontCounterClockwise = (cull & 4) ? FALSE : TRUE;
             desc.RasterizerState.DepthClipEnable = clipDisabled ? FALSE : TRUE;
+            if (polyOffsetEnable)
+            {
+                float scale, offset;
+                std::memcpy(&scale, &polyScale, 4);
+                std::memcpy(&offset, &polyOffset, 4);
+                desc.RasterizerState.SlopeScaledDepthBias = scale / 16.0f;
+                // Rounded away from zero so a small offset still separates the layers.
+                const float units = offset * 16777216.0f;
+                desc.RasterizerState.DepthBias = INT(units < 0 ? std::floor(units) : std::ceil(units));
+            }
             // RB_DEPTHCONTROL: stencil enable (0), z enable (1), z write (2), z func (4-6),
             // backface stencil enable (7), front stencil func/fail/zpass/zfail (8-19), back (20-31).
             // Xenos compare functions and stencil ops are D3D12's enums minus one.
@@ -896,10 +971,64 @@ float ps_main(float4 position : SV_Position) : SV_Target
             desc.SampleDesc.Count = samples;
             if (FAILED(context_.device()->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pipeline))))
             {
-                std::fprintf(stderr, "[gpu] pipeline creation failed\n");
+                std::fprintf(stderr, "[gpu] pipeline creation failed (device 0x%08lX)\n", (unsigned long)context_.device()->GetDeviceRemovedReason());
                 return nullptr;
             }
             return pipeline.Get();
+        }
+
+        DescriptorRange Renderer::GetViewTable(const ViewSlot* views, uint32_t count, uint32_t cubeMask, uint32_t volumeMask)
+        {
+            // Keyed field by field (the view structures have padding); the descriptions' unions are
+            // zeroed beyond the member in use.
+            struct KeyEntry
+            {
+                uint64_t resource;
+                uint32_t slot, format, dimension, mapping;
+                uint8_t view[24];
+            };
+            static_assert(sizeof(KeyEntry) == 48);
+            KeyEntry entries[kViewTableSize];
+            for (uint32_t i = 0; i < count; i++)
+            {
+                const D3D12_SHADER_RESOURCE_VIEW_DESC& desc = views[i].desc;
+                entries[i] = { reinterpret_cast<uintptr_t>(views[i].resource), views[i].slot, uint32_t(desc.Format),
+                    uint32_t(desc.ViewDimension), desc.Shader4ComponentMapping, {} };
+                std::memcpy(entries[i].view, &desc.Buffer, sizeof(entries[i].view));
+            }
+            const uint64_t key = XXH3_64bits_withSeed(entries, sizeof(KeyEntry) * count, (uint64_t(cubeMask) << 32) | volumeMask);
+            if (viewTableGeneration_ != context_.uploadGeneration())
+            {
+                viewTables_.clear();
+                viewTableGeneration_ = context_.uploadGeneration();
+            }
+            if (auto found = viewTables_.find(key); found != viewTables_.end())
+                return found->second;
+
+            const DescriptorRange table = context_.AllocateViews(kViewTableSize);
+            if (viewTableGeneration_ != context_.uploadGeneration())
+            {
+                // The allocation recycled the heap: the tables built before are gone.
+                viewTables_.clear();
+                viewTableGeneration_ = context_.uploadGeneration();
+            }
+            auto* device = context_.device();
+            const uint32_t viewSize = context_.viewDescriptorSize();
+            const D3D12_CPU_DESCRIPTOR_HANDLE nullStart = nullViews_->GetCPUDescriptorHandleForHeapStart();
+            device->CopyDescriptorsSimple(kViewTableSize, table.cpu, nullStart, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            for (uint32_t n = 0; n < 32; n++)
+            {
+                if ((cubeMask >> n) & 1)
+                    device->CopyDescriptorsSimple(1, { table.cpu.ptr + uint64_t(kTextureSlotBase + n) * viewSize },
+                        { nullStart.ptr + uint64_t(kViewTableSize) * viewSize }, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+                else if ((volumeMask >> n) & 1)
+                    device->CopyDescriptorsSimple(1, { table.cpu.ptr + uint64_t(kTextureSlotBase + n) * viewSize },
+                        { nullStart.ptr + uint64_t(kViewTableSize + 1) * viewSize }, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            }
+            for (uint32_t i = 0; i < count; i++)
+                device->CreateShaderResourceView(views[i].resource, &views[i].desc, { table.cpu.ptr + uint64_t(views[i].slot) * viewSize });
+            viewTables_[key] = table;
+            return table;
         }
 
         bool Renderer::PrepareIndices(const DrawInfo& draw, std::vector<uint32_t>& indices, bool& indexed,
@@ -1097,6 +1226,26 @@ float ps_main(float4 position : SV_Position) : SV_Target
                 scale[axis] = (vte & (1u << (axis * 2))) ? RegisterFloat(reg::kViewportXScale + axis * 2) : 1.0f;
                 offset[axis] = (vte & (2u << (axis * 2))) ? RegisterFloat(reg::kViewportXScale + axis * 2 + 1) : 0.0f;
             }
+            // The scene's camera, for its effects: from the draws of the tiling pass's first pass
+            // that test and write depth (c156..c159, see scene_effects.h). The viewport maps the
+            // projection's depth into the depth buffer (scale and offset).
+            if (InFirstTilePass() && effects_.enabled() && colorWrites && ((depthControl >> 1) & 1) && ((depthControl >> 2) & 1) &&
+                state.vsConstBase + 160 <= 512)
+            {
+                float matrix[16];
+                for (uint32_t i = 0; i < 16; i++)
+                {
+                    const uint32_t bits = __builtin_bswap32(constants[(state.vsConstBase + 156) * 4 + i]);
+                    std::memcpy(&matrix[i], &bits, 4);
+                }
+                SceneCamera camera = CameraFromConstants(matrix);
+                if (camera.valid && scale[2] != 0.0f)
+                {
+                    camera.depthA = offset[2] + camera.depthA * scale[2];
+                    camera.depthB *= scale[2];
+                    sceneCamera_ = camera;
+                }
+            }
             // The window offset (used for predicated tiling) is deliberately ignored: targets are
             // kept in screen space and resolves copy screen-space rectangles.
             //
@@ -1169,26 +1318,21 @@ float ps_main(float4 position : SV_Position) : SV_Target
             // Views: vertex streams t0..t15, textures t16..t47.
             const uint32_t cubeMask = vs.info.textureCubeMask | ps.info.textureCubeMask;
             const uint32_t volumeMask = vs.info.textureVolumeMask | ps.info.textureVolumeMask;
+            // The views are collected first and the table built once all are known: a draw whose
+            // table matches one already built in this frame's heap uses that one (most draws do).
             Phase(4);
-            const DescriptorRange views = context_.AllocateViews(kViewTableSize);
-            const uint32_t viewSize = context_.viewDescriptorSize();
-            {
-                const D3D12_CPU_DESCRIPTOR_HANDLE nullStart = nullViews_->GetCPUDescriptorHandleForHeapStart();
-                device->CopyDescriptorsSimple(kViewTableSize, views.cpu, nullStart, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-                for (uint32_t n = 0; n < 32; n++)
-                {
-                    if ((cubeMask >> n) & 1)
-                        device->CopyDescriptorsSimple(1, { views.cpu.ptr + uint64_t(kTextureSlotBase + n) * viewSize },
-                            { nullStart.ptr + uint64_t(kViewTableSize) * viewSize }, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-                    else if ((volumeMask >> n) & 1)
-                        device->CopyDescriptorsSimple(1, { views.cpu.ptr + uint64_t(kTextureSlotBase + n) * viewSize },
-                            { nullStart.ptr + uint64_t(kViewTableSize + 1) * viewSize }, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-                }
-            }
+            ViewSlot pendingViews[kViewTableSize];
+            uint32_t pendingCount = 0;
+            auto addView = [&](uint32_t slot, ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC& desc) {
+                pendingViews[pendingCount++] = { slot, resource, desc };
+            };
             Phase(5);
-            // Highest vertex index the draw uses (vertex streams are uploaded only up to it).
+            // Highest vertex index the draw uses (vertex streams are uploaded only up to it). With
+            // guest memory on the GPU, a stream is a view of the whole buffer its fetch constant
+            // describes, so it is not needed.
+            const bool gpuMemory = sharedMemory_.enabled();
             uint32_t maxVertexIndex = draw.indexCount ? draw.indexCount - 1 : 0;
-            if (indexed)
+            if (indexed && !gpuMemory)
             {
                 maxVertexIndex = 0;
                 for (uint32_t index : indices)
@@ -1209,12 +1353,16 @@ float ps_main(float4 position : SV_Position) : SV_Target
                 // vertex of a non-indexed draw), not the whole buffer the fetch constant spans.
                 const uint64_t lastVertex = uint64_t(baseVertexForUpload) + maxVertexIndex;
                 const uint64_t reach = lastVertex * vs.info.vertexStreamStrides[stream] + vs.info.vertexStreamTails[stream];
-                const uint32_t dwords = uint32_t(std::min<uint64_t>({ (d1 >> 2) & 0xFFFFFF, uint64_t(4u << 20), reach }));
+                const uint32_t bufferDwords = std::min<uint32_t>((d1 >> 2) & 0xFFFFFF, (SharedMemory::kSize - (d0 & 0x1FFFFFFC)) / 4);
+                const uint32_t dwords = gpuMemory ? bufferDwords : uint32_t(std::min<uint64_t>({ bufferDwords, uint64_t(4u << 20), reach }));
                 if (dwords == 0)
                     continue;
                 // HC09_DUMP_VERTEX_MEMORY=1 (with a frame dump): save each vertex buffer the draw reads,
                 // endian-swapped to host order, as build/vbmem_<address>_s<stride dwords>.bin.
-                if ((g_frame == g_dumpFrame || (std::getenv("HC09_TRACE_SURFACE") && ReadRegister(reg::kSurfaceInfo) == std::strtoul(std::getenv("HC09_TRACE_SURFACE"), nullptr, 16))) && std::getenv("HC09_DUMP_VERTEX_MEMORY"))
+                static const bool dumpVertexMemory = std::getenv("HC09_DUMP_VERTEX_MEMORY") != nullptr;
+                static const char* const traceSurfaceSpec = std::getenv("HC09_TRACE_SURFACE");
+                if (dumpVertexMemory && (g_frame == g_dumpFrame ||
+                        (traceSurfaceSpec && ReadRegister(reg::kSurfaceInfo) == std::strtoul(traceSurfaceSpec, nullptr, 16))))
                 {
                     static std::set<uint32_t> saved;
                     if (saved.insert(d0 & ~3u).second)
@@ -1234,6 +1382,23 @@ float ps_main(float4 position : SV_Position) : SV_Target
                             std::fclose(file);
                         }
                     }
+                }
+                if (gpuMemory)
+                {
+                    // The stream reads guest memory on the GPU, swapping words as the fetch constant says.
+                    // Raw views start at a multiple of 16 bytes; the shader adds the rest.
+                    const uint32_t start = d0 & 0x1FFFFFFC, viewStart = start & ~15u;
+                    sharedMemory_.Request(start, dwords * 4);
+                    state.vertexStreams[stream] = (d1 & 3) | (start - viewStart);
+                    D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+                    desc.Format = DXGI_FORMAT_R32_TYPELESS;
+                    desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                    desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                    desc.Buffer.FirstElement = viewStart / 4;
+                    desc.Buffer.NumElements = dwords + (start - viewStart) / 4;
+                    desc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+                    addView(stream, sharedMemory_.buffer(), desc);
+                    continue;
                 }
                 if (vertexUploadGeneration_ != context_.uploadGeneration())
                 {
@@ -1278,7 +1443,7 @@ float ps_main(float4 position : SV_Position) : SV_Target
                 desc.Buffer.FirstElement = upload.offset / 4;
                 desc.Buffer.NumElements = dwords;
                 desc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-                device->CreateShaderResourceView(upload.resource, &desc, { views.cpu.ptr + uint64_t(stream) * viewSize });
+                addView(stream, upload.resource, desc);
             }
 
             // Textures and samplers for every fetch constant either stage samples.
@@ -1344,8 +1509,7 @@ float ps_main(float4 position : SV_Position) : SV_Target
                 if (fetched && !bound && wanted != D3D12_SRV_DIMENSION_TEXTURE2D &&
                     texture.view.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE2D)
                 {
-                    device->CreateShaderResourceView(texture.resource, &texture.view,
-                        { views.cpu.ptr + uint64_t(kTextureFallbackSlotBase + n) * viewSize });
+                    addView(kTextureFallbackSlotBase + n, texture.resource, texture.view);
                     state.textureSizes[n][0] = float(texture.width);
                     state.textureSizes[n][1] = float(texture.height);
                     state.textureSizes[n][2] = 1.0f;
@@ -1376,10 +1540,7 @@ float ps_main(float4 position : SV_Position) : SV_Target
                         D3D12_RESOURCE_STATES readable = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
                         SaveTexture(texture.resource, readable, texture.view.Format, texture.width, texture.height, path);
                     }
-                    Phase(8);
-                    device->CreateShaderResourceView(texture.resource, &texture.view,
-                        { views.cpu.ptr + uint64_t(kTextureSlotBase + n) * viewSize });
-                    Phase(6);
+                    addView(kTextureSlotBase + n, texture.resource, texture.view);
                     state.textureSizes[n][0] = float(texture.width);
                     state.textureSizes[n][1] = float(texture.height);
                     state.textureSizes[n][2] = float(texture.depth);
@@ -1397,10 +1558,18 @@ float ps_main(float4 position : SV_Position) : SV_Target
                 };
                 D3D12_SAMPLER_DESC sampler{};
                 // Xenos filters: 0 point, 1 linear; mip filter 2 = base map only. Anisotropy n
-                // allows up to 2^(n-1):1.
-                const bool linear = fetch.minFilter() == 1 || fetch.magFilter() == 1;
-                const uint32_t mipFilter = fetch.mipFilter();
-                const uint32_t aniso = fetch.anisoFilter();
+                // allows up to 2^(n-1):1. A fetch instruction can choose its own (3, or 7 for
+                // anisotropy, keeps the constant's).
+                const uint16_t chosen = ps.info.textureFilters[n] != TranslatedShader::kFiltersFromConstant ? ps.info.textureFilters[n]
+                                                                                                           : vs.info.textureFilters[n];
+                auto pick = [](uint32_t instruction, uint32_t useConstant, uint32_t constant) {
+                    return instruction == useConstant ? constant : instruction;
+                };
+                const uint32_t magFilter = pick(chosen & 3, 3, fetch.magFilter());
+                const uint32_t minFilter = pick((chosen >> 2) & 3, 3, fetch.minFilter());
+                const bool linear = minFilter == 1 || magFilter == 1;
+                const uint32_t mipFilter = pick((chosen >> 4) & 3, 3, fetch.mipFilter());
+                const uint32_t aniso = pick((chosen >> 6) & 7, 7, fetch.anisoFilter());
                 if (aniso >= 2 && aniso <= 5)
                 {
                     sampler.Filter = D3D12_FILTER_ANISOTROPIC;
@@ -1433,11 +1602,16 @@ float ps_main(float4 position : SV_Position) : SV_Target
                 }
                 samplerDescs[n] = sampler;
             }
+            Phase(4);
+            const DescriptorRange views = GetViewTable(pendingViews, pendingCount, cubeMask, volumeMask);
+
+            // Sampler tables refer to no resources, so they stay valid until the sampler heap fills.
+            Phase(8);
             const uint32_t tableSize = std::max(samplerCount, 1u);
-            if (samplerTableGeneration_ != context_.uploadGeneration())
+            if (samplerTableGeneration_ != context_.samplerGeneration())
             {
                 samplerTables_.clear();
-                samplerTableGeneration_ = context_.uploadGeneration();
+                samplerTableGeneration_ = context_.samplerGeneration();
             }
             const uint64_t samplerKey = XXH3_64bits(samplerDescs, sizeof(D3D12_SAMPLER_DESC) * tableSize) ^ tableSize;
             DescriptorRange samplers;
@@ -1447,19 +1621,16 @@ float ps_main(float4 position : SV_Position) : SV_Target
             }
             else
             {
-                Phase(8);
                 samplers = context_.AllocateSamplers(tableSize);
-                if (samplerTableGeneration_ != context_.uploadGeneration())
+                if (samplerTableGeneration_ != context_.samplerGeneration())
                 {
-                    // Allocation recycled the heap: earlier tables (and views) are gone. The views
-                    // for this draw were allocated before the flush, so redo them below.
+                    // The heap filled and was recycled: earlier tables are gone.
                     samplerTables_.clear();
-                    samplerTableGeneration_ = context_.uploadGeneration();
+                    samplerTableGeneration_ = context_.samplerGeneration();
                 }
                 for (uint32_t n = 0; n < tableSize; n++)
                     device->CreateSampler(&samplerDescs[n], { samplers.cpu.ptr + uint64_t(n) * context_.samplerDescriptorSize() });
                 samplerTables_[samplerKey] = samplers;
-                Phase(6);
             }
 
             // HC09_DUMP_FRAME: for each listed draw, the inputs that place it on screen.
@@ -1644,6 +1815,7 @@ float ps_main(float4 position : SV_Position) : SV_Target
                 std::fprintf(stderr, "[frame] resolve entry: control 0x%08X dest 0x%08X rect %u,%u-%u,%u select-first %d\n", control,
                     ReadRegister(reg::kCopyDestBase), rect.left, rect.top, rect.right, rect.bottom, int(InFirstTilePass()));
             }
+            ApplySceneEffects();
             if (source == 4)
             {
                 ResolveDepth(control);
@@ -1759,9 +1931,12 @@ float ps_main(float4 position : SV_Position) : SV_Target
                     SaveTexture(dest.resource.Get(), dest.state, dest.format, width * g_scale, height * g_scale, path);
                 }
             }
-            // RB_COPY_DEST_INFO bit 24: copy_dest_swap (red and blue exchanged in memory).
+            // RB_COPY_DEST_INFO bit 24: copy_dest_swap (red and blue exchanged in memory); bits 7-12:
+            // copy_dest_format, the texture format the resolve writes (the title samples it as such).
             dest.lastResolved = g_frame;
-            textures_->SetResolved(destBase, dest.resource.Get(), dest.format, width, height, (ReadRegister(0x231B) >> 24) & 1);
+            const uint32_t destInfo = ReadRegister(0x231B);
+            textures_->SetResolved(destBase, dest.resource.Get(), dest.format, width, height, (destInfo >> 24) & 1,
+                MemoryTexelBytes((destInfo >> 7) & 0x3F));
 
             Transition(list, target.resource.Get(), target.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
             if (g_frame == g_dumpFrame)
@@ -1801,6 +1976,22 @@ float ps_main(float4 position : SV_Position) : SV_Target
                 const D3D12_RECT rect = ScaledRect(box);
                 list->ClearRenderTargetView(target.rtv, color, 1, &rect);
             }
+        }
+
+        void Renderer::ApplySceneEffects()
+        {
+            // The first resolve of a tiling pass: its first pass has drawn the whole scene into the
+            // shared colour and depth targets (later passes skip their draws), and the interface
+            // comes after, into other surfaces.
+            if (!TilingActive() || effectsFrame_ == g_frame || !sceneCamera_.valid)
+                return;
+            effectsFrame_ = g_frame;
+            const uint32_t samples = SampleCount(ReadRegister(reg::kSurfaceInfo));
+            RenderTarget& target = GetRenderTarget(ReadRegister(reg::kColorInfo), samples);
+            DepthTarget& depth = GetDepthTarget(ReadRegister(reg::kDepthInfo), samples);
+            effects_.Apply(target.resource.Get(), target.state, target.rtv, target.format, depth.resource.Get(), depth.state, samples,
+                kTargetWidth * g_scale, kTargetHeight * g_scale, sceneCamera_);
+            sceneCamera_ = {};
         }
 
         bool Renderer::CreateDepthCopyPipeline()
@@ -1961,7 +2152,11 @@ float ps_main(float4 position : SV_Position) : SV_Target
             {
                 const int lastUse = std::max(it->second.lastResolved, textures_->ResolvedLastUse(it->first));
                 // Depth targets own a render-target descriptor (never freed), and the front buffer is shown every frame.
-                if (it->second.rtv.ptr == 0 && it->first != (frontBuffer & 0x1FFFFFFF) && g_frame - lastUse > kIdleFrames)
+                // A result is the only copy of what the title rendered (resolves are not written to memory):
+                // one built once and sampled later, such as the turf's grass texture made while a game loads,
+                // is released only after the title has put other data in its memory.
+                if (it->second.rtv.ptr == 0 && it->first != (frontBuffer & 0x1FFFFFFF) && g_frame - lastUse > kIdleFrames &&
+                    textures_->ResolvedMemoryChanged(it->first))
                 {
                     textures_->ForgetResolved(it->first);
                     retiredTargets_.emplace_back(g_frame, std::move(it->second.resource));
@@ -1977,7 +2172,7 @@ float ps_main(float4 position : SV_Position) : SV_Target
 
         void Renderer::Swap(uint32_t frontBuffer)
         {
-            ReportPhases();
+            ReportPhases(context_);
             EvictIdleResources(frontBuffer);
             // HC09_GPU_STATS: GPU memory and cache sizes every 2 s (they must stay bounded over many games).
             if (g_phaseStats)

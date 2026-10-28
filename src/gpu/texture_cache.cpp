@@ -17,8 +17,10 @@
 #include "common/edition.h"
 #include "gpu/command_processor.h"
 #include "gpu/draw.h"
+#include "gpu/shader_compiler.h"
 #include "gpu/swappable_images.h"
 #include "kernel/guest.h"
+#include "memory.h"
 
 namespace hc09::gpu
 {
@@ -289,6 +291,110 @@ namespace hc09::gpu
 
         constexpr D3D12_RESOURCE_STATES kShaderReadable =
             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+        // Physical address of a host pointer into one of the windows onto physical memory.
+        uint32_t PhysicalOf(const uint8_t* host)
+        {
+            return uint32_t(host - g_base) & 0x1FFFFFFF;
+        }
+
+        // One stored level (or face, or slice) from guest memory on the GPU into the staging
+        // buffer: rows of blocks (texels, or 4x4 blocks when compressed), untiled and with the
+        // fetch constant's endian swap applied, as TiledOffset2D/TiledOffset3D and the CPU path do.
+        // One thread per output word.
+        constexpr uint32_t kUntileConstants = 12;
+        const char* const kUntileShader = R"(
+cbuffer Untile : register(b0)
+{
+    uint source;      // physical address of the stored level
+    uint pitch;       // stored level width, in blocks
+    uint rows;        // volumes: rows per slice
+    uint unitBytes;   // bytes per block
+    uint flags;       // bit 0 tiled, bit 1 3D tiling, bits 2-3 endian swap
+    uint offsetX;     // packed mip offset, in blocks
+    uint offsetY;
+    uint slice;
+    uint blocksWide;
+    uint blocksHigh;
+    uint dest;        // byte offset in the staging buffer
+    uint rowPitch;
+};
+
+ByteAddressBuffer memory : register(t0);
+RWByteAddressBuffer staging : register(u0);
+
+uint TiledOffset2D(uint x, uint y, uint pitchUnits, uint bytesPerUnit)
+{
+    uint alignedPitch = (pitchUnits + 31) & ~31u;
+    uint logBpp = (bytesPerUnit >> 2) + ((bytesPerUnit >> 1) >> (bytesPerUnit >> 2));
+    uint macro = ((x >> 5) + (y >> 5) * (alignedPitch >> 5)) << (logBpp + 7);
+    uint micro = ((x & 7) + ((y & 6) << 2)) << logBpp;
+    uint offset = macro + ((micro & ~15u) << 1) + (micro & 15) + ((y & 8) << (3 + logBpp)) + ((y & 1) << 4);
+    return (((offset & ~511u) << 3) + ((offset & 448) << 2) + (offset & 63) + ((y & 16) << 7) +
+        (((((y & 8) >> 2) + (x >> 3)) & 3) << 6)) >> logBpp;
+}
+
+uint TiledOffset3D(uint x, uint y, uint z, uint pitchBlocks, uint height, uint blockBytes)
+{
+    uint log2Bytes = blockBytes == 16 ? 4 : blockBytes == 8 ? 3 : blockBytes == 4 ? 2 : blockBytes == 2 ? 1 : 0;
+    uint macro = (((z >> 2) * (height >> 4) + (y >> 4)) * (pitchBlocks >> 5) + (x >> 5)) << 7;
+    uint micro = ((z & 3) << 5) | (((y >> 1) & 3) << 3) | (x & 7);
+    uint linear = (macro | micro) << log2Bytes;
+    uint bank = ((y >> 3) ^ (z >> 2)) & 1;
+    uint pipe = ((x >> 3) & 3) ^ (bank << 1);
+    return (linear & 0xF) | (((linear >> 4) & 1) << 5) | (((linear >> 5) & 7) << 8) | ((linear >> 8) << 12) |
+        ((y & 1) << 4) | (pipe << 6) | (bank << 11);
+}
+
+uint BlockAddress(uint x, uint y)
+{
+    if ((flags & 1) == 0)
+        return source + ((y + offsetY) * pitch + x + offsetX) * unitBytes;
+    if (flags & 2)
+        return source + TiledOffset3D(x, y, slice, pitch, rows, unitBytes);
+    return source + TiledOffset2D(x + offsetX, y + offsetY, pitch, unitBytes) * unitBytes;
+}
+
+uint LoadSwapped(uint address)
+{
+    // Shift amounts that depend on the mode (0 leaves the word as it is): DXC turns a constant
+    // byte reversal into llvm.bswap, which DXIL does not allow.
+    uint v = memory.Load(address);
+    uint mode = (flags >> 2) & 3;
+    uint bytes = (mode == 1 || mode == 2) ? 8u : 0u;
+    uint mask = bytes != 0 ? 0x00FF00FFu : 0xFFFFFFFFu;
+    v = ((v & mask) << bytes) | ((v >> bytes) & mask);
+    uint halves = mode >= 2 ? 16u : 0u;
+    return (v << halves) | (v >> halves);
+}
+
+[numthreads(8, 8, 1)]
+void cs_untile(uint3 id : SV_DispatchThreadID)
+{
+    uint rowBytes = blocksWide * unitBytes;
+    if (id.x * 4 >= rowBytes || id.y >= blocksHigh)
+        return;
+    uint value = 0;
+    if (unitBytes >= 4)
+    {
+        value = LoadSwapped(BlockAddress(id.x * 4 / unitBytes, id.y) + (id.x * 4) % unitBytes);
+    }
+    else
+    {
+        // Blocks of one or two bytes: gather the word's bytes from their blocks.
+        for (uint b = 0; b < 4; b++)
+        {
+            uint byteX = id.x * 4 + b;
+            if (byteX < rowBytes)
+            {
+                uint address = BlockAddress(byteX / unitBytes, id.y) + byteX % unitBytes;
+                value |= ((LoadSwapped(address & ~3u) >> ((address & 3) * 8)) & 0xFF) << (b * 8);
+            }
+        }
+    }
+    staging.Store(dest + id.y * rowPitch + id.x * 4, value);
+}
+)";
     }
 
     // HC09_GPU_STATS counters: bytes hashed and textures (re)uploaded since the last report.
@@ -313,10 +419,10 @@ namespace hc09::gpu
 
         // Fingerprint of the guest memory a resolve of this size covers (a tiled surface: 32x32-texel
         // aligned). Large regions are sampled: whole-texture loads change many of the samples.
-        uint64_t MemoryFingerprint(uint32_t address, uint32_t width, uint32_t height, DXGI_FORMAT format)
+        uint64_t MemoryFingerprint(uint32_t address, uint32_t width, uint32_t height, uint32_t texelBytes)
         {
             const uint32_t physical = address & 0x1FFFFFFF;
-            uint64_t bytes = uint64_t((width + 31) & ~31u) * ((height + 31) & ~31u) * ResolveTexelBytes(format);
+            uint64_t bytes = uint64_t((width + 31) & ~31u) * ((height + 31) & ~31u) * texelBytes;
             bytes = std::min<uint64_t>(bytes, 0x20000000ull - physical);
             const uint8_t* memory = GuestToHost(PhysicalToGuest(physical));
             constexpr uint64_t kChunk = 256, kChunks = 64;
@@ -331,13 +437,15 @@ namespace hc09::gpu
     }
 
     void TextureCache::SetResolved(uint32_t address, ID3D12Resource* resource, DXGI_FORMAT format, uint32_t width, uint32_t height,
-        bool swapRedBlue)
+        bool swapRedBlue, uint32_t memoryTexelBytes)
     {
         Resolved resolved{ resource, format, width, height, swapRedBlue };
-        resolved.memoryFingerprint = MemoryFingerprint(address, width, height, format);
+        resolved.texelBytes = memoryTexelBytes ? memoryTexelBytes : ResolveTexelBytes(format);
+        resolved.memoryFingerprint = MemoryFingerprint(address, width, height, resolved.texelBytes);
         resolved.checkedFrame = FrameNumber();
         resolved.lastUsedFrame = FrameNumber();
         resolved_[address & 0x1FFFFFFF] = resolved;
+        recent_.clear();
     }
 
     bool TextureCache::ResolveStillValid(uint32_t address, Resolved& resolved, int frame)
@@ -345,7 +453,7 @@ namespace hc09::gpu
         if (resolved.checkedFrame == frame)
             return true;
         resolved.checkedFrame = frame;
-        if (MemoryFingerprint(address, resolved.width, resolved.height, resolved.format) == resolved.memoryFingerprint)
+        if (MemoryFingerprint(address, resolved.width, resolved.height, resolved.texelBytes) == resolved.memoryFingerprint)
             return true;
         // The title has written other data over this address since the resolve.
         static const bool trace = std::getenv("HC09_GPU_STATS") != nullptr;
@@ -363,10 +471,18 @@ namespace hc09::gpu
         return it == resolved_.end() ? -1 : it->second.lastUsedFrame;
     }
 
+    bool TextureCache::ResolvedMemoryChanged(uint32_t address) const
+    {
+        auto it = resolved_.find(address & 0x1FFFFFFF);
+        return it == resolved_.end() ||
+            MemoryFingerprint(it->first, it->second.width, it->second.height, it->second.texelBytes) != it->second.memoryFingerprint;
+    }
+
     void TextureCache::ForgetResolved(uint32_t address)
     {
         address &= 0x1FFFFFFF;
         resolved_.erase(address);
+        recent_.clear();
         if (auto it = composed_.find(address); it != composed_.end())
         {
             retired_.emplace_back(FrameNumber(), std::move(it->second.resource));
@@ -508,8 +624,27 @@ namespace hc09::gpu
         return levelCount;
     }
 
+    void TextureCache::Remember(uint64_t key, const TextureFetch& fetch, const BoundTexture& texture)
+    {
+        recent_[key] = { fetch, texture };
+    }
+
     bool TextureCache::Get(const TextureFetch& fetch, BoundTexture& out)
     {
+        const int frameNow = FrameNumber();
+        if (recentFrame_ != frameNow)
+        {
+            recent_.clear();
+            recentFrame_ = frameNow;
+        }
+        const uint64_t recentKey = XXH3_64bits(fetch.words, sizeof(fetch.words));
+        if (auto found = recent_.find(recentKey);
+            found != recent_.end() && std::memcmp(found->second.fetch.words, fetch.words, sizeof(fetch.words)) == 0)
+        {
+            g_textureLookups++;
+            out = found->second.texture;
+            return true;
+        }
         const uint32_t format = fetch.format();
         FormatInfo info;
         const bool cube = fetch.dimension() == 3;
@@ -570,13 +705,17 @@ namespace hc09::gpu
         out.view.Shader4ComponentMapping = EncodeMapping(fetch.swizzle(), info.remap);
 
         if (!cube && !volume && !stacked && GetReplacement(fetch, out))
+        {
+            Remember(recentKey, fetch, out);
             return true;
+        }
 
-        // Render-to-texture: a resolve wrote this address. A fetch with another texel size (or a
-        // compressed format) cannot be reading that resolve; neither can one after the title has
-        // loaded other data over it.
+        // Render-to-texture: a resolve wrote this address. A fetch with another texel size than the
+        // resolve wrote to memory (or a compressed format) cannot be reading that resolve; neither
+        // can one after the title has loaded other data over it. A resolve to a one-channel format
+        // (k_8, written from the target's red) is read through the target's red channel.
         auto it = resolved_.find(fetch.baseAddress() & 0x1FFFFFFF);
-        if (it != resolved_.end() && (cube || volume || stacked || info.compressed || info.blockBytes != ResolveTexelBytes(it->second.format)))
+        if (it != resolved_.end() && (cube || volume || stacked || info.compressed || info.blockBytes != it->second.texelBytes))
         {
             mismatchedResolveHits_++;
             static std::set<uint64_t> logged;
@@ -748,7 +887,17 @@ namespace hc09::gpu
             g_textureChecks++;
         entry.hashedFrame = frame;
         uint64_t hash = entry.contentHash;
-        if (check)
+        if (check && sharedMemory_.enabled())
+        {
+            // Guest memory on the GPU watches its pages for writes, so a texture is hashed only after
+            // its memory was written (the hash still decides: rewriting the same image uploads nothing).
+            const uint64_t version = std::max(sharedMemory_.Request(PhysicalOf(source), uint32_t(sourceBytes), true),
+                mipBytes ? sharedMemory_.Request(PhysicalOf(mipSource), uint32_t(mipBytes), true) : 0);
+            if (version != entry.memoryVersion || entry.contentHash == ~0ull)
+                hash = fullHash();
+            entry.memoryVersion = version;
+        }
+        else if (check)
         {
             // Large textures: a sampled hash (64 chunks spread over the base level) every frame,
             // which catches whole-image updates such as video, and a full hash every 60 frames.
@@ -817,7 +966,59 @@ namespace hc09::gpu
             std::vector<uint8_t> dumpRows;
             Transition(list, entry.resource.Get(), entry.state, D3D12_RESOURCE_STATE_COPY_DEST);
             entry.state = D3D12_RESOURCE_STATE_COPY_DEST;
-            for (uint32_t faceIndex = 0; faceIndex < faces; faceIndex++)
+            // With guest memory on the GPU, a compute shader untiles the levels; the CPU still does it
+            // for textures whose mips may be rebuilt (it compares them) and for the dumps.
+            bool untiled = false;
+            const bool dumpingMips = std::any_of(std::begin(mipDump), std::end(mipDump), [](std::FILE* file) { return file != nullptr; });
+            if (sharedMemory_.enabled() && !rebuildCandidate && !dumpHashed && !dumpingMips && PrepareUntile())
+            {
+                std::vector<UntileLevel> jobs;
+                uint64_t bytes = 0;
+                for (uint32_t faceIndex = 0; faceIndex < faces; faceIndex++)
+                {
+                    for (uint32_t level = 0; level < levels; level++)
+                    {
+                        const LevelLayout& layout = layouts[level];
+                        UntileLevel job{};
+                        if (volume && fetch.tiled())
+                        {
+                            job.source = PhysicalOf(source);
+                            job.pitch = sourcePitchBlocks;
+                            job.rows = volumeRows;
+                            job.slice = faceIndex;
+                        }
+                        else
+                        {
+                            job.source = PhysicalOf(layout.data + layout.faceStride * faceIndex);
+                            job.pitch = layout.pitch;
+                            job.rows = layout.rows;
+                            job.offsetX = layout.x;
+                            job.offsetY = layout.y;
+                        }
+                        job.blocksWide = layout.blocksWide;
+                        job.blocksHigh = layout.blocksHigh;
+                        job.rowPitch = (layout.blocksWide * unit + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+                        bytes = (bytes + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1) & ~uint64_t(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1);
+                        job.staging = bytes;
+                        bytes += uint64_t(job.rowPitch) * layout.blocksHigh;
+                        jobs.push_back(job);
+                    }
+                }
+                untiled = Untile(jobs, unit, fetch.tiled(), volume, fetch.endian(), bytes);
+                for (uint32_t i = 0; untiled && i < jobs.size(); i++)
+                {
+                    const uint32_t faceIndex = i / levels, level = i % levels;
+                    D3D12_TEXTURE_COPY_LOCATION dst{ entry.resource.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+                    dst.SubresourceIndex = (volume || stacked) ? 0 : level + faceIndex * levels;
+                    D3D12_TEXTURE_COPY_LOCATION src{ staging_.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
+                    src.PlacedFootprint.Offset = jobs[i].staging;
+                    src.PlacedFootprint.Footprint = { info.dxgi,
+                        info.compressed ? jobs[i].blocksWide * 4 : std::max(width >> level, 1u),
+                        info.compressed ? jobs[i].blocksHigh * 4 : std::max(height >> level, 1u), 1, jobs[i].rowPitch };
+                    list->CopyTextureRegion(&dst, 0, 0, (volume || stacked) ? faceIndex : 0, &src, nullptr);
+                }
+            }
+            for (uint32_t faceIndex = 0; faceIndex < faces && !untiled; faceIndex++)
             {
                 for (uint32_t level = 0; level < levels; level++)
                 {
@@ -971,6 +1172,89 @@ namespace hc09::gpu
         }
         if (!cube && !volume && !stacked)
             GetHashedReplacement(entry.contentHash, fetch, levels, out);
+        Remember(recentKey, fetch, out);
+        return true;
+    }
+
+    bool TextureCache::PrepareUntile()
+    {
+        if (untileState_ != 0)
+            return untileState_ > 0;
+        untileState_ = -1;
+        D3D12_ROOT_PARAMETER parameters[3]{};
+        parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        parameters[0].Constants = { 0, 0, kUntileConstants };
+        parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        parameters[1].Descriptor = { 0, 0 };
+        parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        parameters[2].Descriptor = { 0, 0 };
+        const D3D12_ROOT_SIGNATURE_DESC desc{ 3, parameters, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE };
+        ComPtr<ID3DBlob> blob, errors;
+        ComPtr<ID3DBlob> shader = CompileShader(kUntileShader, ShaderStage::Compute, "cs_untile", "untile");
+        if (!shader || FAILED(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &errors)) ||
+            FAILED(context_.device()->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&untileRootSignature_))))
+        {
+            std::fprintf(stderr, "[texture] untile shader unavailable; textures are untiled on the CPU\n");
+            return false;
+        }
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline{};
+        pipeline.pRootSignature = untileRootSignature_.Get();
+        pipeline.CS = { shader->GetBufferPointer(), shader->GetBufferSize() };
+        if (FAILED(context_.device()->CreateComputePipelineState(&pipeline, IID_PPV_ARGS(&untilePipeline_))))
+        {
+            std::fprintf(stderr, "[texture] untile pipeline failed; textures are untiled on the CPU\n");
+            return false;
+        }
+        untileState_ = 1;
+        return true;
+    }
+
+    bool TextureCache::Untile(const std::vector<UntileLevel>& levels, uint32_t unitBytes, bool tiled, bool volume, uint32_t endian,
+        uint64_t bytes)
+    {
+        auto* list = context_.list();
+        if (stagingSize_ < bytes)
+        {
+            // Grown by doubling; the old buffer may still be in use by command lists in flight.
+            if (staging_)
+                retired_.emplace_back(FrameNumber(), std::move(staging_));
+            uint64_t size = std::max<uint64_t>(stagingSize_, 4ull << 20);
+            while (size < bytes)
+                size *= 2;
+            stagingSize_ = 0;
+            D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+            D3D12_RESOURCE_DESC desc{};
+            desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            desc.Width = size;
+            desc.Height = 1;
+            desc.DepthOrArraySize = 1;
+            desc.MipLevels = 1;
+            desc.SampleDesc.Count = 1;
+            desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            if (FAILED(context_.device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                    IID_PPV_ARGS(&staging_))))
+                return false;
+            stagingSize_ = size;
+            stagingState_ = D3D12_RESOURCE_STATE_COMMON;
+        }
+        Transition(list, staging_.Get(), stagingState_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        stagingState_ = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        list->SetComputeRootSignature(untileRootSignature_.Get());
+        list->SetPipelineState(untilePipeline_.Get());
+        list->SetComputeRootShaderResourceView(1, sharedMemory_.buffer()->GetGPUVirtualAddress());
+        list->SetComputeRootUnorderedAccessView(2, staging_->GetGPUVirtualAddress());
+        const uint32_t flags = (tiled ? 1u : 0u) | (tiled && volume ? 2u : 0u) | (endian << 2);
+        for (const UntileLevel& level : levels)
+        {
+            const uint32_t constants[kUntileConstants] = { level.source, level.pitch, level.rows, unitBytes, flags, level.offsetX,
+                level.offsetY, level.slice, level.blocksWide, level.blocksHigh, uint32_t(level.staging), level.rowPitch };
+            list->SetComputeRoot32BitConstants(0, kUntileConstants, constants, 0);
+            const uint32_t rowWords = (level.blocksWide * unitBytes + 3) / 4;
+            list->Dispatch((rowWords + 7) / 8, (level.blocksHigh + 7) / 8, 1);
+        }
+        Transition(list, staging_.Get(), stagingState_, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        stagingState_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
         return true;
     }
 

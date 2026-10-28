@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(HC09Recomp VERSION 0.7.3 LANGUAGES C CXX)
+project(HC09Recomp VERSION 0.8.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -49,6 +49,8 @@ set(HC09_HOST_SOURCES
     src/gpu/swappable_images.cpp
     src/gpu/texture_cache.cpp
     src/gpu/renderer.cpp
+    src/gpu/scene_effects.cpp
+    src/gpu/shared_memory.cpp
     src/gpu/shader_compiler.cpp
     src/gpu/shaders.cpp
     src/gpu/ucode.cpp

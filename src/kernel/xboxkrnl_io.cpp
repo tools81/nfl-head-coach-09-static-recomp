@@ -119,6 +119,7 @@ namespace hc09
 
         uint32_t ReadInto(FileObject& file, uint64_t offset, uint32_t buffer, uint32_t length, uint32_t& read)
         {
+            BeforeExternalWrite(buffer, length);
             read = file.file->Read(offset, GuestToHost(buffer), length);
             file.position = offset + read;
             return read == 0 && length > 0 ? status::kEndOfFile : status::kSuccess;

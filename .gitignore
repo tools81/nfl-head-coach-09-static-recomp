@@ -13,5 +13,4 @@ hc09.ini
 tools/roster_import/*.csv
 tools/roster_import/ROSTER-*
 tools/roster_import/data/
-textures/
-hc27/
+/textures/

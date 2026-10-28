@@ -1,9 +1,10 @@
 # Roster import
 
 Builds an NFL Head Coach 09 roster save from a modern player ratings export (the CSV from EA's
-Madden ratings site), replacing every player on the 32 teams. No game or ratings data is included:
-the CSV, the HC09 roster used as a template and everything generated land in this folder and
-`data/`, which git ignores.
+Madden ratings site), replacing every player on the 32 teams. The inputs (the CSV, the HC09
+roster used as a template) and intermediate files land in this folder and `data/`, which git
+ignores; the finished roster, disc patches and images in `hc27/` are committed, so players get
+them with the install.
 
 ## Use
 

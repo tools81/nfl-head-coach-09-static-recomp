@@ -21,6 +21,7 @@ namespace hc09::gpu
         Vertex,
         Pixel,
         Geometry,
+        Compute,
     };
 
     // Chooses the compiler; call once with the device before compiling.

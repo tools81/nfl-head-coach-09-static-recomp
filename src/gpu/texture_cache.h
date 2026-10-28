@@ -9,6 +9,7 @@
 #include <unordered_map>
 
 #include "gpu/d3d12_context.h"
+#include "gpu/shared_memory.h"
 
 namespace hc09::gpu
 {
@@ -63,7 +64,7 @@ namespace hc09::gpu
     class TextureCache
     {
     public:
-        explicit TextureCache(D3D12Context& context) : context_(context) {}
+        TextureCache(D3D12Context& context, SharedMemory& sharedMemory) : context_(context), sharedMemory_(sharedMemory) {}
 
         // Texture for a fetch constant, uploaded/refreshed as needed. Returns false when the
         // format or dimension is not supported yet.
@@ -71,12 +72,17 @@ namespace hc09::gpu
 
         // Registers a resolve destination so later fetches from `address` sample it.
         // swapRedBlue: the resolve swapped red and blue on the way to memory (RB_COPY_DEST_INFO copy_dest_swap).
+        // memoryTexelBytes: the size of a texel in the format the resolve writes to memory
+        // (copy_dest_format), which fetches of the result use; 0 for the target's own.
         void SetResolved(uint32_t address, ID3D12Resource* resource, DXGI_FORMAT format, uint32_t width, uint32_t height,
-            bool swapRedBlue = false);
+            bool swapRedBlue = false, uint32_t memoryTexelBytes = 0);
         ID3D12Resource* FindResolved(uint32_t address, uint32_t* width = nullptr, uint32_t* height = nullptr) const;
 
         // Last frame a fetch sampled the resolve at `address` (-1 if none or unknown).
         int ResolvedLastUse(uint32_t address) const;
+        // True when the title has written other data over the resolve at `address` (or there is none):
+        // only then can its result be released, since resolves are not written to memory.
+        bool ResolvedMemoryChanged(uint32_t address) const;
         // Drops the record of a resolve (its target is being released).
         void ForgetResolved(uint32_t address);
         // Releases textures no draw has sampled for a while (called once per frame).
@@ -102,6 +108,7 @@ namespace hc09::gpu
             int hashedFrame = -1;  // contents are re-checked at most once per frame
             uint64_t sampledHash = 0;  // large textures: hash of sampled chunks
             bool rewritten = false;    // changed since its first upload: hashed in full every frame
+            uint64_t memoryVersion = ~0ull;  // guest memory on the GPU: its pages' version when last checked
             D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COPY_DEST;
         };
 
@@ -112,6 +119,7 @@ namespace hc09::gpu
             uint32_t width;
             uint32_t height;
             bool swapRedBlue;
+            uint32_t texelBytes = 4;  // in memory
             // Resolves are not written back to guest memory, so the memory under a resolve keeps
             // whatever it held. A fingerprint of it, taken at each resolve, shows when the title
             // has since loaded something else there (the resolve is then stale).
@@ -149,7 +157,41 @@ namespace hc09::gpu
         bool LoadReplacement(const std::wstring& path, uint32_t originalWidth, uint32_t originalHeight, Replacement& out,
             bool mips = false);
 
+        // Guest memory on the GPU: a compute shader untiles and byte-swaps each level into a
+        // staging buffer laid out for CopyTextureRegion.
+        struct UntileLevel
+        {
+            uint32_t source;               // physical address of the stored level (this face's)
+            uint32_t pitch, rows;          // stored level, in blocks (rows: a volume's slice height)
+            uint32_t offsetX, offsetY;     // packed mip offset, in blocks
+            uint32_t slice;                // volumes: the depth slice
+            uint32_t blocksWide, blocksHigh;
+            uint32_t rowPitch;             // in the staging buffer
+            uint64_t staging;              // byte offset in the staging buffer
+        };
+        bool PrepareUntile();
+        // Records the dispatches for `levels` into the staging buffer and leaves it ready to copy from.
+        bool Untile(const std::vector<UntileLevel>& levels, uint32_t unitBytes, bool tiled, bool volume, uint32_t endian, uint64_t bytes);
+
+        // Textures from memory already looked up this frame, by fetch constant: their contents are
+        // checked once per frame, so a repeat lookup returns the same. Cleared by any resolve.
+        struct Recent
+        {
+            TextureFetch fetch;
+            BoundTexture texture;
+        };
+        void Remember(uint64_t key, const TextureFetch& fetch, const BoundTexture& texture);
+        std::unordered_map<uint64_t, Recent> recent_;
+        int recentFrame_ = -1;
+
         D3D12Context& context_;
+        SharedMemory& sharedMemory_;
+        ComPtr<ID3D12RootSignature> untileRootSignature_;
+        ComPtr<ID3D12PipelineState> untilePipeline_;
+        int untileState_ = 0;  // 0 not tried, 1 ready, -1 failed (the CPU untiles)
+        ComPtr<ID3D12Resource> staging_;
+        uint64_t stagingSize_ = 0;
+        D3D12_RESOURCE_STATES stagingState_ = D3D12_RESOURCE_STATE_COMMON;
         std::unordered_map<std::wstring, Replacement> replacements_;
         std::unordered_map<uint64_t, std::wstring> hashedFiles_;  // content hash -> replacement file
         bool hashedListed_ = false;

@@ -54,6 +54,8 @@ cbuffer DrawState : register(b1)
     uint alphaFunc;       // RB_COLORCONTROL alpha test function (7 = always / disabled)
     float alphaRef;       // RB_ALPHA_REF
     uint vertexIndexOffset;  // VGT_INDX_OFFSET, added to every vertex index
+    uint4 vertexStreams[4];  // per vertex stream: bits 0-1 the endian swap (0 when already swapped),
+                             // bits 2-3 the byte offset of its data in the view (views start 16-byte aligned)
 };
 
 static const float kFltMax = 3.402823466e+38;
@@ -77,6 +79,28 @@ float SignExtendNorm(uint value, uint bits)
 float SignExtend(uint value, uint bits)
 {
     return float(int(value << (32 - bits)) >> (32 - bits));
+}
+
+// Xenos endian modes: 1 swaps the bytes of each 16-bit half, 2 the bytes of each word, 3 the halves.
+// Written with shift amounts that depend on the mode (0 leaves a value as it is): DXC turns a
+// constant byte reversal into llvm.bswap, which DXIL does not allow.
+uint4 SwapWords(uint4 v, uint mode)
+{
+    uint bytes = (mode == 1 || mode == 2) ? 8u : 0u;
+    uint mask = bytes != 0 ? 0x00FF00FFu : 0xFFFFFFFFu;
+    v = ((v & mask) << bytes) | ((v >> bytes) & mask);
+    uint halves = mode >= 2 ? 16u : 0u;
+    return (v << halves) | (v >> halves);
+}
+
+uint StreamEndian(uint stream)
+{
+    return vertexStreams[stream >> 2][stream & 3] & 3;
+}
+
+uint StreamOffset(uint stream)
+{
+    return vertexStreams[stream >> 2][stream & 3] & 12;
 }
 )";
 
@@ -409,9 +433,19 @@ float SignExtend(uint value, uint bits)
                     result_.vertexStreamStrides[stream] = std::max(result_.vertexStreamStrides[stream], stride);
                     result_.vertexStreamTails[stream] = std::max(result_.vertexStreamTails[stream], fetch.vfOffset() + 4);
                 }
-                Line(Format("uint address = (%s * %uu + %uu) * 4u;", index.c_str(), stride, fetch.vfOffset()));
+                Line(Format("uint address = (%s * %uu + %uu) * 4u + StreamOffset(%uu);", index.c_str(), stride, fetch.vfOffset(), stream));
                 const std::string buffer = Format("vertexStream%u", stream);
-                auto word = [&](int i) { return Format("%s.Load(address + %du)", buffer.c_str(), i * 4); };
+                // Words in host order: the stream's endian swap applied.
+                auto word = [&](int i) {
+                    return Format("SwapWords(%s.Load(address + %du).xxxx, StreamEndian(%uu)).x", buffer.c_str(), i * 4, stream);
+                };
+                auto words = [&](int count) {
+                    static const char* const kPad[] = { "", "", ", 0u, 0u", ", 0u", "" };
+                    static const char* const kTake[] = { "", "", ".xy", ".xyz", "" };
+                    const std::string load = count == 4 ? Format("%s.Load4(address)", buffer.c_str())
+                                                        : Format("uint4(%s.Load%d(address)%s)", buffer.c_str(), count, kPad[count]);
+                    return Format("SwapWords(%s, StreamEndian(%uu))%s", load.c_str(), stream, kTake[count]);
+                };
 
                 const bool isSigned = fetch.vfFormatSigned();
                 const bool isInteger = fetch.vfFormatInteger();
@@ -479,7 +513,7 @@ float SignExtend(uint value, uint bits)
                     value = "float4(" + component("w0", 32) + ", " + component("w1", 32) + ", 0.0, 1.0)";
                     break;
                 case 35:  // 32_32_32_32
-                    Line("uint4 w = " + buffer + ".Load4(address);");
+                    Line("uint4 w = " + words(4) + ";");
                     value = "float4(" + component("w.x", 32) + ", " + component("w.y", 32) + ", " + component("w.z", 32) +
                         ", " + component("w.w", 32) + ")";
                     break;
@@ -489,15 +523,15 @@ float SignExtend(uint value, uint bits)
                     break;
                 case 37:  // 32_32_FLOAT
                     integerFormat = false;
-                    value = "float4(asfloat(" + buffer + ".Load2(address)), 0.0, 1.0)";
+                    value = "float4(asfloat(" + words(2) + "), 0.0, 1.0)";
                     break;
                 case 57:  // 32_32_32_FLOAT
                     integerFormat = false;
-                    value = "float4(asfloat(" + buffer + ".Load3(address)), 1.0)";
+                    value = "float4(asfloat(" + words(3) + "), 1.0)";
                     break;
                 case 38:  // 32_32_32_32_FLOAT
                     integerFormat = false;
-                    value = "asfloat(" + buffer + ".Load4(address))";
+                    value = "asfloat(" + words(4) + ")";
                     break;
                 default:
                     Fail(Format("vertex format %u not supported", fetch.vfFormat()));
@@ -512,6 +546,12 @@ float SignExtend(uint value, uint bits)
             {
                 const uint32_t n = fetch.tfConstIndex();
                 result_.textureFetchMask |= 1u << n;
+                // The first fetch of a constant that sets its own filters decides them (one sampler
+                // serves every fetch of the constant).
+                const uint16_t filters = uint16_t(fetch.tfMagFilter() | (fetch.tfMinFilter() << 2) | (fetch.tfMipFilter() << 4) |
+                    (fetch.tfAnisoFilter() << 6));
+                if (result_.textureFilters[n] == TranslatedShader::kFiltersFromConstant)
+                    result_.textureFilters[n] = filters;
                 const std::string src = fetch.srcRelative() ? Format("r[%u + aL]", fetch.srcReg()) : Format("r[%u]", fetch.srcReg());
                 const uint32_t sx = fetch.tfSrcSwizzle() & 3, sy = (fetch.tfSrcSwizzle() >> 2) & 3;
                 if (fetch.tfDimension() == 3)

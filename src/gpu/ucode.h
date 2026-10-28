@@ -132,6 +132,7 @@ namespace hc09::gpu::ucode
         uint32_t tfMagFilter() const { return Bits(d[1], 12, 2); }
         uint32_t tfMinFilter() const { return Bits(d[1], 14, 2); }
         uint32_t tfMipFilter() const { return Bits(d[1], 16, 2); }
+        uint32_t tfAnisoFilter() const { return Bits(d[1], 18, 3); }  // 7: the fetch constant's
         bool tfUseComputedLod() const { return Bits(d[1], 28, 1) != 0; }
         bool tfUseRegisterLod() const { return Bits(d[1], 29, 1) != 0; }
         bool tfUseRegisterGradients() const { return Bits(d[2], 0, 1) != 0; }

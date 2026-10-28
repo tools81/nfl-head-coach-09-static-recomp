@@ -26,6 +26,7 @@ namespace hc09::gpu
             {
             case ShaderStage::Pixel: return "ps_5_1";
             case ShaderStage::Geometry: return "gs_5_1";
+            case ShaderStage::Compute: return "cs_5_1";
             default: return "vs_5_1";
             }
         }
@@ -51,6 +52,7 @@ namespace hc09::gpu
             {
             case ShaderStage::Pixel: return L"ps_6_0";
             case ShaderStage::Geometry: return L"gs_6_0";
+            case ShaderStage::Compute: return L"cs_6_0";
             default: return L"vs_6_0";
             }
         }

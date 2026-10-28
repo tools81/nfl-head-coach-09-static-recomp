@@ -1,14 +1,15 @@
 # NFL Head Coach 09 — static recompilation
 
-Version 0.7.3
+Version 0.8.0
 
 A native Windows port of NFL Head Coach 09 (Xbox 360, title ID `45410841`), built by
 statically recompiling the game's PowerPC executable to C++ with
 [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) and running it on a host layer
 that replaces the Xbox kernel, XAM, graphics, audio and input.
 
-No game data is included. You need your own copy of the disc, and nothing under
-`iso/`, `build/` or `ppc/` may be redistributed.
+No game data from the disc is included. You need your own copy of the disc, and nothing under
+`iso/`, `build/` or `ppc/` may be redistributed. The `hc27` folder holds the modern rosters and
+images HC27.exe plays with (see below), which may be redistributed.
 
 ## Installing
 
@@ -32,6 +33,29 @@ from it while you play. Settings live in `hc09.ini` in the install folder (`IsoP
 Running setup again and choosing the same folder updates that installation to the latest release
 (keeping your saves), and is also how to change the disc image; a development clone on a git branch
 is built as it is instead. The setup log is `%TEMP%\HC09Setup.log`.
+
+### Playing with today's rosters (HC27.exe)
+
+Setup builds a second game next to the original: **HC27.exe**, NFL Head Coach 09 with today's
+league. It has the current players with their ratings and contracts, the current head coaches,
+real player and coach portraits, updated team names and logos, and seasons that start in 2026.
+Everything it needs comes with the download (the `hc27` folder in the install folder), so there
+is nothing to import or set up.
+
+1. Open your install folder (for example `C:\Games\HC09Recomp`) and go into `build\hc09`.
+2. Double-click **HC27.exe**. To start it more easily later, right-click it and choose
+   *Send to > Desktop (create shortcut)*. The Start menu shortcut setup made opens the original
+   game, HC09.exe.
+3. Start a new career or a Coach Now game: the new rosters are already in place.
+
+Good to know:
+
+- HC27 uses the same disc image as the original game, and the two keep separate saves
+  (HC27's are in `build\userdata-hc27`), so a career in one never touches the other.
+- Updates (automatic, or running setup again) bring new versions of the rosters and images too.
+- If HC27 says the disc's default roster is not where it expects it, your disc image is a
+  different version of the game from the one the rosters were made from; HC09.exe still works.
+- The original game is unchanged: HC09.exe ignores the `hc27` folder.
 
 ## Status
 
@@ -76,6 +100,20 @@ keeps its 16:9 shape, with black bars where the window's shape differs.
 `set HC09_RESOLUTION_SCALE=2` (up to 4) renders at that multiple of the game's 1280x720, e.g.
 2560x1440, for a sharper picture in fullscreen on a high-resolution display. Menus and gameplay
 held 30-35 fps at 2x in testing; 1x is the default.
+
+The 3D scenes get two effects the original does not have: ambient occlusion (soft shading where
+surfaces meet, such as a player's feet on the field or the folds of a coach's jacket) and
+reflections on the field. The turf is no mirror, so a reflection is drawn dark and with strong
+contrast, like a shadow cast by the player near where he stands, longest at low camera angles. Both work from the scene's depth buffer, so they cost little and need no change to the
+game's own shaders. Set their strength in `hc09.ini` (0 turns an effect off, 1 is the default):
+
+```ini
+[Graphics]
+AmbientOcclusion=1
+Reflections=1
+```
+
+`set HC09_SSAO=<strength>` and `set HC09_SSR=<strength>` override the file for one run.
 
 ## Rosters and replacement images
 
@@ -237,8 +275,19 @@ tag, re-patches XenonRecomp if the pin changed, and recompiles and rebuilds the 
   (draw / swap / idle) every 2 s, plus the share of wall time in each phase of a draw and
   texture-cache counters, and a `[gpu] memory` line: video memory in use, cached textures and
   resolve targets (with how many were released after a minute unused), resolves dropped as stale
-  (the title loaded other data over their memory) and fetches a resolve could not serve. It also
-  logs a large texture whose change its sampled check missed (`changed unseen by its samples`).
+  (the title loaded other data over their memory) and fetches a resolve could not serve. A
+  `flushes (heap exhausted)` line counts the times a frame ran out of upload space, view
+  descriptors or samplers, each of which makes the CPU wait for the GPU to finish. A
+  `guest memory on the GPU` line counts the memory copied to the GPU and the title's writes to
+  watched pages. With `HC09_GPU_MEMORY=0` it also logs a large texture whose change its sampled
+  check missed (`changed unseen by its samples`).
+- The game's physical memory is mirrored in a 512 MiB GPU buffer: vertex shaders read their
+  vertices from it and byte-swap them, and a compute shader untiles textures from it. A page is
+  copied when a draw first needs it and again only after the game writes to it (copied pages are
+  write-protected, and the first write to one marks it stale), so unchanged geometry and textures
+  cost no CPU time per frame. `set HC09_GPU_MEMORY=0` swaps vertices and untiles textures on the
+  CPU instead, noticing texture changes by hashing; that is also the fallback when the buffer
+  cannot be created.
 - `set HC09_USERDATA=C:\path\folder` keeps saves and the cache in another folder (e.g. a fresh
   profile for `HC09_PRESS` scripts, which assume the first-start prompts).
 - `set HC09_DUMP_FRAME=300` traces every packet and draw of frame 300 (`13500/150`: frame 13500 and every 150th after it);
@@ -254,6 +303,9 @@ tag, re-patches XenonRecomp if the pin changed, and recompiles and rebuilds the 
   (packages, models, textures), with the caller.
 - `set HC09_FXC=1` compiles shaders with D3DCompile instead of DXC; `HC09_SYNC_SHADERS=1` compiles each
   when first drawn instead of in the background (with `HC09_GPU_STATS=1`, printing how long each took).
+- `set HC09_EFFECTS_DEBUG=1` shows the ambient occlusion alone (white open, dark covered), `2` the
+  reflections alone, `3` applies both effects to the left half of the screen only and `4` to every
+  other frame, for comparisons. The first 3D scene logs the camera found (`[effects] first scene`).
 - `set HC09_D3D12_DEBUG=1` enables the D3D12 debug layer and prints each distinct message; `HC09_NO_RENDER=1` disables rendering.
 - `set HC09_AUDIO_RECORD=C:\path\out.wav` records everything sent to the speakers (48 kHz stereo).
 - `set HC09_AUDIO_STATS=1` prints XMA decoder counters, the output peak level and the sound card

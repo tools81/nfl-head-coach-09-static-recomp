@@ -12,6 +12,7 @@
 // The vertex shader exports 16 float4 interpolators (TEXCOORD0..15) and SV_Position;
 // the pixel shader reads them into r0..r15 and writes SV_Target0..3.
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -37,6 +38,15 @@ namespace hc09::gpu
         uint32_t textureFetchMask = 0;              // bit n: texture fetch constant n is sampled
         uint32_t textureCubeMask = 0;               // bit n: ... and declared as a cube map
         uint32_t textureVolumeMask = 0;             // bit n: ... and declared as a 3D texture
+        // Per texture fetch constant: the filters its fetch instructions choose, which override the
+        // constant's: mag (bits 0-1), min (2-3), mip (4-5), each 3 for the constant's own, and
+        // anisotropy (6-8), 7 for the constant's.
+        static constexpr uint16_t kFiltersFromConstant = 3 | (3 << 2) | (3 << 4) | (7 << 6);
+        std::array<uint16_t, 32> textureFilters = [] {
+            std::array<uint16_t, 32> filters;
+            filters.fill(kFiltersFromConstant);
+            return filters;
+        }();
         uint32_t colorTargetMask = 0;               // pixel shader: oC0..oC3 written
         bool writesDepth = false;
     };

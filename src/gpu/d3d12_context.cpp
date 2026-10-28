@@ -164,7 +164,7 @@ namespace hc09::gpu
             return Check(device_->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&heap)), "CreateDescriptorHeap");
         };
         if (!makeHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kViewsPerFrame * kFramesInFlight, true, viewHeap_) ||
-            !makeHeap(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, kSamplersPerFrame * kFramesInFlight, true, samplerHeap_) ||
+            !makeHeap(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, kSamplerCapacity, true, samplerHeap_) ||
             !makeHeap(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, kRtvCapacity, false, rtvHeap_) ||
             !makeHeap(D3D12_DESCRIPTOR_HEAP_TYPE_DSV, kRtvCapacity, false, dsvHeap_))
             return false;
@@ -245,7 +245,6 @@ namespace hc09::gpu
         uploadOffset_ = 0;
         uploadGeneration_++;
         viewOffset_ = 0;
-        samplerOffset_ = 0;
         backBufferIndex_ = swapChain_->GetCurrentBackBufferIndex();
 
         ID3D12DescriptorHeap* heaps[] = { viewHeap_.Get(), samplerHeap_.Get() };
@@ -337,11 +336,11 @@ namespace hc09::gpu
         if (uploadOffset_ + size > kUploadBytesPerFrame)
         {
             // Out of transient space: let the GPU catch up and start over in this frame.
+            flushCounts_.uploads++;
             Flush();
             uploadOffset_ = 0;
-        uploadGeneration_++;
+            uploadGeneration_++;
             viewOffset_ = 0;
-            samplerOffset_ = 0;
         }
         UploadAllocation allocation{ uploadCpu_[frame_] + uploadOffset_,
             uploadBuffers_[frame_]->GetGPUVirtualAddress() + uploadOffset_, uploadBuffers_[frame_].Get(), uploadOffset_ };
@@ -353,11 +352,11 @@ namespace hc09::gpu
     {
         if (viewOffset_ + count > kViewsPerFrame)
         {
+            flushCounts_.views++;
             Flush();
             uploadOffset_ = 0;
-        uploadGeneration_++;
+            uploadGeneration_++;
             viewOffset_ = 0;
-            samplerOffset_ = 0;
         }
         const uint32_t index = frame_ * kViewsPerFrame + viewOffset_;
         viewOffset_ += count;
@@ -369,15 +368,16 @@ namespace hc09::gpu
 
     DescriptorRange D3D12Context::AllocateSamplers(uint32_t count)
     {
-        if (samplerOffset_ + count > kSamplersPerFrame)
+        if (samplerOffset_ + count > kSamplerCapacity)
         {
+            // Full: once the GPU is idle no table is in use, so start over. Uploads and views
+            // already allocated stay valid (nothing reuses them).
+            flushCounts_.samplers++;
             Flush();
-            uploadOffset_ = 0;
-        uploadGeneration_++;
-            viewOffset_ = 0;
             samplerOffset_ = 0;
+            samplerGeneration_++;
         }
-        const uint32_t index = frame_ * kSamplersPerFrame + samplerOffset_;
+        const uint32_t index = samplerOffset_;
         samplerOffset_ += count;
         DescriptorRange range;
         range.cpu.ptr = samplerHeap_->GetCPUDescriptorHandleForHeapStart().ptr + uint64_t(index) * samplerIncrement_;

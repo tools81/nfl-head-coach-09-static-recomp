@@ -50,7 +50,10 @@ namespace hc09::gpu
         // Changes whenever the upload ring is recycled (earlier allocations become invalid).
         uint64_t uploadGeneration() const { return uploadGeneration_; }
         DescriptorRange AllocateViews(uint32_t count);
+        // Samplers are not per frame: the heap is used up over many frames (sampler tables refer to
+        // no resources, so they stay valid) and recycled when full, which changes samplerGeneration.
         DescriptorRange AllocateSamplers(uint32_t count);
+        uint64_t samplerGeneration() const { return samplerGeneration_; }
 
         // CPU-only descriptor heap slots for render targets / depth stencils.
         D3D12_CPU_DESCRIPTOR_HANDLE AllocateRtv();
@@ -68,6 +71,19 @@ namespace hc09::gpu
 
         // Submits recorded work and waits for the GPU to go idle.
         void Flush();
+
+        // HC09_GPU_STATS: flushes forced since the last call because the frame's upload space,
+        // views or samplers ran out (each waits for the GPU to finish).
+        struct FlushCounts
+        {
+            uint32_t uploads = 0, views = 0, samplers = 0;
+        };
+        FlushCounts TakeFlushCounts()
+        {
+            const FlushCounts counts = flushCounts_;
+            flushCounts_ = {};
+            return counts;
+        }
 
         // Bytes of local video memory this process uses (DXGI budget query), or 0 if unknown.
         uint64_t VideoMemoryUsage() const;
@@ -95,6 +111,7 @@ namespace hc09::gpu
         uint64_t fenceValues_[kFramesInFlight]{};
         uint64_t nextFenceValue_ = 1;
         uint32_t frame_ = 0;
+        FlushCounts flushCounts_;
 
         static constexpr uint64_t kUploadBytesPerFrame = 192ull << 20;
         ComPtr<ID3D12Resource> uploadBuffers_[kFramesInFlight];
@@ -102,14 +119,15 @@ namespace hc09::gpu
         uint64_t uploadOffset_ = 0;
         uint64_t uploadGeneration_ = 0;
 
-        static constexpr uint32_t kViewsPerFrame = 64 * 1024;
-        static constexpr uint32_t kSamplersPerFrame = 640;
+        static constexpr uint32_t kViewsPerFrame = 256 * 1024;  // all frames' share: under the 1,000,000 limit
+        static constexpr uint32_t kSamplerCapacity = 2048;      // the most a shader-visible sampler heap holds
         ComPtr<ID3D12DescriptorHeap> viewHeap_;
         ComPtr<ID3D12DescriptorHeap> samplerHeap_;
         uint32_t viewIncrement_ = 0;
         uint32_t samplerIncrement_ = 0;
         uint32_t viewOffset_ = 0;
         uint32_t samplerOffset_ = 0;
+        uint64_t samplerGeneration_ = 0;
 
         static constexpr uint32_t kRtvCapacity = 256;
         ComPtr<ID3D12DescriptorHeap> rtvHeap_;
