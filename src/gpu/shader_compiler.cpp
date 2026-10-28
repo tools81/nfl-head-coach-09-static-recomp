@@ -82,7 +82,9 @@ namespace hc09::gpu
                 return nullptr;
             const std::wstring entryW(entry, entry + std::strlen(entry));
             const std::wstring nameW(name, name + std::strlen(name));
-            const wchar_t* arguments[] = { nameW.c_str(), L"-E", entryW.c_str(), L"-T", DxcTarget(stage), L"-O1" };
+            // HLSL 2018: the language the translated shaders are written in. Newer DXC versions (the
+            // Windows SDK's since 10.0.26100) default to HLSL 2021, which rejects their vector ?:.
+            const wchar_t* arguments[] = { nameW.c_str(), L"-E", entryW.c_str(), L"-T", DxcTarget(stage), L"-O1", L"-HV", L"2018" };
             const DxcBuffer buffer{ source.data(), source.size(), DXC_CP_UTF8 };
             ComPtr<IDxcResult> result;
             HRESULT status = E_FAIL;

@@ -1,7 +1,9 @@
 // File I/O: NtCreateFile/NtOpenFile/NtReadFile/... on top of the VFS.
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 #include <windows.h>
@@ -119,8 +121,28 @@ namespace hc09
 
         uint32_t ReadInto(FileObject& file, uint64_t offset, uint32_t buffer, uint32_t length, uint32_t& read)
         {
-            BeforeExternalWrite(buffer, length);
-            read = file.file->Read(offset, GuestToHost(buffer), length);
+            // Into physical memory (where the GPU's copy of guest memory write-protects pages) through
+            // a host buffer: the OS cannot write a protected page, and one can be protected again
+            // while a read is under way, but a copy made here faults and is handled.
+            if (buffer >= kPhysicalHeapBase)
+            {
+                thread_local std::vector<uint8_t> bounce;
+                read = 0;
+                while (read < length)
+                {
+                    const uint32_t chunk = std::min<uint32_t>(length - read, 1u << 20);
+                    bounce.resize(chunk);
+                    const uint32_t got = file.file->Read(offset + read, bounce.data(), chunk);
+                    std::memcpy(GuestToHost(buffer + read), bounce.data(), got);
+                    read += got;
+                    if (got < chunk)
+                        break;
+                }
+            }
+            else
+            {
+                read = file.file->Read(offset, GuestToHost(buffer), length);
+            }
             file.position = offset + read;
             return read == 0 && length > 0 ? status::kEndOfFile : status::kSuccess;
         }

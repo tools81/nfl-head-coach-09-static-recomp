@@ -339,10 +339,10 @@ uint TiledOffset3D(uint x, uint y, uint z, uint pitchBlocks, uint height, uint b
     uint log2Bytes = blockBytes == 16 ? 4 : blockBytes == 8 ? 3 : blockBytes == 4 ? 2 : blockBytes == 2 ? 1 : 0;
     uint macro = (((z >> 2) * (height >> 4) + (y >> 4)) * (pitchBlocks >> 5) + (x >> 5)) << 7;
     uint micro = ((z & 3) << 5) | (((y >> 1) & 3) << 3) | (x & 7);
-    uint linear = (macro | micro) << log2Bytes;
+    uint offset = (macro | micro) << log2Bytes;  // not "linear": a keyword to D3DCompile
     uint bank = ((y >> 3) ^ (z >> 2)) & 1;
     uint pipe = ((x >> 3) & 3) ^ (bank << 1);
-    return (linear & 0xF) | (((linear >> 4) & 1) << 5) | (((linear >> 5) & 7) << 8) | ((linear >> 8) << 12) |
+    return (offset & 0xF) | (((offset >> 4) & 1) << 5) | (((offset >> 5) & 7) << 8) | ((offset >> 8) << 12) |
         ((y & 1) << 4) | (pipe << 6) | (bank << 11);
 }
 

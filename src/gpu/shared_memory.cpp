@@ -69,13 +69,6 @@ namespace hc09::gpu
             if (window != 0xE0000000u || !std::getenv("HC09_NO_E_WINDOW"))
                 windows_.push_back(GuestToHost(window));
         g_sharedMemory = this;
-        g_beforeExternalWrite = [](uint32_t address, uint32_t length) {
-            if (address >= kFirstWindow && length != 0)
-                for (uint64_t page = (address & (kSize - 1)) >> kPageShift,
-                              last = ((uint64_t(address & (kSize - 1)) + length - 1) >> kPageShift);
-                     page <= last && page < kPages; page++)
-                    g_sharedMemory->OnWrite(uint32_t(page));
-        };
         // Called before the handlers already installed (guest fault reports).
         AddVectoredExceptionHandler(1, OnException);
         std::fprintf(stderr, "[gpu] guest memory on the GPU: on\n");

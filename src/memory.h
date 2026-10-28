@@ -27,14 +27,4 @@ namespace hc09
     bool AllocateGuestMemory();
 
     inline uint8_t* GuestToHost(uint32_t address) { return g_base + address; }
-
-    // Pages of physical memory can be write-protected (gpu/shared_memory.h watches the ones it has
-    // copied to the GPU). The title's own writes fault and are handled, but a write the host OS
-    // makes for it (a file read into a guest buffer) fails instead, so those call this first.
-    inline void (*g_beforeExternalWrite)(uint32_t address, uint32_t length) = nullptr;
-    inline void BeforeExternalWrite(uint32_t address, uint32_t length)
-    {
-        if (g_beforeExternalWrite)
-            g_beforeExternalWrite(address, length);
-    }
 }
