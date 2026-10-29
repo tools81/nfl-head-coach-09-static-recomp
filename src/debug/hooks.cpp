@@ -4,6 +4,7 @@
 // defining sub_<address> here overrides the alias for every caller (direct and indirect)
 // while the original stays reachable through __imp__sub_<address>.
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -209,4 +210,70 @@ PPC_FUNC(sub_8279F208)
         return;
     const std::string text = FormatGuestString(pattern, GuestArgs::FromRegisters(ctx, 1));
     std::fprintf(stderr, "[engine] %s%s", text.c_str(), !text.empty() && text.back() == '\n' ? "" : "\n");
+}
+
+// The database query call (result, database, flags, query, arguments...): the game reads and writes
+// its tables with SQL-like text such as "update 'YALP' set 'NIWP' = <arg>", table and field names
+// four reversed characters, bytes 0x80-0x8F marking where an argument goes.
+// HC09_TRACE_SQL=INJY,PIRE (names as the game spells them) logs each query whose text names one of
+// them, decoded, with its first four arguments (and the word each one points to after the call, for
+// arguments that return values) and the result code.
+extern "C" PPC_FUNC(__imp__sub_82C66928);
+
+PPC_FUNC(sub_82C66928)
+{
+    static const char* const filter = std::getenv("HC09_TRACE_SQL");
+    if (!filter)
+    {
+        __imp__sub_82C66928(ctx, base);
+        return;
+    }
+    const uint32_t query = ctx.r6.u32;
+    const uint32_t args[4] = { ctx.r7.u32, ctx.r8.u32, ctx.r9.u32, ctx.r10.u32 };
+    std::string text;
+    for (uint32_t i = 0; i < 400; i++)
+    {
+        const uint8_t c = query ? Load<uint8_t>(query + i) : 0;
+        if (c == 0)
+            break;
+        text.push_back(c >= 0x80 && c < 0x90 ? '?' : char(c));
+    }
+    // 'YJNI' -> INJY
+    for (size_t at = 0; (at = text.find('\'', at)) != std::string::npos && at + 5 < text.size();)
+    {
+        if (text[at + 5] == '\'')
+        {
+            std::reverse(text.begin() + long(at) + 1, text.begin() + long(at) + 5);
+            text.erase(at + 5, 1);
+            text.erase(at, 1);
+            at += 4;
+        }
+        else
+        {
+            at++;
+        }
+    }
+    bool wanted = false;
+    for (const char* token = filter; *token && !wanted;)
+    {
+        const char* end = std::strchr(token, ',');
+        const size_t length = end ? size_t(end - token) : std::strlen(token);
+        wanted = length && text.find(std::string(token, length)) != std::string::npos;
+        token = end ? end + 1 : token + length;
+    }
+    __imp__sub_82C66928(ctx, base);
+    if (!wanted)
+        return;
+    std::string values;
+    for (uint32_t arg : args)
+    {
+        char item[48];
+        // Arguments in guest stacks and heaps may be where a value was returned.
+        if (arg >= 0x40000000 && arg < 0x70000000)
+            std::snprintf(item, sizeof(item), " %08X(->%d)", arg, Load<int32_t>(arg));
+        else
+            std::snprintf(item, sizeof(item), " %d", int32_t(arg));
+        values += item;
+    }
+    std::fprintf(stderr, "[sql] %s |%s -> %d (thread 0x%X)\n", text.c_str(), values.c_str(), ctx.r3.s32, CurrentThreadId());
 }

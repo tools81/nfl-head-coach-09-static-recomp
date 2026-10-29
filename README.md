@@ -1,6 +1,6 @@
 # NFL Head Coach 09 — static recompilation
 
-Version 0.8.1
+Version 0.8.2
 
 A native Windows port of NFL Head Coach 09 (Xbox 360, title ID `45410841`), built by
 statically recompiling the game's PowerPC executable to C++ with
@@ -150,6 +150,15 @@ Redskins are the Commanders): the game names a team's uniforms, helmets and care
 its name in the roster and finds them by a hash of that name, so HC27 hashes the old name for
 them (`kRenamedTeams` in `src/common/edition.cpp`).
 
+## Fixes to the original game
+
+- **Injured players heal after Play Creator again.** In the original game, opening Play Creator
+  in a career left the game in its practice mode after Play Creator closed, and the
+  injury system does nothing in practice mode: from then on no injury in the league counted down
+  or healed, and games recorded no new ones. The mode in force before Play Creator is now restored
+  when it closes (`src/game_fixes.cpp`). A career saved while affected is repaired by opening and
+  closing Play Creator once.
+
 ## Known issues
 
 - Rendering: real MSAA only for multisampled surfaces used by predicated tiling (the 3D
@@ -264,6 +273,10 @@ tag, re-patches XenonRecomp if the pin changed, and recompiles and rebuilds the 
 - `set HC09_ENGINE_LOG=1` prints the engine's own debug messages (compiled out in retail) as
   `[engine] ...`, e.g. `Asset missing, using default: <path>` for every texture a material
   references that no loaded package provides.
+- `set HC09_TRACE_SQL=INJY,PIRE` logs each database query the game runs through its query call
+  whose text names one of those tables or fields (written as the game spells them), as `[sql] ...`
+  with its arguments, the values it returned and its result. Queries the game prepares ahead of
+  time do not pass through it.
 - `set HC09_SAMPLE_THREAD=160` samples guest thread 0x160's stack every 2 ms for its whole
   life and prints each distinct call path once.
 - Indirect calls to code that was not recompiled as a function stop with
