@@ -155,7 +155,25 @@ the game's default: everything it needs goes in the `hc27` folder of the install
    second replaces each team's description with a 2026 one. Both are at the top of the scripts
    (descriptions at most 255 characters, and all 32 must fit in the space the game's own took).
    They write their tables to `hc27/disc` too; each tool replaces only its own files there.
-9. Run `build/hc09/HC27.exe`. Its saves are kept in `build/userdata-hc27`, apart from HC09's.
+9. The disc's other rosters: HC27 replaces the default roster (`qkl_boot.ast` 0x72CD90), but a
+   career started in the off-season loads its own, 2008's a year earlier (0x5D1870), and there
+   is a third copy without injuries (0x80D0B0). Those showed the new players' portraits on the
+   2008 players whose records they took over (Jared Goff's picture on Jon Kitna). After building
+   `hc27/ROSTER`, and again whenever it is rebuilt,
+
+   ```sh
+   python tools/roster_import/extra_rosters.py --iso "iso/NFL Head Coach 09.iso"
+   ```
+
+   fills both with its records (same tables and fields, one with less room for draft picks) and
+   writes them whole to `hc27/disc`.
+10. Run `build/hc09/HC27.exe`. Its saves are kept in `build/userdata-hc27`, apart from HC09's.
+
+To find what else on the disc may need changing, `cap_audit.py --iso "iso/NFL Head Coach 09.iso"`
+(or `--files` for extracted archives) lists every table of every database on the disc in
+`data/cap_audit/index.csv`, each with the tool that patches it if any, dumps each distinct table
+as a CSV, and lists in `suspects.txt` those holding dollar amounts, the 2008 cap, years or salary
+fields. It only reads.
 
 The roster can also be played in HC09 as a save: copy it to
 `build/userdata/content/00000001/ROSTER-M27/ROSTER-M27`, create `ROSTER-M27.name` beside that
