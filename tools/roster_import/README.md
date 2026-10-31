@@ -175,9 +175,10 @@ the game's default: everything it needs goes in the `hc27` folder of the install
    `build/uniforms_raw`); the second moves each team's 2008 colours to its current ones (`TEAMS`
    at its top: old and new colours, and the helmet's and facemask's) and writes the changed files
    to `data/uniforms`, with before/after sheets in `build/uniform_preview`; the third lays them
-   over every copy on the disc as patches in `hc27/disc`. Logos keep their 2008 shapes. The
-   patches are made from the game's own files, so they are not committed (the script adds them to
-   `.git/info/exclude`); everyone builds them from their own disc. `pip install zopfli` lets the
+   over every copy on the disc as patches in `hc27/disc`, which are committed like the other
+   tools' (so far the Rams, Chargers, Seahawks, Bills, Dolphins and Jets, the Lions' numbers, and
+   the helmets and facemasks of those teams and the Titans and Browns). Logos keep their 2008
+   shapes. `pip install zopfli` lets the
    recoloured files fit where zlib alone would not. `disc_scan.py` (and `scan_context.py`) list
    every file in the disc's archives and find those that mention a word, to find other assets.
 10. Run `build/hc09/HC27.exe`. Its saves are kept in `build/userdata-hc27`, apart from HC09's.
@@ -205,8 +206,9 @@ does not show the portraits, which are HC27's).
 Not imported: colleges (HC09 stores an id into a list we have not mapped yet, so a player shows
 the college of the record he took over), most of the appearance (equipment and build come from
 that record; skin tone and head are set from the player's image, see step 3), and long snappers
-(HC09 has no such position). Team names, logos and uniforms stay 2008's, except the Redskins,
-renamed the Commanders (with their logo, step 5).
+(HC09 has no such position). Team names stay 2008's, except the Redskins, renamed the
+Commanders. Logos are current (step 5) on the screens and fields found so far; uniforms are recoloured
+for the teams listed in step 9.
 
 ## File format
 

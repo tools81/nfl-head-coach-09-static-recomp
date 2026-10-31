@@ -2,9 +2,9 @@
 disc. Each texture is a pair in tools/roster_import/data/uniforms: <NAME>.orig (the file as it is
 compressed in the disc's archives, from uniform_extract.py) and <NAME>.new (the recoloured one, compressed, padded to the
 same size). Every place an .orig appears in an archive gets a patch in hc27/disc
-(<archive>@<hex offset>.bin), which HC27 lays over the disc at startup. The pairs and the
-patches are derived from the game's files, so they stay out of git (data/ is ignored, and the
-patches are added to .git/info/exclude).
+(<archive>@<hex offset>.bin), which HC27 lays over the disc at startup, and lists them in
+hc27/disc/uniform_patches.files (replacing the ones it wrote before). Like the other tools'
+patches, those in hc27/disc are committed; the pairs in data/ are not.
 
     python tools/roster_import/uniform_patches.py "iso/NFL Head Coach 09.iso"
 """
@@ -55,13 +55,6 @@ def main():
                 if count:
                     print(f"{name}: {count} copies in {arch}")
     open(listing, "w").write("\n".join(written) + "\n")
-    exclude = os.path.join(ROOT, ".git", "info", "exclude")
-    if os.path.isdir(os.path.dirname(exclude)):
-        text = open(exclude).read() if os.path.exists(exclude) else ""
-        lines = [f"hc27/disc/{TOOL}.files"] + [f"hc27/disc/{x}" for x in written]
-        missing = [x for x in lines if x not in text.split("\n")]
-        if missing:
-            open(exclude, "a").write(("" if text.endswith("\n") or not text else "\n") + "\n".join(missing) + "\n")
     print(f"{len(written)} patches written to {OUT}")
 
 
