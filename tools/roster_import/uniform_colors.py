@@ -44,21 +44,123 @@ OUT = os.path.join(HERE, "data", "uniforms")
 PREVIEW = os.path.join(ROOT, "build", "uniform_preview")
 
 SILVER = (150, 157, 163)
+WHITE, BLACK, GREY = (236, 237, 243), (18, 18, 20), (165, 172, 175)
+
+
+def _stripes(*colours, wide=12, gap_colour=None, gap=3):
+    """Sleeve bands: each colour wide, with gap of gap_colour between (none if gap_colour is None)."""
+    out = []
+    for i, c in enumerate(colours):
+        if i and gap_colour is not None:
+            out.append((gap_colour, gap))
+        out.append((c, wide))
+    return out
+
+
+ROYAL, BILLS_RED = (0, 51, 141), (198, 12, 48)
+CARD_RED = (151, 35, 63)
+FALC_RED = (167, 25, 48)
+BENG_ORANGE = (251, 79, 20)
+BROWN, BROWNS_ORANGE = (56, 32, 20), (255, 80, 0)
+BRONCO_ORANGE, BRONCO_NAVY = (251, 79, 20), (12, 35, 64)
+TEX_NAVY, TEX_RED = (12, 32, 64), (200, 16, 46)
+JAG_TEAL = (0, 103, 120)
+PAT_NAVY, PAT_RED, PAT_SILVER = (0, 34, 68), (198, 12, 48), (176, 183, 188)
+BUCS_RED, PEWTER, BUCS_ORANGE = (213, 10, 10), (52, 48, 43), (255, 121, 0)
+TITANS_BLUE, TITANS_NAVY, TITANS_RED = (75, 146, 219), (12, 35, 64), (200, 16, 46)
+BURGUNDY, GOLD = (90, 20, 20), (255, 182, 18)
+
 # team: {"colours": [(old rgb, new rgb)], "numbers": extra pairs for the numbers and names
-#        ("numbers_H"/"numbers_A": for one kit only), "kit": {"H"|"A": redesign, see redesign()},
-#        "shell": helmet colour, "facemask": facemask colour} (any of them optional)
+#        ("numbers_H"/"numbers_A": for one kit only), "kit": {"H"|"A": redesign, see redesign();
+#        "num": [fill, outline] for the numbers and names}, "shell": helmet colour,
+#        "facemask": facemask colour} (any of them optional)
 TEAMS = {
-    "BILLS": {"colours": [((20, 25, 50), (0, 51, 141)), ((25, 45, 100), (0, 51, 141)), ((190, 40, 40), (198, 12, 48))],
-              "numbers_H": [((0, 48, 112), (198, 12, 48))], "numbers_A": [((0, 0, 32), (198, 12, 48))],
-              # the 2026 kit: no shoulder yoke or side panels, five-band sleeve stripes, plain socks
-              "kit": {"H": {"body": (0, 51, 141), "collar": (236, 237, 243), "socks": (0, 51, 141),
-                            "panels": [(20, 26, 45), (170, 35, 30), (120, 15, 15), (40, 60, 190), (26, 30, 51)],
-                            "stripes": [(236, 237, 243), (198, 12, 48), (236, 237, 243), (198, 12, 48), (236, 237, 243)]},
-                      "A": {"body": (236, 237, 243), "collar": (0, 51, 141), "socks": (236, 237, 243),
-                            "panels": [(20, 26, 45), (170, 35, 30), (120, 15, 15), (40, 60, 190)],
-                            "stripes": [(0, 51, 141), (198, 12, 48), (0, 51, 141), (198, 12, 48), (0, 51, 141)]}},
+    "BILLS": {"colours": [((20, 25, 50), ROYAL), ((25, 45, 100), ROYAL), ((190, 40, 40), BILLS_RED)],
+              "numbers_H": [((0, 48, 112), BILLS_RED)], "numbers_A": [((0, 0, 32), BILLS_RED)],
+              "kit": {"H": {"body": ROYAL, "collar": WHITE, "socks": ROYAL, "pants": WHITE,
+                            "pants_stripes": [(ROYAL, 8), (BILLS_RED, 10), (ROYAL, 8)],
+                            "stripes": _stripes(WHITE, BILLS_RED, WHITE, BILLS_RED, WHITE, gap_colour=ROYAL)},
+                      "A": {"body": WHITE, "collar": ROYAL, "socks": WHITE, "pants": ROYAL,
+                            "pants_stripes": [(WHITE, 6), (BILLS_RED, 10), (WHITE, 6)],
+                            "stripes": _stripes(ROYAL, BILLS_RED, ROYAL, BILLS_RED, ROYAL, gap_colour=WHITE)}},
               "shell": (242, 242, 242), "facemask": (242, 242, 242)},
-    "BROWNS": {"facemask": (242, 242, 242)},
+    "CARDINALS": {"kit": {"H": {"body": CARD_RED, "collar": (110, 20, 45), "wordmark": WHITE, "pants": CARD_RED,
+                                "socks": CARD_RED, "num": [WHITE, BLACK]},
+                          "A": {"body": WHITE, "collar": CARD_RED, "wordmark": None, "stripes": [(BLACK, 26)],
+                                "pants": WHITE, "pants_stripes": [(GREY, 8), (CARD_RED, 12), (GREY, 8)],
+                                "socks": WHITE, "num": [CARD_RED, BLACK]}},
+                  "facemask": GREY},
+    "FALCONS": {"kit": {"H": {"body": FALC_RED, "collar": BLACK, "wordmark": WHITE, "pants": WHITE,
+                              "pants_stripes": [(BLACK, 10), (GREY, 12)], "socks": FALC_RED, "num": [WHITE, BLACK]},
+                        "A": {"body": WHITE, "collar": BLACK, "wordmark": BLACK, "pants": BLACK,
+                              "pants_stripes": [(WHITE, 8), (GREY, 12)], "socks": WHITE, "num": [FALC_RED, BLACK]}},
+                "shell": BLACK, "facemask": GREY},
+    "BENGALS": {"kit": {"H": {"body": BLACK, "collar": BLACK, "wordmark": BENG_ORANGE, "socks": BENG_ORANGE,
+                              "stripes": _stripes(BENG_ORANGE, BENG_ORANGE, BENG_ORANGE, wide=10, gap_colour=BLACK, gap=6),
+                              "stripes_at": 60, "num": [WHITE, BENG_ORANGE]},
+                        "A": {"body": WHITE, "collar": WHITE, "wordmark": BENG_ORANGE, "socks": WHITE,
+                              "stripes": _stripes(BLACK, BLACK, BLACK, wide=10, gap_colour=WHITE, gap=6),
+                              "stripes_at": 60, "num": [BLACK, BENG_ORANGE]}}},
+    "BROWNS": {"kit": {"H": {"body": BROWN, "collar": WHITE, "wordmark": None, "pants": WHITE,
+                             "pants_stripes": [(BROWN, 8), (BROWNS_ORANGE, 12), (BROWN, 8)], "socks": BROWN,
+                             "stripes": _stripes(BROWNS_ORANGE, WHITE, BROWNS_ORANGE, WHITE, BROWNS_ORANGE, wide=10),
+                             "num": [WHITE, WHITE]},
+                       "A": {"body": WHITE, "collar": WHITE, "wordmark": None, "pants": BROWNS_ORANGE,
+                             "pants_stripes": [(BROWN, 8), (WHITE, 8), (BROWN, 8)], "socks": WHITE,
+                             "stripes": _stripes(BROWN, BROWNS_ORANGE, BROWN, wide=12, gap_colour=WHITE),
+                             "num": [BROWN, BROWN]}},
+               "facemask": (242, 242, 242)},
+    "BRONCOS": {"kit": {"H": {"body": BRONCO_ORANGE, "collar": BRONCO_NAVY, "wordmark": BRONCO_NAVY, "pants": WHITE,
+                              "pants_stripes": [(BRONCO_ORANGE, 10), (BRONCO_NAVY, 10)], "socks": BRONCO_ORANGE,
+                              "stripes": [(BRONCO_NAVY, 12), (WHITE, 6), (BRONCO_NAVY, 12)], "num": [WHITE, BRONCO_NAVY]},
+                        "A": {"body": WHITE, "collar": BRONCO_NAVY, "wordmark": BRONCO_ORANGE, "pants": BRONCO_ORANGE,
+                              "pants_stripes": [(WHITE, 8), (BRONCO_NAVY, 10)], "socks": WHITE,
+                              "stripes": [(BRONCO_NAVY, 12), (BRONCO_ORANGE, 6), (BRONCO_NAVY, 12)],
+                              "num": [BRONCO_NAVY, BRONCO_ORANGE]}}},
+    "TEXANS": {"kit": {"H": {"body": TEX_NAVY, "collar": TEX_RED, "wordmark": TEX_RED, "pants": WHITE,
+                             "pants_stripes": [(TEX_NAVY, 8), (TEX_RED, 10), (TEX_NAVY, 8)], "socks": TEX_NAVY,
+                             "num": [WHITE, TEX_RED]},
+                       "A": {"body": WHITE, "collar": TEX_NAVY, "wordmark": TEX_RED, "pants": TEX_NAVY,
+                             "pants_stripes": [(WHITE, 6), (TEX_RED, 10), (WHITE, 6)], "socks": WHITE,
+                             "num": [TEX_NAVY, TEX_RED]}}},
+    "JAGUARS": {"kit": {"H": {"body": JAG_TEAL, "collar": BLACK, "wordmark": None, "pants": WHITE, "socks": JAG_TEAL,
+                              "stripes": [(BLACK, 30)], "stripes_at": 210, "num": [WHITE, WHITE]},
+                        "A": {"body": WHITE, "collar": BLACK, "wordmark": None, "pants": JAG_TEAL, "socks": BLACK,
+                              "stripes": [(BLACK, 30)], "stripes_at": 210, "num": [BLACK, BLACK]}},
+                "shell": BLACK},
+    "PATRIOTS": {"kit": {"H": {"body": PAT_NAVY, "collar": PAT_RED, "wordmark": WHITE, "pants": PAT_SILVER,
+                               "pants_stripes": [(PAT_NAVY, 8), (PAT_RED, 10), (PAT_NAVY, 8)], "socks": PAT_NAVY,
+                               "stripes": [(PAT_RED, 10), (WHITE, 6), (PAT_RED, 10)], "stripes_at": 70,
+                               "num": [WHITE, PAT_RED]},
+                         "A": {"body": WHITE, "collar": PAT_NAVY, "wordmark": PAT_NAVY, "pants": PAT_SILVER,
+                               "pants_stripes": [(PAT_NAVY, 8), (PAT_RED, 10), (PAT_NAVY, 8)], "socks": WHITE,
+                               "stripes": [(PAT_NAVY, 10), (PAT_RED, 6), (PAT_NAVY, 10)], "stripes_at": 70,
+                               "num": [PAT_NAVY, PAT_RED]}},
+                 "shell": PAT_SILVER, "facemask": PAT_RED},
+    "BUCCANEERS": {"kit": {"H": {"body": BUCS_RED, "collar": BLACK, "pants": WHITE, "socks": BLACK,
+                                 "pants_stripes": [(BLACK, 6), (BUCS_RED, 10), (BUCS_ORANGE, 6), (BLACK, 6)],
+                                 "stripes": [(BLACK, 26)], "stripes_at": 214, "num": [WHITE, BUCS_RED]},
+                           "A": {"body": WHITE, "collar": BLACK, "pants": PEWTER, "socks": BLACK,
+                                 "pants_stripes": [(BLACK, 6), (BUCS_RED, 10), (BUCS_ORANGE, 6), (BLACK, 6)],
+                                 "stripes": [(BLACK, 26)], "stripes_at": 214, "num": [BUCS_RED, BLACK]}},
+                   "shell": PEWTER, "facemask": BLACK},
+    "TITANS": {"kit": {"H": {"body": TITANS_BLUE, "collar": TITANS_NAVY, "wordmark": WHITE, "pants": WHITE,
+                             "pants_stripes": [(TITANS_NAVY, 8), (TITANS_RED, 8)], "socks": TITANS_BLUE,
+                             "stripes": _stripes(WHITE, WHITE, WHITE, WHITE, wide=5, gap_colour=TITANS_NAVY, gap=4),
+                             "num": [WHITE, TITANS_RED]},
+                       "A": {"body": WHITE, "collar": TITANS_NAVY, "wordmark": TITANS_BLUE, "pants": TITANS_BLUE,
+                             "pants_stripes": [(TITANS_NAVY, 8), (TITANS_RED, 8)], "socks": WHITE,
+                             "stripes": _stripes(TITANS_BLUE, TITANS_BLUE, TITANS_BLUE, TITANS_BLUE, wide=6,
+                                                 gap_colour=WHITE, gap=4),
+                             "num": [TITANS_BLUE, TITANS_RED]}},
+               "shell": (242, 242, 242), "facemask": (242, 242, 242)},
+    "REDSKINS": {"kit": {"H": {"body": BURGUNDY, "collar": (60, 12, 12), "wordmark": None, "pants": WHITE,
+                               "pants_stripes": [(BURGUNDY, 8), (GOLD, 10)], "socks": BURGUNDY,
+                               "stripes": [(WHITE, 8), (GOLD, 10)], "num": [WHITE, GOLD]},
+                         "A": {"body": WHITE, "collar": BURGUNDY, "wordmark": None, "pants": BURGUNDY,
+                               "pants_stripes": [(WHITE, 8), (GOLD, 10)], "socks": WHITE,
+                               "stripes": [(BURGUNDY, 8), (GOLD, 10)], "num": [BURGUNDY, GOLD]}},
+                 "shell": BURGUNDY, "facemask": GOLD},
     "CHARGERS": {"colours": [((15, 30, 60), (0, 128, 198)), ((10, 25, 50), (0, 110, 180)), ((200, 150, 40), (255, 194, 14))],
                  "facemask": (255, 194, 14)},
     "DOLPHINS": {"colours": [((20, 80, 80), (0, 142, 151)), ((230, 90, 20), (252, 76, 2)), ((15, 20, 40), (0, 100, 110))],
@@ -72,7 +174,6 @@ TEAMS = {
     "SEAHAWKS": {"colours": [((45, 70, 100), (0, 34, 68)), ((20, 30, 45), (0, 34, 68)), ((60, 120, 60), (105, 190, 40)),
                              ((100, 140, 180), (165, 172, 175))],
                  "shell": (0, 34, 68), "facemask": (0, 34, 68)},
-    "TITANS": {"shell": (12, 35, 64), "facemask": (12, 35, 64)},
 }
 TEAMS_ALL = ["49ERS", "BEARS", "BENGALS", "BILLS", "BRONCOS", "BROWNS", "BUCCANEERS", "CARDINALS", "CHARGERS",
              "CHIEFS", "COLTS", "COWBOYS", "DOLPHINS", "EAGLES", "FALCONS", "GIANTS", "JAGUARS", "JETS", "LIONS",
@@ -396,95 +497,158 @@ def _norm_blur(v, mask, sigma):
     return cv2.GaussianBlur(v * m, (0, 0), sigma) / np.maximum(cv2.GaussianBlur(m, (0, 0), sigma), 1e-3)
 
 
-def plain_torso(img, body, panels, collar, keep_box=(468, 1140, 560, 1236), neck_reach=60):
-    """The jersey (original colours, HxWx3 floats) as one plain body colour: every panel near one of
-    panels (yoke, side panels, piping) and the body itself become body, folds kept; the ring
-    round the neck becomes collar; the NFL shield in keep_box stays."""
+def plain_torso(img, body, collar, wordmark="keep", keep_box=(468, 1140, 560, 1236),
+                wordmark_box=(330, 1236, 694, 1350), neck_reach=60):
+    """The jersey (original colours, HxWx3 floats) as one plain body colour, folds kept: yokes,
+    side panels and piping all go; the ring round the neck becomes collar; the NFL shield in
+    keep_box stays; the chest wordmark in wordmark_box stays as it is ("keep"), goes (None) or
+    takes a colour."""
     import cv2
     h, w, _ = img.shape
     lum = img.mean(-1).astype(np.float32)
-    hole = cv2.morphologyEx((lum < 10).astype(np.uint8), cv2.MORPH_OPEN, np.ones((9, 9), np.uint8))
-    n, lab, st, _ = cv2.connectedComponentsWithStats(hole)
-    neck = np.isin(lab, [i for i in range(1, n) if st[i, 4] > 20000 and 300 < st[i, 0] + st[i, 2] / 2 < 724])
+    for dark in (10, 18):  # the neck hole: the big near-black blob in the middle
+        hole = cv2.morphologyEx((lum < dark).astype(np.uint8), cv2.MORPH_OPEN, np.ones((9, 9), np.uint8))
+        n, lab, st, _ = cv2.connectedComponentsWithStats(hole)
+        neck = np.isin(lab, [i for i in range(1, n) if 20000 < st[i, 4] < 400000 and 300 < st[i, 0] + st[i, 2] / 2 < 724])
+        if neck.sum() > 40000:
+            break
     near_neck = cv2.dilate(neck.astype(np.uint8), np.ones((2 * neck_reach + 1,) * 2, np.uint8)).astype(bool)
-    refs = np.array(list(panels) + [img[~neck].reshape(-1, 3)[0] * 0 + np.median(img[~neck].reshape(-1, 3), 0)], float)
-    dist = np.linalg.norm(img[:, :, None, :] - refs[None, None], axis=-1)
-    cls, panel = dist.argmin(-1), (dist.min(-1) < 90) & ~neck
-    reds = [i for i, c in enumerate(panels) if c[0] > 2 * max(c[1], c[2])]
+    # the cloth's colours: k-means on a sample, the commonest one is the body
+    sample = img[~neck][:: 37].astype(np.float32)
+    _, labels, centres = cv2.kmeans(sample, 6, None, (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0),
+                                    3, cv2.KMEANS_PP_CENTERS)
+    main = np.bincount(labels.ravel(), minlength=6).argmax()
+    cls = np.linalg.norm(img[:, :, None, :] - centres[None, None], axis=-1).argmin(-1)
     keep = np.zeros((h, w), bool)
     x0, y0, x1, y1 = keep_box
     keep[y0:y1, x0:x1] = True
-    keep &= ~(panel & np.isin(cls, [0] + reds))  # by the shield only the shield stays
-    # folds: each panel's smoothed light against its broad average, as strong as the body's
+    keep &= np.linalg.norm(img - centres[main], axis=-1) > 60  # by the shield only the shield stays
+    mark = np.zeros((h, w), bool)
+    if wordmark is not None:
+        x0, y0, x1, y1 = wordmark_box
+        smooth = cv2.medianBlur(np.clip(img[y0:y1, x0:x1], 0, 255).astype(np.uint8), 5).astype(float)  # not the mesh
+        letters = (np.linalg.norm(smooth - centres[main], axis=-1) > 60).astype(np.uint8)
+        n, lab, st, _ = cv2.connectedComponentsWithStats(letters)
+        mark[y0:y1, x0:x1] = np.isin(lab, [i for i in range(1, n) if st[i, 4] >= 15])
+        mark = cv2.dilate(mark.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool) & ~neck
+    # folds: each colour's smoothed light against its broad average, as strong as the body's
     ratio, spread = np.ones((h, w), np.float32), {}
-    for k in range(len(refs)):
-        mk = panel & (cls == k)
+    for k in range(len(centres)):
+        mk = (cls == k) & ~neck
         if mk.sum() < 200:
             continue
         r = _norm_blur(lum, mk, 4) / np.maximum(_norm_blur(lum, mk, 40), 1)
         ratio[mk], spread[k] = r[mk], np.std(r[mk])
     shade = np.ones((h, w), np.float32)
     for k, sd in spread.items():
-        mk = panel & (cls == k)
-        shade[mk] = 1 + (ratio[mk] - 1) * min(1.0, spread.get(len(refs) - 1, 0.04) / max(sd, 1e-3))
+        mk = (cls == k) & ~neck
+        shade[mk] = 1 + (ratio[mk] - 1) * min(1.0, spread.get(main, 0.04) / max(sd, 1e-3))
     shade = np.clip(shade, 0.8, 1.08)
-    ring = panel & near_neck & np.isin(cls, reds)
+    # the collar: what is not body right round the neck hole, filled in to the hole
+    ring = near_neck & (cls != main) & ~neck & ~keep & (lum > 12)
     ring = cv2.morphologyEx((ring | neck).astype(np.uint8), cv2.MORPH_CLOSE, np.ones((25, 25), np.uint8))
     filled = ring.copy()
     cv2.floodFill(filled, np.zeros((h + 2, w + 2), np.uint8), (0, 0), 1)
     collar_m = ((ring > 0) | (filled == 0)) & ~neck & ~keep & near_neck
-    body_m = panel & ~keep & ~collar_m
-    seam = cv2.dilate(body_m.astype(np.uint8), np.ones((7, 7), np.uint8)).astype(bool)
-    guard = cv2.dilate((neck | keep | collar_m).astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
-    body_m |= seam & ~guard & (lum > 12)  # the soft seams between panels go too
+    body_m = ~neck & ~keep & ~collar_m & ~mark
     out = img.copy()
     out[body_m] = np.array(body, float) * shade[body_m, None]
-    lit = collar_m & np.isin(cls, reds)
+    lit = collar_m & (lum > 30)
     fall = np.clip(lum / max(np.median(lum[lit]) if lit.any() else 1, 1), 0, 1.1)  # into the neck's shadow
     out[collar_m] = np.array(collar, float) * fall[collar_m, None]
+    if wordmark not in (None, "keep"):
+        out[mark] = np.array(wordmark, float) * np.clip(lum / max(np.median(lum[mark]), 1), 0.7, 1.2)[mark, None] \
+            if mark.any() else out[mark]
     return np.clip(out, 0, 255)
 
 
 def _cloth_shade(img, sigma=3):
     """Folds of the main cloth (the colour most of img is), spread smoothly over the rest."""
+    import cv2
     med = np.median(img.reshape(-1, 3), 0)
     main = np.linalg.norm(img - med, axis=-1) < 40
     lum = img.mean(-1).astype(np.float32)
-    import cv2
     reach = cv2.GaussianBlur(main.astype(np.float32), (0, 0), sigma)
     ratio = _norm_blur(lum, main, sigma) / max(float(np.median(lum[main])), 1)
     return np.clip(np.where(reach > 0.05, ratio, 1.0), 0.8, 1.1)
 
 
-def redesign(part, img, kit):
-    """The part (original colours, HxWx3 floats) in the kit's design (TEAMS[...]["kit"])."""
-    if part == "TORSOBAKED":
-        return plain_torso(img, kit["body"], kit["panels"], kit["collar"])
-    shade = _cloth_shade(img)
+def _keep_mark(part, img, name, plain):
+    """plain without the Reebok mark's own pixels (the swoosh is drawn there later)."""
+    box = MARK_BOXES.get(name) or find_mark(part, img)
+    if box:
+        x0, y0, x1, y1 = box
+        region = img[y0:y1, x0:x1]
+        plain[y0:y1, x0:x1] &= np.abs(region - np.median(region.reshape(-1, 3), 0)).sum(-1) < 60
+    return plain
+
+
+def _bands(out, shade, bands, at, axis=1):
+    """Stripes [(rgb, width), ...] side by side from at along axis (1: across x, 0: across y)."""
+    for colour, wide in bands:
+        sl = (slice(None), slice(at, at + wide)) if axis == 1 else (slice(at, at + wide), slice(None))
+        out[sl] = np.array(colour, float) * shade[sl][..., None]
+        at += wide
+
+
+PANTS_SEAMS = (492, 1542)  # x of the side seams on the pants texture
+PANTS_KEEP = [(700, 0, 1350, 70), (900, 0, 1150, 330), (1220, 60, 1330, 150)]  # belt, fly, NFL shield
+
+
+def redesign(part, img, kit, name=""):
+    """The part (original colours, HxWx3 floats) in the kit's design: a TEAMS[...]["kit"] entry,
+    {"body", "collar", "wordmark", "sleeve", "stripes", "stripes_at", "pants", "pants_stripes",
+    "socks"} (any optional but body for the jersey)."""
     out = img.copy()
+    if part == "TORSOBAKED":
+        return plain_torso(img, kit["body"], kit.get("collar", kit["body"]), kit.get("wordmark", "keep"))
+    shade = _cloth_shade(img)
     if part in ("SLEEVEBAKED", "RSLEEVEBAKED"):
-        # all plain but the Reebok mark (the swoosh goes there later), then the bands across the
-        # arm near the cuff
-        plain = np.ones(img.shape[:2], bool)
-        box = MARK_BOXES.get(kit.get("_name", "")) or find_mark(part, img)
-        if box:
-            x0, y0, x1, y1 = box
-            region = img[y0:y1, x0:x1]
-            plain[y0:y1, x0:x1] = np.abs(region - np.median(region.reshape(-1, 3), 0)).sum(-1) < 60
-        out[plain] = np.array(kit["body"], float) * shade[plain, None]
-        at = 156
-        for i, colour in enumerate(kit["stripes"]):
-            wide = 12 if i % 2 == 0 else 10
-            out[:, at:at + wide] = np.array(colour, float) * shade[:, at:at + wide, None]
-            at += wide + 3
-        return np.clip(out, 0, 255)
-    if part == "SOCKS":  # the sock itself (the coloured part), not the white sanitary
-        sock = (img[..., 0] > img[..., 1] + 40) | (img.max(-1) - img.min(-1) > 60)
-        ref = img[sock].mean(-1)
-        lum = img.mean(-1)
-        out[sock] = np.array(kit["socks"], float) * np.clip(lum / np.median(ref), 0.6, 1.2)[sock, None]
-        return np.clip(out, 0, 255)
-    return img
+        plain = _keep_mark(part, img, name, np.ones(img.shape[:2], bool))
+        out[plain] = np.array(kit.get("sleeve", kit["body"]), float) * shade[plain, None]
+        _bands(out, shade, kit.get("stripes", []), kit.get("stripes_at", 156))
+    elif part == "PANTSBAKED" and "pants" in kit:
+        import cv2
+        plain = _keep_mark(part, img, name, np.ones(img.shape[:2], bool))
+        # in the belt, fly and shield boxes only what is not cloth stays (the cloth colours being
+        # those covering much of the pants)
+        sample = img.reshape(-1, 3)[::53].astype(np.float32)
+        _, labels, centres = cv2.kmeans(sample, 5, None, (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0),
+                                        3, cv2.KMEANS_PP_CENTERS)
+        cloth = centres[np.bincount(labels.ravel(), minlength=5) > 0.06 * len(labels)]
+        for x0, y0, x1, y1 in PANTS_KEEP:
+            box = img[y0:y1, x0:x1]
+            near = np.linalg.norm(box[:, :, None, :] - cloth[None, None], axis=-1).min(-1) < 60
+            plain[y0:y1, x0:x1] &= near
+        out[plain] = np.array(kit["pants"], float) * shade[plain, None]
+        bands = [(c, 4 * w) for c, w in kit.get("pants_stripes", [])]  # 2048 texels across the pants
+        width = sum(w for _, w in bands)
+        for seam in PANTS_SEAMS:
+            _bands(out, shade, bands, seam - width // 2)
+    elif part == "SOCKS" and "socks" in kit:  # the sock above the white sanitary
+        top = int(img.shape[0] * 0.44)
+        s = shade.copy()
+        s[:top] = _cloth_shade(img[:top])
+        out[:top] = np.array(kit["socks"], float) * s[:top, :, None]
+    return np.clip(out, 0, 255)
+
+
+def number_pairs(x, colours):
+    """Colour pairs taking the number (or name) texture x's own colours, fill first then the
+    outlines outward, to colours (as many as given; the last repeats)."""
+    import cv2
+    from scipy import ndimage
+    d = decode(x)
+    solid = d[..., 3] > 200
+    if solid.sum() < 50:
+        return []
+    depth = ndimage.distance_transform_edt(solid)
+    px = d[..., :3][solid].astype(np.float32)
+    k = min(3, max(2, len(colours)))
+    _, labels, centres = cv2.kmeans(px, k, None, (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0), 3,
+                                    cv2.KMEANS_PP_CENTERS)
+    order = np.argsort([-depth[solid][labels.ravel() == i].mean() for i in range(k)])
+    return [(tuple(int(v) for v in centres[i]), tuple(colours[min(j, len(colours) - 1)])) for j, i in enumerate(order)]
 
 
 # --- helmet material --------------------------------------------------------------------------
@@ -585,8 +749,12 @@ def main():
             data = zlib.decompress(orig)
             new = recolour(data, pairs) if pairs else data
             kit = spec.get("kit", {}).get(name[len(team)]) if part else None
-            if kit and part in ("TORSOBAKED", "SLEEVEBAKED", "RSLEEVEBAKED", "SOCKS"):
-                new = encode_changed(new, decode(new), redesign(part, decode(data)[..., :3].astype(float), kit), all_blocks=True)
+            if kit and part in ("NUM", "NAME") and "num" in kit:
+                new = recolour(data, number_pairs(data, kit["num"]))
+            if kit and {"TORSOBAKED": "body", "SLEEVEBAKED": "body", "RSLEEVEBAKED": "body", "PANTSBAKED": "pants",
+                        "SOCKS": "socks"}.get(part) in kit:
+                img = redesign(part, decode(data)[..., :3].astype(float), kit, name[:-4])
+                new = encode_changed(new, decode(new), img, all_blocks=True)
             recoloured = new
             for even in (5, 8, 12, 16):  # a jersey that packs too big is evened out further
                 new, note = cloth(team, part, recoloured, even, name, data)
