@@ -33,6 +33,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 #   decal     the logo alone, mirrored (the helmet's decal)
 #   boxes     logos at the given boxes, see replace_boxes (written ("boxes", box, ...))
 #   ribbon    a ribbon board with the logo repeated along it
+#   shell     a logo on a plain surface such as a helmet's shell, in the given box
 TEAMS = {
     "commanders": {
         "043CD6AD867A5001": "logo",      # large logo: New Career's Team Select
@@ -47,6 +48,7 @@ TEAMS = {
         "9C9864C294ADDFD6": "end zone",  # career campus practice field
         "D5AF025EC8685384": "field",     # the stadium's field
         "20589A6B61EAEF09": "decal",     # the players' helmets
+        "7A644E59B25586AF": ("shell", (45, 74, 112, 166)),  # the score bug's helmet
     },
     # The Bears keep their C on helmets and at midfield (not listed), and on the stadium's facade,
     # where the C is the sign's shape (its texture only colours it).
@@ -80,6 +82,176 @@ TEAMS = {
         "27D7950D18DA10E8": ("boxes", (50, 42, 210, 222)),                        # career campus: "Home of the ..."
         "55A242AB4C86CC67": ("boxes", (3, 27, 61, 102)),                          # career campus banners
         "75EFA5EEFE3B9D04": ("boxes", (136, 373, 194, 414)),                      # career campus building wall
+    },
+    # Teams whose small logo (Team Select, lists, Coach Agenda) is replaced so far; the other
+    # places their logo appears are still to be found in a dump.
+    "cardinals": {
+        "B5351947433DF688": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "951DF05C94A80ED6": "logo",  # 3D logo
+        "EBE172BCCF33FAE9": "decal",  # logo, stored mirrored
+        "1EA627001701C713": ("shell", (146, 91, 219, 146)),  # the score bug's helmet
+        "47517631E337CC2C": "field",  # the stadium's field
+    },
+    "falcons": {
+        "BB973DC788C0476C": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "E64E9F724634FBC1": "decal",  # logo, stored mirrored
+        "9D90738A0BA084C1": ("shell", (131, 73, 203, 151)),  # the score bug's helmet
+        "2C2B5F6B2257581A": "field",  # the stadium's field
+    },
+    "ravens": {
+        "94AA8E58348087DA": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "28BA7323CDA017D1": "decal",  # logo, stored mirrored
+        "71D4730D9D8F63B3": "decal",  # logo, stored mirrored
+        "76A67056A9659E09": "logo",  # 3D logo
+        "D4CBA95B39FD971F": ("shell", (42, 90, 128, 142)),  # the score bug's helmet
+    },
+    "bills": {
+        "D870BA40EF7AB5DB": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "577435681A544CDB": "logo",  # 3D logo
+        "5F5C02CB4DF6199F": "decal",  # logo, stored mirrored
+        "802CF3A9E3BB0B07": "logo",  # 3D logo
+        "745F36AF9DCDDE8F": ("shell", (128, 69, 215, 157)),  # the score bug's helmet
+        "B478E6798C8F6D1E": "field",  # the stadium's field
+    },
+    "panthers": {
+        "0DD6777226F82FAA": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "796D129F2B866DA7": "logo",  # 3D logo
+        "C5A1117E928DD5F1": "decal",  # logo, stored mirrored
+        "A4167A7633905F7D": ("shell", (47, 84, 113, 152)),  # the score bug's helmet
+    },
+    "bengals": {
+        "3D87516609E9209A": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "A5E2B5FA242D74EE": "logo",  # 3D logo
+        "E6FCE618171869C2": "field",  # the stadium's field
+    },
+    "browns": {
+        "4D0C2360B3F896FA": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "ED3F12BE876BFB7B": "field",  # the stadium's field
+    },
+    "cowboys": {
+        "72C0C8A00E48547F": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "ABA05666755E32D7": "logo",  # 3D logo
+        "8C45A9F38B504266": ("shell", (140, 74, 212, 150)),  # the score bug's helmet
+        "E9D8A8B8CC25B508": "field",  # the stadium's field
+    },
+    "broncos": {
+        "A2C57BF042160006": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "68729C89082D0B5E": "logo",  # 3D logo
+        "C48414EE7EBFA3BF": ("shell", (133, 90, 215, 142)),  # the score bug's helmet
+        "85A84DD229E4E5F7": "field",  # the stadium's field
+    },
+    "lions": {
+        "3E2FF804292AC0E5": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "91B5F5D16285F06A": "decal",  # logo, stored mirrored
+        "38E79523358F020C": ("shell", (130, 75, 215, 159)),  # the score bug's helmet
+        "0DA0EF2ADBB958EB": "field",  # the stadium's field
+    },
+    "packers": {
+        "3AE5FAF75E3A07D5": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "DF7C2A952335BE2B": "logo",  # 3D logo
+        "A786F69AAB261FA8": ("shell", (47, 84, 119, 138)),  # the score bug's helmet
+    },
+    "texans": {
+        "EDC7E00CF6209B8E": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "419A3B447743FC42": "decal",  # logo, stored mirrored
+        "EAAE5C6EDBE41928": "logo",  # 3D logo
+        "91C57669DE04C7F4": ("shell", (43, 73, 119, 146)),  # the score bug's helmet
+    },
+    "colts": {
+        "801F1B48D4F29B36": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "C592EF28A08A0AB0": "flat",      # the logo icon
+        "B6F9B1993F823F1B": ("shell", (148, 66, 208, 136)),                      # the score bug's helmet
+        "8AE16B7CBED42753": ("boxes", (66, 120, 172, 230)),                      # career campus: "Home of the ..."
+        "9C9A658BA133E30A": ("boxes", (88, 132, 190, 236)),                       # logo on blue under the name
+    },
+    "jaguars": {
+        "D818446A0440AA2A": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "327C66BA521F177A": "logo",  # 3D logo
+        "3909F9C1F016B6B8": ("shell", (58, 63, 132, 109)),  # the score bug's helmet
+    },
+    "chiefs": {
+        "790DA51D0A004450": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "CFF772F02E010845": "logo",  # 3D logo
+        "D651AC828D5E96BF": "decal",  # logo, stored mirrored
+        "E427ADAC5CC41685": "decal",  # logo, stored mirrored
+        "879CCF9E3AEF803A": ("shell", (131, 84, 211, 146)),  # the score bug's helmet
+    },
+    "dolphins": {
+        "FC1881A7129AA603": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "EF371B4C6D420EFC": "logo",  # 3D logo
+        "7D6D7A6129C3F961": ("shell", (143, 80, 202, 161)),  # the score bug's helmet
+        "E41A97891C456E34": "field",  # the stadium's field
+    },
+    "vikings": {
+        "7A916E0854398C66": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "476091EDFFD0A92F": "logo",  # 3D logo
+    },
+    "patriots": {
+        "323F2D2D5B528374": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "7EB6A78AA3A25B26": "logo",      # large logo
+        "2F696785D161310E": ("shell", (34, 70, 112, 138)),                       # the score bug's helmet
+        "3324AD566FA87588": "decal",     # the players' helmets
+    },
+    "saints": {
+        "2061F69B5A560CB2": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "C84A969989BCBD3A": "logo",  # 3D logo
+        "E30A9EB753167251": "logo",  # 3D logo
+        "0930DB437FCED6B4": ("shell", (49, 74, 112, 143)),  # the score bug's helmet
+    },
+    "giants": {
+        "0ABD07BFCCDF215F": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "AA072F58BD0D6E34": ("shell", (144, 86, 203, 140)),  # the score bug's helmet
+        "D8394B0B84BE4344": "field",  # the stadium's field
+    },
+    "raiders": {
+        "762A85F720265012": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "7F8F9870EA463A1E": "logo",  # 3D logo
+        "D760423941445565": "logo",  # 3D logo
+        "D45D20F95C48CD2B": ("shell", (51, 74, 105, 137)),  # the score bug's helmet
+    },
+    "eagles": {
+        "99B9865814C0069E": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "88FF8E9075C7A7E9": "field",  # the stadium's field
+    },
+    "steelers": {
+        "B218C4B9EE8AD7B9": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "21EB6CC23222C27F": "logo",  # 3D logo
+        "985D446C9348107D": "logo",  # 3D logo
+        "96EECD092C7AF8C2": ("shell", (50, 76, 108, 134)),  # the score bug's helmet
+    },
+    "chargers": {
+        "5695BF9684F8886E": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "9EF3F3026E965245": "logo",  # 3D logo
+        "FAA71CEB1C88D56B": "logo",  # 3D logo
+        "B73A500772A1D6AE": "field",  # the stadium's field
+    },
+    "49ers": {
+        "DAEE42605EE09C35": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "AD549DA6C5781975": "logo",  # 3D logo
+        "4E7B9CBF1593CE76": ("shell", (48, 84, 120, 131)),  # the score bug's helmet
+    },
+    "seahawks": {
+        "11BF384F47C617DB": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "2F795C9C6C113931": "decal",  # logo, stored mirrored
+        "CDC0DD91DA45B9B3": ("shell", (36, 64, 126, 156)),  # the score bug's helmet
+    },
+    "buccaneers": {
+        "7D3CCAEF042B0A77": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "318D040448CEC4FF": "decal",  # logo, stored mirrored
+        "8537CCC0EF560506": "logo",  # 3D logo
+        "AE1957420D762BB2": ("shell", (129, 68, 211, 147)),  # the score bug's helmet
+        "563AFB31967E8762": "field",  # the stadium's field
+    },
+    "titans": {
+        "0D0D085CBBBE58AE": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "44294828A43C002A": "logo",  # 3D logo
+        "F58ABF97AC49F746": "logo",  # 3D logo
+        "90BB1A348371AF75": ("shell", (43, 90, 118, 153)),  # the score bug's helmet
+    },
+    "jets": {
+        "4849D2A237EDAA3F": "logo",      # small logo: Team Select, lists, Coach Agenda
+        "5531BE6712E2FE0D": "logo",  # 3D logo
+        "AE58A1AD760E3EE1": ("shell", (55, 87, 126, 136)),  # the score bug's helmet
     },
 }
 
@@ -347,6 +519,35 @@ def field_white(p):
     return min(p[:3]) > 150
 
 
+def centre_shape(image, box, test):
+    """Bounding box of the shape at the box's centre: the pixels passing test that are joined
+    (allowing small gaps) to those nearest the centre."""
+    from collections import deque
+    left, top, right, bottom = box
+    pixels = image.load()
+    w, h = right - left, bottom - top
+    hit = [[test(pixels[left + x, top + y]) for x in range(w)] for y in range(h)]
+    cx, cy = w // 2, h // 2
+    seeds = sorted(((x, y) for y in range(h) for x in range(w) if hit[y][x]),
+                   key=lambda q: (q[0] - cx) ** 2 + (q[1] - cy) ** 2)[:1]
+    if not seeds:
+        return None
+    gap = max(2, w // 30)
+    seen = {seeds[0]}
+    queue = deque(seeds)
+    while queue:
+        x, y = queue.popleft()
+        for dy in range(-gap, gap + 1):
+            for dx in range(-gap, gap + 1):
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < w and 0 <= ny < h and (nx, ny) not in seen and hit[ny][nx]:
+                    seen.add((nx, ny))
+                    queue.append((nx, ny))
+    xs = [q[0] for q in seen]
+    ys = [q[1] for q in seen]
+    return left + min(xs), top + min(ys), left + max(xs) + 1, top + max(ys) + 1
+
+
 def replace_midfield(original, logo):
     """The stadium's field, end zones at the top and bottom: the midfield logo covered with the
     field a few yard lines away (same lines and hash marks) and the new logo put on it, turned as
@@ -360,10 +561,14 @@ def replace_midfield(original, logo):
     # grass (its burgundy, gold and brown) around the centre.
     line_column = centre - width * 8 // 100
     lines = [start for start, _ in runs_of([field_white(pixels[line_column, y]) for y in range(height)])]
-    spacing = min(b - a for a, b in zip(lines, lines[1:]) if b - a > height // 100)
+    gaps = sorted(b - a for a, b in zip(lines, lines[1:]) if b - a > height // 100)
+    spacing = gaps[len(gaps) // 2]  # the usual gap (lines near the end zones can be closer)
     reach = width // 10
-    logo_box = matching_box(original, (centre - reach, height // 2 - reach, centre + reach, height // 2 + reach),
-                            lambda p: p[0] > p[1] + 20)
+    def logo_pixel(p):  # neither grass nor a white line: any colour of the old logo
+        grass = p[1] > p[0] + 5 and p[1] >= p[2]
+        return not grass and not field_white(p) and (max(p[:3]) - min(p[:3]) > 40 or max(p[:3]) < 70)
+    logo_box = centre_shape(original, (centre - reach, height // 2 - reach, centre + reach, height // 2 + reach),
+                            logo_pixel)
     margin = width // 100
     box = (logo_box[0] - margin, logo_box[1] - margin, logo_box[2] + margin, logo_box[3] + margin)
     # From whole yard-line gaps away, clear of the logo, up or down the field: the patch whose
@@ -382,18 +587,34 @@ def replace_midfield(original, logo):
     through = min(range(len(lines)), key=lambda i: abs(lines[i] - (box[1] + box[3]) // 2))
     shifts = [lines[through + k] - lines[through] for k in range(-first - 2, first + 3)
               if abs(k) >= first and 0 <= through + k < len(lines)]
-    shifts = [shift for shift in shifts if 0 <= box[1] + shift and box[3] + shift <= height]
+    # Patches from the field's middle only (the end zones' lettering is further out).
+    shifts = [shift for shift in shifts if height // 5 <= box[1] + shift and box[3] + shift <= height - height // 5]
     shift = min(shifts, key=mismatch)
     feather = Image.new("L", (box[2] - box[0], box[3] - box[1]), 0)
     edge = margin // 2
     ImageDraw.Draw(feather).rectangle((edge, edge, feather.width - 1 - edge, feather.height - 1 - edge), fill=255)
     feather = feather.filter(ImageFilter.GaussianBlur(edge / 2))
     picture.paste(original.crop((box[0], box[1] + shift, box[2], box[3] + shift)), box[:2], feather)
-    size = max(logo_box[2] - logo_box[0], logo_box[3] - logo_box[1]) * 13 // 10
+    span_x, span_y = logo_box[2] - logo_box[0], logo_box[3] - logo_box[1]
+    # As big as the old logo by area (a long one such as a leaping tiger would make a square logo
+    # huge), and never more than a fourteenth of the field's width.
+    size = min(max(span_x, span_y) * 13 // 10, int((span_x * span_y) ** 0.5 * 1.4), width // 14)
     turned = logo.rotate(90, expand=True)  # the logo's top toward the field's left, as the old one
     paste_centred(picture, turned, ((logo_box[0] + logo_box[2] - size) // 2, (logo_box[1] + logo_box[3] - size) // 2,
                                     (logo_box[0] + logo_box[2] + size) // 2, (logo_box[1] + logo_box[3] + size) // 2))
     return picture
+
+
+def team_colour(logo):
+    """The logo's main colour: its most common strongly coloured (or dark) pixel."""
+    from collections import Counter
+    small = logo.convert("RGBA").resize((64, 64))
+    counts = Counter((p[0] // 24, p[1] // 24, p[2] // 24) for p in small.getdata()
+                     if p[3] > 200 and (max(p[:3]) - min(p[:3]) > 60 or max(p[:3]) < 60))
+    if not counts:
+        return (40, 40, 40, 255)
+    r, g, b = counts.most_common(1)[0][0]
+    return (r * 24 + 12, g * 24 + 12, b * 24 + 12, 255)
 
 
 def replace_field(original, logo, name, end_zone=None):
@@ -414,23 +635,26 @@ def replace_field(original, logo, name, end_zone=None):
     column = runs([white(pixels[centre, y]) for y in range(height)])
     zones = [(column[0][1], column[1][0], 0), (column[-2][1], column[-1][0], 180)]
     for top, bottom, turn in zones:
-        row = [white(pixels[x, top + 2]) for x in range(width)]  # above the art
-        left = max(x for x in range(centre) if row[x]) + 1
-        right = min(x for x in range(centre, width) if row[x])
-        clean = [x for x in range(left, right) if all(grass(pixels[x, y]) for y in range(top + 2, bottom - 2))]
-        strips = runs([x in set(clean) for x in range(width)])
-        start, end = max(strips, key=lambda r: r[1] - r[0])
-        patch = original.crop((start, top, end, bottom))
-        x, flip = left, False
-        while x < right:
-            piece = patch.transpose(Image.FLIP_LEFT_RIGHT) if flip else patch
-            picture.paste(piece.crop((0, 0, min(piece.width, right - x), piece.height)), (x, top))
-            x += piece.width
-            flip = not flip
-        art = end_zone if end_zone is not None else text_image(name.upper(), (120, 20, 40, 255))
-        art = art.rotate(turn, expand=True)
-        inset = (bottom - top) // 10
-        paste_centred(picture, art, (left + inset, top + inset, right - inset, bottom - inset))
+      try:
+          row = [white(pixels[x, top + 2]) for x in range(width)]  # above the art
+          left = max(x for x in range(centre) if row[x]) + 1
+          right = min(x for x in range(centre, width) if row[x])
+          clean = [x for x in range(left, right) if all(grass(pixels[x, y]) for y in range(top + 2, bottom - 2))]
+          strips = runs([x in set(clean) for x in range(width)])
+          start, end = max(strips, key=lambda r: r[1] - r[0])
+          patch = original.crop((start, top, end, bottom))
+          x, flip = left, False
+          while x < right:
+              piece = patch.transpose(Image.FLIP_LEFT_RIGHT) if flip else patch
+              picture.paste(piece.crop((0, 0, min(piece.width, right - x), piece.height)), (x, top))
+              x += piece.width
+              flip = not flip
+          art = end_zone if end_zone is not None else text_image(name.upper(), team_colour(logo), (255, 255, 255, 255))
+          art = art.rotate(turn, expand=True)
+          inset = (bottom - top) // 10
+          paste_centred(picture, art, (left + inset, top + inset, right - inset, bottom - inset))
+      except ValueError:  # an end zone with no plain grass to cover its art with: kept
+          continue
     return picture
 
 
@@ -491,7 +715,26 @@ def runs_of(values):
     return out
 
 
-RECIPES = {"logo": replace_logo, "flat": replace_flat_logo, "panel": replace_panel, "helmet": replace_helmet,
+def replace_shell(original, logo, box):
+    """A logo on a plain surface (a helmet's shell): inside box, every pixel unlike the surface's
+    colour (the median along the box's edge) becomes that colour, and the new logo goes in the box."""
+    left, top, right, bottom = box
+    picture = original.copy()
+    px = picture.load()
+    edge = [px[x, y] for x in range(left, right) for y in (top, bottom - 1)] + \
+           [px[x, y] for y in range(top, bottom) for x in (left, right - 1)]
+    edge = [p for p in edge if p[3] > 200]
+    shell = median_colour(edge)
+    for y in range(top, bottom):
+        for x in range(left, right):
+            p = px[x, y]
+            if p[3] > 200 and sum(abs(p[i] - shell[i]) for i in range(3)) > 45:
+                px[x, y] = tuple(shell[:3]) + (p[3],)
+    paste_centred(picture, logo, box)
+    return picture
+
+
+RECIPES = {"shell": replace_shell, "logo": replace_logo, "flat": replace_flat_logo, "panel": replace_panel, "helmet": replace_helmet,
            "backdrop": replace_backdrop, "wordmark": replace_wordmark, "sign": replace_sign, "banner": replace_banner,
            "end zone": replace_end_zone, "field": replace_field, "midfield": replace_midfield, "decal": replace_decal,
            "boxes": replace_boxes, "ribbon": replace_ribbon}
