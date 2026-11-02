@@ -99,6 +99,17 @@ the game's default: everything it needs goes in the `hc27` folder of the install
    made for his head, a coach with a preset head wears the generic polo the game gives presets
    when creating a coach. Without coaches,
    copy `data/ROSTER-M27` to `hc27/ROSTER` instead.
+
+   Then rename the free agents:
+
+   ```sh
+   python tools/roster_import/free_agents.py --roster hc27/ROSTER
+   ```
+
+   The free-agent pool is otherwise the 2008 game's (its own free agents, its 2008 draft class
+   and the 2008 players the import left over). Each of them gets a made-up name that no real
+   player, 2008 or current, has, and the generic portrait. Their ratings, ages and positions
+   stay as they are.
 5. Team logos (optional; `TEAMS` in the script lists the textures known so far for every team): the game's images of a team's logo and name
    are textures inside the disc's archives, so they are replaced by their contents. Run HC27 once
    with `set HC09_DUMP_HASHED=1` and go through the screens that show the team: Coach Now's Team
