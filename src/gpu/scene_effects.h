@@ -8,10 +8,7 @@
 // ambient occlusion darkens the colour from the depth buffer, and reflections blend in a copy
 // of the scene on surfaces that face up (the field).
 //
-// Both need the camera: the scene's vertex shaders transform world positions by a matrix in
-// vertex constants c156..c159 (the view-projection, or an object's world-view-projection).
-// Every such matrix shares the projection, which SceneCamera recovers: how depth maps back to
-// distance, the field of view, and the world's up direction in view space.
+// Both need the camera (gpu/scene_camera.h).
 //
 // Settings: hc09.ini [Graphics] AmbientOcclusion and Reflections (strength, 0 turns it off),
 // overridden by HC09_SSAO and HC09_SSR.
@@ -20,24 +17,10 @@
 #include <utility>
 
 #include "gpu/d3d12_context.h"
+#include "gpu/scene_camera.h"
 
 namespace hc09::gpu
 {
-    struct SceneCamera
-    {
-        bool valid = false;
-        // Depth buffer value d -> view distance w: w = depthB / (d - depthA).
-        float depthA = 0, depthB = 0;
-        // Clip x = sx * view x + cx * w (and y): the projection's scale and centre.
-        float sx = 0, sy = 0, cx = 0, cy = 0;
-        float up[3]{};  // world up in view space (x right, y up, z forward)
-    };
-
-    // The camera from the four float4 constants c156..c159 (host byte order), each the clip-space
-    // image of a world axis (x, y, z) and of the origin. Invalid unless they form a perspective
-    // projection.
-    SceneCamera CameraFromConstants(const float* constants);
-
     class SceneEffects
     {
     public:

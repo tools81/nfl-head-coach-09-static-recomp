@@ -115,7 +115,7 @@ With the D3D12 renderer, `set HC09_RESOLUTION_SCALE=2` (up to 4) renders at that
 2560x1440, for a sharper picture in fullscreen on a high-resolution display. Menus and gameplay
 held 30-35 fps at 2x in testing; 1x is the default.
 
-With the D3D12 renderer (see below), the 3D scenes get two effects the original does not have: ambient occlusion (soft shading where
+With both renderers (see below), the 3D scenes get two effects the original does not have: ambient occlusion (soft shading where
 surfaces meet, such as a player's feet on the field or the folds of a coach's jacket) and
 reflections on the field. The turf is no mirror, so a reflection is drawn dark and with strong
 contrast, like a shadow cast by the player near where he stands, longest at low camera angles. Both work from the scene's depth buffer, so they cost little and need no change to the
@@ -153,15 +153,16 @@ Scale=2
 - `MSAA`: anti-aliasing, `1` as the game asks (4x in 3D scenes, the default), `2` at most 2x, `0`
   off. Lower settings help slower cards at `Scale=3`.
 - `GPU`: on a PC with two graphics chips, `discrete`, `integrated`, or part of the card's name.
+- `Anisotropy`: texture filtering that keeps field lines and yard numbers sharp at the broadcast
+  camera's low angles, `16` (the default) down to `2`, or `off` as the original game draws them.
 
 The Vulkan renderer needs a graphics card and driver with Vulkan 1.3 (any card from the last
 several years). On a PC without one, the game uses the older D3D12 renderer instead, which runs at
-the game's own pace and draws the ambient occlusion and field reflections described above (the
-Vulkan renderer does not). To use the D3D12 renderer anyway, add `Renderer=d3d12` under
+the game's own pace. To use the D3D12 renderer anyway, add `Renderer=d3d12` under
 `[Graphics]`. HC27's rosters, portraits and logos work with both.
 
 `set HC09_RENDERER=d3d12` (or `vulkan`) picks a renderer for one run, and `HC09_FRAMERATE`,
-`HC09_SCALE`, `HC09_VSYNC`, `HC09_FULLSCREEN`, `HC09_NATIVE_MSAA` and `HC09_GPU` override the
+`HC09_SCALE`, `HC09_VSYNC`, `HC09_FULLSCREEN`, `HC09_NATIVE_MSAA`, `HC09_GPU` and `HC09_ANISOTROPY` override the
 settings above the same way. `HC09_RESOLUTION_SCALE` is the D3D12 renderer's resolution.
 
 ## Rosters and replacement images

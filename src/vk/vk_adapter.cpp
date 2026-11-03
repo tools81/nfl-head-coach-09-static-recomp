@@ -130,10 +130,12 @@ namespace hc09::vk
         // hc09.ini [Graphics] settings of the Vulkan renderer, as the switches it reads (an environment variable
         // already set wins): FrameRate 35 (the game's own, the default) .. 240; Scale 1 (720p) .. 4, 2 = 1440p;
         // VSync on/off; Fullscreen on/off (Alt+Enter or F11 toggles it); MSAA 1 (as the game asks), 2 (at most
-        // 2x) or 0; GPU discrete, integrated or part of the card's name.
+        // 2x) or 0; GPU discrete, integrated or part of the card's name; Anisotropy 16 (the default) .. 2, or off;
+        // AmbientOcclusion and Reflections: strength (1 the default, 0 off).
         static const std::pair<const wchar_t*, const char*> kSettings[] = {
             { L"FrameRate", "HC09_FRAMERATE" }, { L"Scale", "HC09_SCALE" },       { L"VSync", "HC09_VSYNC" },
             { L"Fullscreen", "HC09_FULLSCREEN" }, { L"MSAA", "HC09_NATIVE_MSAA" }, { L"GPU", "HC09_GPU" },
+            { L"Anisotropy", "HC09_ANISOTROPY" }, { L"AmbientOcclusion", "HC09_SSAO" }, { L"Reflections", "HC09_SSR" },
         };
         const std::wstring file = (std::filesystem::current_path() / L"hc09.ini").wstring();
         for (const auto& [key, variable] : kSettings)

@@ -219,6 +219,7 @@ bool Device::CreateDevice(VkSurfaceKHR surface, std::string* err)
     f2.features.depthClamp = supported.depthClamp;
     f2.features.independentBlend = supported.independentBlend;   // MRT targets blend differently
     f2.features.shaderSampledImageArrayDynamicIndexing = supported.shaderSampledImageArrayDynamicIndexing;
+    f2.features.samplerAnisotropy = supported.samplerAnisotropy;   // hc09: the native renderer's anisotropic filtering
     VkDeviceCreateInfo ci{ VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
     ci.pNext = &f2;
     ci.queueCreateInfoCount = 1;
@@ -230,6 +231,7 @@ bool Device::CreateDevice(VkSurfaceKHR surface, std::string* err)
     vkGetDeviceQueue(device, queueFamily, 0, &queue);
     pixelInterlock = fsi.fragmentShaderPixelInterlock && supported.fragmentStoresAndAtomics && supported.shaderClipDistance &&
                      supported.shaderFloat64;
+    anisotropy = supported.samplerAnisotropy ? props.limits.maxSamplerAnisotropy : 1.0f;
     VkCommandPoolCreateInfo pi{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
     pi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     pi.queueFamilyIndex = queueFamily;

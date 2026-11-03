@@ -50,6 +50,7 @@ struct Device
     bool hostImport = false;           // VK_EXT_external_memory_host (live renderer: guest memory in place)
     VkDeviceSize hostImportAlignment = 0;
     bool pixelInterlock = false;       // fragment shader pixel interlock + fragment stores + clip distances + fp64 (EDRAM renderer)
+    float anisotropy = 1.0f;           // the most sampler anisotropy the device allows (1: none)
 
     // Step 1: the instance, with the window's surface extensions.
     bool CreateInstance(const std::vector<const char*>& extensions, std::string* err);

@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "vk_scene_effects.h"
 #include "vk_shader_compile.h"
 #include "xe_glsl.h"
 #include "xenos_texture.h"
@@ -218,6 +219,9 @@ struct NativeRenderer::Impl
     // Resolution scale (HC09_SCALE, hc09.ini scale; NATIVE_RENDERER.md 7.11): render-target images are `scale`
     // times the surfaces' guest size; the game's sizes, coordinates and memory stay 1x.
     uint32_t scale = 1;
+    // hc09: anisotropic filtering for mipmapped textures (HC09_ANISOTROPY, hc09.ini Anisotropy; 16 the default, 1 or
+    // 0 off), at most what the device allows. The game asks for none, so field lines blur at the broadcast angles.
+    float anisotropy = 16.0f;
     VkSampleCountFlagBits boundSamples = VK_SAMPLE_COUNT_1_BIT;
     VkDescriptorPool computePool = VK_NULL_HANDLE;
     uint32_t computeSetsUsed = 0;
@@ -476,6 +480,13 @@ struct NativeRenderer::Impl
         uint64_t lastUsed = 0;
     };
     std::unordered_map<uint32_t, Target> targets;   // by surface object address (+ depth flag in bit 0)
+    // hc09: ambient occlusion and reflections (vk_scene_effects.h), on the frame's first resolve of the target the
+    // 3D scene was drawn into (with its camera from the scene's draws, until then).
+    SceneEffects effects;
+    SceneView sceneView;
+    const Target* sceneColor = nullptr;
+    const Target* sceneDepth = nullptr;
+    uint64_t effectsFrame = ~0ull;
     d3dn::Surface bound[4], boundDepth;
     Target* bt[4] = {};
     Target* bd = nullptr;
@@ -932,11 +943,43 @@ struct NativeRenderer::Impl
         return &t;
     }
 
+    // HC09_NATIVE_TRACE_PASSES=<frame>[,<count>]: the target sets, draws and resolves of those frames (dev).
+    struct TracePasses { uint64_t from = ~0ull, to = 0; };
+    TracePasses tracePasses = [] {
+        TracePasses t;
+        if (const char* e = Hc09Env("HC09_NATIVE_TRACE_PASSES"))
+        {
+            unsigned long long f = 0, n = 1;
+            if (sscanf(e, "%llu,%llu", &f, &n) >= 1) { t.from = f; t.to = f + n; }
+        }
+        return t;
+    }();
+    bool Tracing() const { return frame >= tracePasses.from && frame < tracePasses.to; }
+    uint32_t traceDraws = 0, traceDepthOnly = 0;
+    void TraceFlushDraws()
+    {
+        if (traceDraws) fprintf(stderr, "[passes]   %u draws (%u depth only)\n", traceDraws, traceDepthOnly);
+        traceDraws = traceDepthOnly = 0;
+    }
+
     void SetTargets(const d3dn::Surface rt[4], const d3dn::Surface& depth)
     {
         bool same = depth == boundDepth;
         for (int i = 0; i < 4; ++i) same = same && rt[i] == bound[i];
         if (same && (bd || !depth.valid())) return;
+        if (Tracing())
+        {
+            TraceFlushDraws();
+            std::string s = "[passes] frame " + std::to_string(frame) + " targets:";
+            for (int i = 0; i < 4; ++i)
+                if (rt[i].valid())
+                    s += " c" + std::to_string(i) + "=" + std::to_string(rt[i].width) + "x" + std::to_string(rt[i].height) + " f" +
+                         std::to_string(rt[i].format) + " ms" + std::to_string(rt[i].msaa) + " @" + std::to_string(rt[i].edramBase);
+            if (depth.valid())
+                s += " z=" + std::to_string(depth.width) + "x" + std::to_string(depth.height) + " ms" + std::to_string(depth.msaa) + " @" +
+                     std::to_string(depth.edramBase);
+            fprintf(stderr, "%s\n", s.c_str());
+        }
         EndRendering();
         for (int i = 0; i < 4; ++i) { bound[i] = rt[i]; bt[i] = GetTarget(rt[i]); }
         boundDepth = depth;
@@ -1466,8 +1509,11 @@ struct NativeRenderer::Impl
         if (kind == kTex3D) { minF = magF; mipF = 2; minLevel = maxLevel = 0; bias = 0; }
         else cz = 2;
         bool borderWhite = Bits(tf.dword[5], 0, 2) == 1;
+        // hc09: anisotropy only where there are mips to pick from (not render targets read back as textures).
+        bool aniso = anisotropy > 1.0f && minF == 1 && mipF != 2 && maxLevel > minLevel && kind != kTex3D;
         uint64_t key = magF | (minF << 2) | (mipF << 4) | (cx << 6) | (cy << 9) | (uint64_t(minLevel) << 12) | (uint64_t(maxLevel) << 16) |
-                       (uint64_t(uint32_t(bias) & 0x3FF) << 20) | (uint64_t(cz) << 30) | (uint64_t(borderWhite) << 33);
+                       (uint64_t(uint32_t(bias) & 0x3FF) << 20) | (uint64_t(cz) << 30) | (uint64_t(borderWhite) << 33) |
+                       (uint64_t(aniso) << 34);
         auto it = samplers.find(key);
         if (it != samplers.end()) return it->second;
         auto addr = [](uint32_t c) {
@@ -1485,6 +1531,8 @@ struct NativeRenderer::Impl
         ci.mipLodBias = float(bias) / 32.0f;
         ci.minLod = float(minLevel);
         ci.maxLod = float(maxLevel);
+        ci.anisotropyEnable = aniso;
+        ci.maxAnisotropy = aniso ? anisotropy : 1.0f;
         VkSampler smp = VK_NULL_HANDLE;
         vkCreateSampler(dev->device, &ci, nullptr, &smp);
         samplers[key] = smp;
@@ -1633,6 +1681,14 @@ struct NativeRenderer::Impl
         // HC09_NATIVE_SKIP_PS=<hex hash>: leave out the draws with that pixel shader (to see what they are; dev).
         static const uint64_t skipPs = [] { const char* e = Hc09Env("HC09_NATIVE_SKIP_PS"); return e ? strtoull(e, nullptr, 16) : 0ull; }();
         if (skipPs && psHash == skipPs) { Skip("HC09_NATIVE_SKIP_PS"); return; }
+        // HC09_NATIVE_SKIP_TARGET=<w>x<h>: leave out the draws into colour targets of that size (dev).
+        static const std::pair<uint32_t, uint32_t> skipTarget = [] {
+            uint32_t w = 0, h = 0;
+            if (const char* e = Hc09Env("HC09_NATIVE_SKIP_TARGET")) sscanf(e, "%ux%u", &w, &h);
+            return std::make_pair(w, h);
+        }();
+        if (skipTarget.first && bt[0] && bound[0].width == skipTarget.first && bound[0].height == skipTarget.second)
+        { Skip("HC09_NATIVE_SKIP_TARGET"); return; }
         uint32_t mode = Reg(reg::RB_MODECONTROL) & 7;
         if (mode != 4 && mode != 5) { Skip("edram mode not 4/5"); return; }
         if (!vsCode || d.primType == 1 || d.sourceSelect == 1) { Skip("no VS / points / immediate indices"); return; }
@@ -1659,6 +1715,7 @@ struct NativeRenderer::Impl
         if (!colorOn && !(hasDepth && ((zEnable && zWrite) || stencilOn))) { Skip("writes nothing"); return; }
         if (!d.numIndices) { Skip("empty"); return; }
         if (!BeginRenderingBound()) { Skip("no render targets"); return; }
+        if (Tracing()) { ++traceDraws; traceDepthOnly += !colorOn; }
         Lap lap(*this);
 
         ShaderEntry* vs = Shader(vsHash, *vsCode);
@@ -1675,6 +1732,11 @@ struct NativeRenderer::Impl
         if (!triIndices) { Skip("no triangles"); return; }
         VkDeviceSize ibytes = VkDeviceSize(triIndices) * 4;
 
+        // The 3D scene: a multisampled target (unless MSAA is off) the size of the screen, not the game's smaller
+        // render-to-texture passes.
+        if (effects.Enabled() && effectsFrame != frame && zEnable && zWrite && colorOn && bt[0] && bd && bound[0].width >= 1024 &&
+            bound[0].height >= 576 && (bd->samples != VK_SAMPLE_COUNT_1_BIT || !msaa))
+            NoteSceneCamera();
         lap.To(NativeProfile::kDrawState);
         // Textures first (a decode may wait for the GPU, which recycles the rings).
         const Texture* texOf[32];
@@ -1953,11 +2015,60 @@ struct NativeRenderer::Impl
         lap.To(NativeProfile::kDrawRecord);
     }
 
+    // hc09: the camera of a draw of the 3D scene (as the D3D12 renderer: gpu/scene_camera.h, vertex constants
+    // c156..c159), with the viewport's depth mapping and rectangle.
+    void NoteSceneCamera()
+    {
+        uint32_t vsBase = Reg(0x2307) & 0x1FF;
+        if (vsBase + 160 > 512) return;
+        float m[16];
+        for (uint32_t i = 0; i < 16; ++i) m[i] = AsF(Reg(reg::ALU_CONSTANTS + (vsBase + 156) * 4 + i));
+        hc09::gpu::SceneCamera camera = hc09::gpu::CameraFromConstants(m);
+        if (!camera.valid) return;
+        uint32_t vte = Reg(reg::PA_CL_VTE_CNTL);
+        float xs = (vte & 1) ? AsF(Reg(reg::PA_CL_VPORT_XSCALE)) : 1.0f, xo = (vte & 2) ? AsF(Reg(reg::PA_CL_VPORT_XOFFSET)) : 0.0f;
+        float ys = (vte & 4) ? AsF(Reg(reg::PA_CL_VPORT_YSCALE)) : 1.0f, yo = (vte & 8) ? AsF(Reg(reg::PA_CL_VPORT_YOFFSET)) : 0.0f;
+        float zs = (vte & 16) ? AsF(Reg(reg::PA_CL_VPORT_ZSCALE)) : 1.0f, zo = (vte & 32) ? AsF(Reg(reg::PA_CL_VPORT_ZOFFSET)) : 0.0f;
+        // The effects' shaders map clip y up to pixel rows down, as D3D's viewport does.
+        if (!(xs > 0.0f) || !(ys < 0.0f) || zs == 0.0f) return;
+        camera.depthA = zo + camera.depthA * zs;
+        camera.depthB *= zs;
+        float s = float(scale);
+        sceneView.camera = camera;
+        sceneView.x = (xo - xs) * s;
+        sceneView.y = (yo + ys) * s;
+        sceneView.width = 2.0f * xs * s;
+        sceneView.height = -2.0f * ys * s;
+        sceneColor = bt[0];
+        sceneDepth = bd;
+    }
+    void ApplySceneEffects(Target* src)
+    {
+        if (!sceneView.camera.valid || effectsFrame == frame || src != sceneColor || bd != sceneDepth || !bd || !bd->depthView) return;
+        effectsFrame = frame;
+        EndRendering();
+        // The passes' descriptor sets (five) must not make ComputeSet submit in the middle of them.
+        if (computeSetsUsed + 8 > kComputeSets) SubmitAndWait(NativeProfile::kWaitCompute);
+        Begin();
+        Mark(NativeProfile::kGpuOther);
+        effects.Apply(cb, src->img, src->samples, bd->depthView, sceneView,
+                      [this](VkDescriptorSetLayout layout) { return ComputeSet(layout); }, garbage);
+        sceneView = {};
+    }
+
     // ---- resolves ----------------------------------------------------------------
     void Resolve(const d3dn::ResolveOp& r)
     {
         Target* src = r.src >= 4 ? bd : bt[r.src & 3];
         if (!src) { Skip("resolve without a source target"); return; }
+        if (Tracing())
+        {
+            TraceFlushDraws();
+            fprintf(stderr, "[passes]   resolve %s%u %d,%d-%d,%d -> %08X pitch %u fmt %u tex %ux%u%s%s\n", r.src >= 4 ? "depth" : "colour",
+                    r.src & 3, r.x0, r.y0, r.x1, r.y1, r.destBase, r.destPitch, r.destFmt, r.texWidth, r.texHeight, r.copy ? "" : " (no copy)",
+                    src == sceneColor && sceneView.camera.valid ? " [scene]" : "");
+        }
+        if (effects.Enabled() && r.src < 4) ApplySceneEffects(src);
         // The rectangle in guest pixels (the source image is `scale` times the surface).
         int32_t x1 = std::min<int32_t>(r.x1, int32_t(src->img.width / scale)), y1 = std::min<int32_t>(r.y1, int32_t(src->img.height / scale));
         if (r.copy && x1 > r.x0 && y1 > r.y0)
@@ -2055,6 +2166,8 @@ bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* e
         I.msaaCap2 = v == "2";
     }
     if (const char* e = Hc09Env("HC09_SCALE"); e && *e) I.scale = uint32_t(std::clamp(atoi(e), 1, 4));
+    if (const char* e = Hc09Env("HC09_ANISOTROPY"); e && *e) I.anisotropy = float(std::clamp(atoi(e), 1, 16));
+    I.anisotropy = std::min(I.anisotropy, dev.anisotropy);
     I.scaledFetch = flag(Hc09Env("HC09_NATIVE_SCALED_FETCH"), true);
     I.drawProf = flag(Hc09Env("HC09_NATIVE_DRAW_PROF"), false);
     I.prof = flag(Hc09Env("HC09_NATIVE_PROF"), false) || I.drawProf;
@@ -2254,6 +2367,7 @@ bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* e
     if (vkCreateSemaphore(d, &sci, nullptr, &I.timeline) != VK_SUCCESS) { if (err) *err = "timeline semaphore"; return false; }
     VkSamplerCreateInfo nci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
     vkCreateSampler(d, &nci, nullptr, &I.nearest);
+    I.effects.Init(dev);
     std::vector<std::vector<xenos::Image>> one(1, std::vector<xenos::Image>(1));
     one[0][0].width = one[0][0].height = 1;
     one[0][0].rgba.assign(1, 0u);
@@ -2307,6 +2421,7 @@ void NativeRenderer::EndFrame()
     Impl::Lap lap(I);
     I.Submit(false, NativeProfile::kWaitFrame);
     lap.To(NativeProfile::kSubmit);
+    I.sceneView = {};
     if (++I.frame % 60 == 0)
         for (auto it = I.textures.begin(); it != I.textures.end();)
         {
@@ -2405,6 +2520,7 @@ void NativeRenderer::Shutdown()
     Impl& I = *impl_;
     VkDevice d = I.dev->device;
     vkDeviceWaitIdle(d);
+    I.effects.Shutdown();
     I.Park(I.slots[I.cur]);
     for (Impl::Slot& sl : I.slots)
     {
