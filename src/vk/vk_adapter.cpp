@@ -253,8 +253,10 @@ void HostSetThreadName(void* thread, const char* name)
     SetThreadDescription(thread ? HANDLE(thread) : GetCurrentThread(), wide.c_str());
 }
 
-// glslang's release package is built with a newer Visual C++ library, whose vectorized find_first_of it calls.
-extern "C" size_t __stdcall __std_find_first_of_trivial_pos_1(const void* first1, size_t count1, const void* first2, size_t count2) noexcept
+// glslang's release package is built with a newer Visual C++ library, whose vectorized find_first_of it calls. This
+// stands in for it only when the library being linked lacks it: newer ones define it, and a second definition fails
+// the link.
+extern "C" size_t __stdcall hc09_find_first_of_trivial_pos_1(const void* first1, size_t count1, const void* first2, size_t count2) noexcept
 {
     const auto* haystack = static_cast<const uint8_t*>(first1);
     const auto* needles = static_cast<const uint8_t*>(first2);
@@ -263,6 +265,7 @@ extern "C" size_t __stdcall __std_find_first_of_trivial_pos_1(const void* first1
             return i;
     return size_t(-1);
 }
+#pragma comment(linker, "/alternatename:__std_find_first_of_trivial_pos_1=hc09_find_first_of_trivial_pos_1")
 
 // ---- Page write tracking for decoded-data caches (xenos::HostTrackWrites) --------------------------------------
 // The live renderer's texture cache: a decoded texture's pages are made read-only in the guest's views of physical
