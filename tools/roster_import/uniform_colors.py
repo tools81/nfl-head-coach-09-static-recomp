@@ -433,10 +433,13 @@ def remove_mesh(img, ratio=3.0, rmin=30, even=5):
     return b.reshape(h, w, 3)
 
 
-def encode_changed(x, before, after, all_blocks=False):
-    """x (a DXT1 texture) with the 4x4 blocks of its full-size level where after (RGB) differs
-    from before re-encoded from after."""
+def encode_changed(x, before, after, all_blocks=False, level=None):
+    """x (a DXT1 texture) with the 4x4 blocks of its full-size level (or of level, a mip level's
+    (offset, width, height)) where after (RGB) differs from before re-encoded from after."""
     fmt, w, h, _ = fetch(x)
+    base = 0
+    if level:
+        base, w, h = level
     if fmt != 18:
         raise ValueError("cloth edits need a DXT1 texture")
     wb, hb = w // 4, h // 4
@@ -465,9 +468,60 @@ def encode_changed(x, before, after, all_blocks=False):
     idx = np.where((c0 == c1)[:, None], 0, idx)
     bits = (idx.astype(np.uint32) << (2 * np.arange(16, dtype=np.uint32))).sum(1).astype(np.uint32)
     for k, (y, xb) in enumerate(zip(ys, xs)):
-        o = HEADER + offs[y, xb]
+        o = HEADER + base + offs[y, xb]
         struct.pack_into(">HHHH", b, o, c0[k], c1[k], bits[k] & 0xFFFF, bits[k] >> 16)
     return bytes(b)
+
+
+def mip_levels(x):
+    """(offset after the header, width, height) of each mip level below the full size that has
+    tiles of its own: the levels down to 32 texels on the short side. The smaller ones share the
+    packed mip tail, which is left as it is (they are only seen from far away)."""
+    fmt, w, h, _ = fetch(x)
+    bpb = 8 if fmt == 18 else 16
+    offset = (struct.unpack(">I", x[0x5C:0x60])[0] >> 12) << 12  # the fetch constant's mip address
+    levels = []
+    w, h = w // 2, h // 2
+    while offset and min(w, h) > 16:
+        levels.append((offset, w, h))
+        offset += ((w // 4 + 31) // 32 * 32) * ((h // 4 + 31) // 32 * 32) * bpb
+        w, h = w // 2, h // 2
+    return levels
+
+
+def decode_level(x, level):
+    """RGBA image of one mip level, (offset, width, height)."""
+    offset, w, h = level
+    header = bytearray(x[:HEADER])
+    d2 = struct.unpack(">I", header[0x50:0x54])[0]
+    struct.pack_into(">I", header, 0x50, (d2 & ~((1 << 26) - 1)) | ((h - 1) << 13) | (w - 1))
+    return decode(bytes(header) + x[HEADER + offset:])
+
+
+def _even(img, even):
+    """img with its nearly even 4x4 blocks (no channel further than even from the mean) made one
+    colour: they pack smaller."""
+    if not even:
+        return img
+    h, w = img.shape[:2]
+    b = img.reshape(h // 4, 4, w // 4, 4, -1)
+    m = b.mean((1, 3), keepdims=True)
+    return np.where(np.abs(b - m).max((1, 3, 4), keepdims=True) < even, m, b).reshape(img.shape)
+
+
+def rebuild_mips(x, even=0):
+    """x (DXT1) with its mip levels made again from its full-size level, so a design changed there
+    shows from a distance too (the game draws players on the field from the smaller levels)."""
+    if fetch(x)[0] != 18:
+        return x
+    full = decode(x).astype(float)
+    for level in mip_levels(x):
+        _, w, h = level
+        f = full.shape[0] // h
+        small = _even(full.reshape(h, f, w, f, 4).mean((1, 3)), even)
+        before = decode_level(x, level)
+        x = encode_changed(x, before, np.clip(np.round(small), 0, 255).astype(np.uint8), all_blocks=True, level=level)
+    return x
 
 
 def cloth(team, part, x, even=5, name="", original=None):
@@ -651,6 +705,94 @@ def number_pairs(x, colours):
     return [(tuple(int(v) for v in centres[i]), tuple(colours[min(j, len(colours) - 1)])) for j, i in enumerate(order)]
 
 
+# --- far-away models --------------------------------------------------------------------------
+
+def _resized(img, w, h):
+    from PIL import Image
+    return np.array(Image.fromarray(np.clip(img, 0, 255).astype(np.uint8)).resize((w, h), Image.BOX)).astype(float)
+
+
+def _relit(lod, fake_before, fake_after):
+    """fake_after (an image laid out like lod) with lod's own baked light: lod's brightness against
+    what the same layout made from the original full-size textures (fake_before) gives."""
+    lum = lambda im: im.mean(-1, keepdims=True)
+    ratio = np.clip((lum(lod) + 1) / (lum(fake_before) + 1), 0, 1.5)
+    return np.clip(fake_after * ratio, 0, 255)
+
+
+def far_models(team, kit_side, spec, textures, raw):
+    """The far-away (LOD) versions of a kit made again from its new full-size textures:
+    <team><H|A>PANTSSLEEVES (both sleeves above the pants) and the socks band of
+    <team><H|A>HELMETSOCKSSHOES, whose helmet shell also takes the team's new shell colour.
+    textures: name -> (original, new) decompressed full-size textures. Returns name -> new
+    decompressed LOD texture."""
+    out = {}
+    side = team + kit_side
+    def pair(part):
+        name = f"{side}{part}_COL"
+        if name in textures:
+            return [decode(t)[..., :3].astype(float) for t in textures[name]]
+        path = os.path.join(raw, name + ".orig")
+        if not os.path.exists(path):
+            return None
+        img = decode(zlib.decompress(open(path, "rb").read()))[..., :3].astype(float)
+        return [img, img]
+    def lod_data(name):  # the texture as the loop left it (recoloured), else as on the disc
+        if name in textures:
+            return textures[name][1]
+        return zlib.decompress(open(os.path.join(raw, name + ".orig"), "rb").read())
+    path = os.path.join(raw, f"{side}PANTSSLEEVES_COL.orig")
+    sleeve, rsleeve, pants = pair("SLEEVEBAKED") or pair("RSLEEVEBAKED"), pair("RSLEEVEBAKED") or pair("SLEEVEBAKED"), pair("PANTSBAKED")
+    if os.path.exists(path) and sleeve and pants:
+        data = lod_data(f"{side}PANTSSLEEVES_COL")
+        lod = decode(data)
+        h, w = lod.shape[:2]
+        fakes = []
+        for k in (0, 1):
+            fake = np.zeros((h, w, 3))
+            fake[:h // 2, :w // 2] = _resized(sleeve[k], w // 2, h // 2)
+            fake[:h // 2, w // 2:] = _resized(rsleeve[k], w // 2, h // 2)
+            fake[h // 2:] = _resized(pants[k], w, h // 2)
+            fakes.append(fake)
+        img = _relit(lod[..., :3].astype(float), *fakes)
+        room = len(open(path, "rb").read())
+        for even in (0, 6, 10, 16, 24):
+            new = encode_changed(data, lod, np.round(_even(img, even)).astype(np.uint8), all_blocks=True)
+            new = rebuild_mips(new, even)
+            if compress(new, room) is not None:
+                break
+        out[f"{side}PANTSSLEEVES_COL"] = (data, new)
+    path = os.path.join(raw, f"{side}HELMETSOCKSSHOES_COL.orig")
+    socks = pair("SOCKS")
+    if os.path.exists(path) and (socks or spec.get("shell")):
+        import cv2
+        data = lod_data(f"{side}HELMETSOCKSSHOES_COL")
+        lod = decode(data)
+        img = lod[..., :3].astype(float).copy()
+        h, w = img.shape[:2]
+        if socks:  # rows h/2 .. 3h/4: the socks texture squeezed in
+            band = slice(h // 2, h * 3 // 4)
+            img[band] = _relit(img[band], _resized(socks[0], w, h // 4), _resized(socks[1], w, h // 4))
+        if spec.get("shell"):  # the top half: the helmet, its commonest colour the shell
+            top = img[:h // 2]
+            sample = top.reshape(-1, 3).astype(np.float32)
+            _, labels, centres = cv2.kmeans(sample, 4, None, (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0),
+                                            3, cv2.KMEANS_PP_CENTERS)
+            shell = centres[np.bincount(labels.ravel(), minlength=4).argmax()]
+            near = np.linalg.norm(top - shell, axis=-1) < 70
+            ratio = np.clip((top.mean(-1) + 1) / (shell.mean() + 1), 0.5, 1.4)
+            top[near] = np.clip(np.array(spec["shell"], float) * ratio[near, None], 0, 255)
+        # Only the blocks that changed, evened out (nearly even 4x4 blocks made one colour) as far
+        # as it takes to pack into the little room the file has.
+        room = len(open(path, "rb").read())
+        for even in (0, 6, 10, 16, 24, 40):
+            new = encode_changed(data, lod, np.round(_even(img, even)).astype(np.uint8))
+            if compress(new, room) is not None:
+                break
+        out[f"{side}HELMETSOCKSSHOES_COL"] = (data, new)
+    return out
+
+
 # --- helmet material --------------------------------------------------------------------------
 
 def set_helmet(x, shell=None, facemask=None):
@@ -760,12 +902,32 @@ def main():
                 new, note = cloth(team, part, recoloured, even, name, data)
                 if new == data:
                     break
+                result = "does not fit"
+                # what changed at full size, at a distance too: the mip levels made again (evened
+                # out if need be to fit, or left as they were as a last resort)
+                mips = part in ("TORSOBAKED", "SLEEVEBAKED", "RSLEEVEBAKED", "PANTSBAKED", "SOCKS")
+                for attempt in ([lambda: rebuild_mips(new), lambda: rebuild_mips(new, 8), lambda: rebuild_mips(new, 16)]
+                                if mips else []) + [lambda: new]:
+                    candidate = attempt()
+                    if compress(candidate, len(orig)) is not None:
+                        new = candidate
+                        break
                 result = write_pair(name, orig, new)
                 if result == "written" or part not in MESH_PARTS:
                     break
             if new != data:
                 print(f"{name}: {result}{' (' + note + ')' if note else ''}", flush=True)
                 shown[name] = (data, new)
+        if not args.part:
+            # the far-away models of each kit, from the new full-size textures
+            full = dict(shown)
+            for side in "HA":
+                if not (spec.get("kit", {}).get(side) or spec.get("shell")):
+                    continue
+                for name, (_, new) in far_models(team, side, spec, full, RAW).items():
+                    orig = open(os.path.join(RAW, name + ".orig"), "rb").read()
+                    print(f"{name}: {write_pair(name, orig, new)} (far model)", flush=True)
+                    shown[name] = (zlib.decompress(orig), new)
         if (spec.get("shell") or spec.get("facemask")) and not args.part:
             path = os.path.join(RAW, team + "HELMET.orig")
             orig = open(path, "rb").read()
