@@ -1,13 +1,15 @@
 """Converts a madden.tools player export into the ratings CSV the importer reads.
 
-    python tools/roster_import/madden_tools.py --export data/madden_tools_fa.txt \
-        --out data/free_agents.csv [--team "Free Agents"]
+    python tools/roster_import/madden_tools.py --export data/madden_tools_all.txt \
+        --out data/madden_tools.csv --free-agents data/free_agents.csv
 
 madden.tools (https://madden.tools/players) has every Madden player's ratings, free agents
 included, which EA's ratings site leaves out. Its pages are Next.js: each player's ratings are at
 /_next/data/<build id>/players/<slug>.json. To make the export, open https://madden.tools/players
-in a browser and run EXPORT_JS (below) in its console; it fetches the free agents' pages (the best
---limit by overall, long snappers left out) and returns the export text, which goes in --export.
+in a browser and run EXPORT_JS (below) in its console; it fetches every player's page (long
+snappers left out: HC09 has no such position; it takes a minute or two) and returns the export
+text, which goes in --export. --out gets the players on the 32 teams (for import_roster.py's
+--csv), --free-agents the free agents (for free_agents.py --players).
 
 The export is a header line ("MTFA1"), a line naming the fields, then one line per player:
 the fields joined by | and then the ratings joined by commas. The output has the columns of EA's
@@ -20,22 +22,22 @@ import argparse
 import csv
 
 EXPORT_JS = r"""
-const limit = 512;
 const b = window.__NEXT_DATA__.buildId;
-const fa = window.__NEXT_DATA__.props.pageProps.teamPlayerData.find(x => x.team.acronym === 'FA');
-const list = Object.values(fa.playersByPosition).flat().filter(p => p.position !== 'LS')
-  .sort((a, c) => c.rating_overall - a.rating_overall).slice(0, limit);
+const list = window.__NEXT_DATA__.props.pageProps.teamPlayerData.flatMap(x => Object.values(x.playersByPosition)
+  .flat().filter(p => p.position !== 'LS').map(p => ({...p, team: x.team.name})));
 const det = {}; let i = 0;
 async function worker() { while (i < list.length) { const p = list[i++];
   for (let k = 0; k < 3 && !det[p.id]; k++) { try { const r = await fetch(`/_next/data/${b}/players/${p.slug}.json`);
-    if (r.ok) det[p.id] = (await r.json()).pageProps.player; } catch (e) {} } } }
-await Promise.all(Array.from({length: 8}, worker));
+    if (r.ok) det[p.id] = {...(await r.json()).pageProps.player, _team: p.team}; } catch (e) {} } } }
+await Promise.all(Array.from({length: 10}, worker));
 const d = Object.values(det);
 const rk = Object.keys(d[0]).filter(k => k.startsWith('rating_')).sort();
-const fk = ['id','first_name','last_name','position','age','height','weight','years_pro','jersey_number','portrait_id','team_id','home_state'];
+const fk = ['id','first_name','last_name','position','age','height','weight','years_pro','jersey_number','portrait_id','_team','home_state'];
 'MTFA1\n' + fk.join('|') + '|' + rk.join(',') + '\n' + d.map(p => fk.map(k => String(p[k] ?? '').replace(/[|\n]/g, ' ')).join('|')
   + '|' + rk.map(k => p[k]).join(',')).join('\n')
 """
+
+FREE_AGENTS = "Free Agents"
 
 PORTRAIT_URL = "https://cdn.madden.tools/madden-27/assets/images/player-portraits/256/{}.png"
 ID_OFFSET = 10_000_000
@@ -55,7 +57,7 @@ def camel(name):
     return head + "".join(w.title() for w in rest)
 
 
-def convert(export, out, team):
+def convert(export, out, free_agents_out=None):
     with open(export, encoding="utf-8") as f:
         lines = f.read().strip().split("\n")
     if lines[0] != "MTFA1":
@@ -66,27 +68,34 @@ def convert(export, out, team):
     columns = ["id", "firstName", "lastName", "team/label", "position/id", "birthdate", "height", "weight",
                "age", "jerseyNum", "yearsPro", "handedness", "college", "avatarUrl"] + \
               [f"stats/{s}/value" for s in stat_names]
-    rows = []
+    teams, free = [], []
     for line in lines[2:]:
         parts = line.split("|")
         p = dict(zip(fields, parts[:-1]))
         values = parts[-1].split(",")
         portrait = int(p["portrait_id"] or 0)
-        rows.append([int(p["id"]) + ID_OFFSET, p["first_name"], p["last_name"], team,
-                     POSITIONS.get(p["position"], p["position"]), "", p["height"], p["weight"], p["age"],
-                     p["jersey_number"], p["years_pro"], "1", "",
-                     PORTRAIT_URL.format(portrait) if portrait else ""] + values)
-    with open(out, "w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(columns)
-        w.writerows(rows)
-    print(f"{len(rows)} players written to {out}")
+        team = p.get("_team", FREE_AGENTS)
+        # import_roster.py matches a team label by its last word(s), the nickname
+        label = team if team == FREE_AGENTS else f"NFL {team}"
+        row = [int(p["id"]) + ID_OFFSET, p["first_name"], p["last_name"], label,
+               POSITIONS.get(p["position"], p["position"]), "", p["height"], p["weight"], p["age"],
+               p["jersey_number"], p["years_pro"], "1", "",
+               PORTRAIT_URL.format(portrait) if portrait else ""] + values
+        (free if team == FREE_AGENTS else teams).append(row)
+    for path, rows in ((out, teams), (free_agents_out, free)):
+        if not path:
+            continue
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(columns)
+            w.writerows(rows)
+        print(f"{len(rows)} players written to {path}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--export", required=True)
-    parser.add_argument("--out", required=True)
-    parser.add_argument("--team", default="Free Agents", help="the team/label column")
+    parser.add_argument("--out", required=True, help="the players on the 32 teams")
+    parser.add_argument("--free-agents", help="the free agents")
     args = parser.parse_args()
-    convert(args.export, args.out, args.team)
+    convert(args.export, args.out, args.free_agents)

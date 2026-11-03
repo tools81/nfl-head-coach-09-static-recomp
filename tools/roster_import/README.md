@@ -102,25 +102,29 @@ the game's default: everything it needs goes in the `hc27` folder of the install
 
    Then fill the free-agent pool, which is otherwise the 2008 game's (its own free agents, its
    2008 draft class and the 2008 players the import left over). EA's ratings site leaves free
-   agents out; madden.tools lists them. Open https://madden.tools/players in a browser, run the
-   `EXPORT_JS` snippet from `madden_tools.py` in the console, save what it returns as
-   `data/madden_tools_fa.txt`, and:
+   agents out; madden.tools lists them (and every team's current roster). Open
+   https://madden.tools/players in a browser, run the `EXPORT_JS` snippet from `madden_tools.py`
+   in the console, save what it returns as `data/madden_tools_all.txt`, and:
 
    ```sh
-   python tools/roster_import/madden_tools.py --export tools/roster_import/data/madden_tools_fa.txt \
-       --out tools/roster_import/data/free_agents.csv
+   python tools/roster_import/madden_tools.py --export tools/roster_import/data/madden_tools_all.txt \
+       --out tools/roster_import/data/madden_tools.csv --free-agents tools/roster_import/data/free_agents.csv
    python tools/roster_import/free_agents.py --roster hc27/ROSTER --players tools/roster_import/data/free_agents.csv \
        --report tools/roster_import/data/free_agents_report.csv
-   python tools/roster_import/fetch_portraits.py --report tools/roster_import/data/free_agents_report.csv \
-       --roster hc27/ROSTER --keep
    ```
 
-   The best free agents by overall (up to the pool's 512 records) take over its records, one of
-   their position first, unsigned like the game's own. Only portrait ids the game's library has can
-   show a picture, and the rostered players hold most of them, so the best free agents get the
-   rest (about 275) and the others the silhouette. `--keep` leaves the rostered players' pictures
-   in place. Without `--players`, every free agent gets a made-up name (never a real player's)
-   and the silhouette instead; with too few players, the records left over do.
+   `madden_tools.csv` also works as import_roster.py's `--csv`, for rosters as current as
+   madden.tools'. To refresh an already imported roster that way, give it as `--roster` with
+   `--keep-contracts`: players still in it keep their contracts (by name), newcomers get the
+   minimum.
+
+   The best free agents by overall take over the pool's records (456 once the teams' 1,915 players
+   have theirs), unsigned like the game's own. Only portrait ids the game's library has can show a
+   picture, so the free agents get the ones the rostered players leave (about 140, best first) and
+   the others the silhouette. Install their pictures with fetch_portraits.py on the import's
+   report and free_agents.py's together (or on free_agents.py's alone with `--keep`, which leaves
+   the other pictures in place). Without `--players`, every free agent gets a made-up name (never a
+   real player's) and the silhouette.
 
 5. Team logos (optional; `TEAMS` in the script lists the textures known so far for every team): the game's images of a team's logo and name
    are textures inside the disc's archives, so they are replaced by their contents. Run HC27 once

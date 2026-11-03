@@ -408,7 +408,7 @@ def assign_portrait_ids(play, imported, without_image=()):
             play.set(i, "PSXP", generic)
 
 
-def import_roster(csv_path, roster_path, out_path, report_path=None, contracts_path=None):
+def import_roster(csv_path, roster_path, out_path, report_path=None, contracts_path=None, keep_contracts=False):
     save = SaveFile(roster_path)
     db = save.db
     play, team_table, dcht = db.tables["PLAY"], db.tables["TEAM"], db.tables["DCHT"]
@@ -471,11 +471,33 @@ def import_roster(csv_path, roster_path, out_path, report_path=None, contracts_p
         bundles = [{f: play.get(i, f) for f in CONTRACT_FIELDS} for i in team_records]
         deals[t] = sorted(bundles, key=lambda b: -b["PCSA"])
 
+    # --keep-contracts: the template is an already imported roster, so a player still in it keeps
+    # his contract (found by name, on his new team or any).
+    kept = {}
+    if keep_contracts:
+        for t, team_records in records.items():
+            for i in team_records:
+                key = name_key(f"{play.get(i, 'PFNA')} {play.get(i, 'PLNA')}")
+                kept.setdefault(key, {f: play.get(i, f) for f in CONTRACT_FIELDS})
     for i in leftovers:
         play.set(i, "TGID", FREE_AGENTS)
     for i, p, t in assignments:
         write_player(play, i, p, t)
-    if contracts_path:
+    if keep_contracts:
+        found = 0
+        for i, p, t in assignments:
+            bundle = kept.get(name_key(f"{p['first']} {p['last']}"))
+            if bundle:
+                found += 1
+                for field, value in bundle.items():
+                    play.set(i, field, value)
+            else:
+                write_contract(play, i, minimum_deal(p["years"]))
+        for i in leftovers:
+            for field in CONTRACT_FIELDS:
+                play.set(i, field, 0)
+        print(f"contracts: {found} players kept theirs, {len(assignments) - found} on minimum deals")
+    elif contracts_path:
         # Real contracts: by name on the player's team, else by name alone when only one player
         # has it; players without one get a minimum deal.
         by_team_deals, by_name_deals = load_contracts(contracts_path)
@@ -557,5 +579,7 @@ if __name__ == "__main__":
     parser.add_argument("--out", required=True)
     parser.add_argument("--report", help="write the imported players with their HC09 player ids")
     parser.add_argument("--contracts", help="real contracts: the CSV otc_contracts.py writes")
+    parser.add_argument("--keep-contracts", action="store_true",
+                        help="the template is an imported roster: players in it keep their contracts (by name)")
     args = parser.parse_args()
-    import_roster(args.csv, args.roster, args.out, args.report, args.contracts)
+    import_roster(args.csv, args.roster, args.out, args.report, args.contracts, args.keep_contracts)
