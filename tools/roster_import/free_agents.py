@@ -72,6 +72,13 @@ def build_free_agents(roster, out, seed, players_path=None, report_path=None):
     play = save.db.tables["PLAY"]
     records = [i for i in range(play.count) if play.get(i, "TGID") == FREE_AGENTS]
     real = importer.load_players(players_path) if players_path else []
+    # Not one who is on a team in this roster (signed since the ratings were taken).
+    rostered_names = {importer.name_key(f"{play.get(i, 'PFNA')} {play.get(i, 'PLNA')}") for i in range(play.count)
+                      if 1 <= play.get(i, "TGID") <= 32}
+    signed = [p for p in real if importer.name_key(f"{p['first']} {p['last']}") in rostered_names]
+    if signed:
+        print(f"{len(signed)} of the free agents are on a team in the roster, left out")
+    real = [p for p in real if p not in signed]
     real.sort(key=lambda p: -p["stats"]["overall"])
     if len(real) > len(records):
         print(f"{len(real) - len(records)} free agents left out: the pool has {len(records)} records")
