@@ -131,11 +131,13 @@ namespace hc09::vk
         // already set wins): FrameRate 35 (the game's own, the default) .. 240; Scale 1 (720p) .. 4, 2 = 1440p;
         // VSync on/off; Fullscreen on/off (Alt+Enter or F11 toggles it); MSAA 1 (as the game asks), 2 (at most
         // 2x) or 0; GPU discrete, integrated or part of the card's name; Anisotropy 16 (the default) .. 2, or off;
-        // AmbientOcclusion and Reflections: strength (1 the default, 0 off).
+        // AmbientOcclusion and Reflections: strength (1 the default, 0 off); Upscaling fsr (the default) or bilinear;
+        // Sharpening 0 (off) .. 100 (75 the default); AspectRatio (below).
         static const std::pair<const wchar_t*, const char*> kSettings[] = {
             { L"FrameRate", "HC09_FRAMERATE" }, { L"Scale", "HC09_SCALE" },       { L"VSync", "HC09_VSYNC" },
             { L"Fullscreen", "HC09_FULLSCREEN" }, { L"MSAA", "HC09_NATIVE_MSAA" }, { L"GPU", "HC09_GPU" },
             { L"Anisotropy", "HC09_ANISOTROPY" }, { L"AmbientOcclusion", "HC09_SSAO" }, { L"Reflections", "HC09_SSR" },
+            { L"Upscaling", "HC09_UPSCALE" }, { L"Sharpening", "HC09_SHARPEN" },
         };
         const std::wstring file = (std::filesystem::current_path() / L"hc09.ini").wstring();
         for (const auto& [key, variable] : kSettings)
@@ -153,6 +155,28 @@ namespace hc09::vk
             else if (value == "on" || value == "yes" || value == "true")
                 value = "1";
             _putenv_s(variable, value.c_str());
+        }
+        // AspectRatio: 16:9 (the game's own, the default), 21:9, 32:9, <w>:<h>, a number, or auto (the screen's shape)
+        // -> HC09_ASPECT, the picture's width / height (widescreen.h).
+        if (!std::getenv("HC09_ASPECT"))
+        {
+            wchar_t text[32] = {};
+            GetPrivateProfileStringW(L"Graphics", L"AspectRatio", L"", text, DWORD(std::size(text)), file.c_str());
+            double aspect = 0.0, w = 0.0, h = 0.0;
+            if (!_wcsicmp(text, L"auto"))
+            {
+                const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+                aspect = sh > 0 ? double(sw) / double(sh) : 0.0;
+            }
+            else if (swscanf(text, L"%lf:%lf", &w, &h) == 2 && h > 0.0)
+                aspect = w / h;
+            else
+                aspect = std::wcstod(text, nullptr);
+            if (aspect > 16.0 / 9.0 + 0.01)
+            {
+                const std::string value = std::to_string(aspect);
+                _putenv_s("HC09_ASPECT", value.c_str());
+            }
         }
         std::fprintf(stderr, "[vk] renderer: Vulkan (native)\n");
     }

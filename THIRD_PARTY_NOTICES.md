@@ -38,11 +38,39 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## NFL Head Coach 09 for PC
 
 The Vulkan renderer and frame pacing in `src/vk` (everything there except the adapter files `vk_adapter.cpp`,
-`vk_select.h`, `vk_stubs.cpp`, `runtime.h` and `kernel.h`) come from NFL Head Coach 09 for PC 1.1.3, used under
-its MIT license (`src/vk/LICENSE`):
+`vk_select.h`, `vk_stubs.cpp`, `runtime.h` and `kernel.h`, and this project's additions `widescreen.h`, `gpu_vk/vk_scene_effects.*`
+and `gpu_vk/vk_upscale.*`) come from NFL Head Coach 09 for PC 1.1.3, used under its MIT license (`src/vk/LICENSE`):
 
 ```
 Copyright (c) 2026 ibukun5588 and the NFL Head Coach 09 for PC contributors
+```
+
+## AMD FidelityFX Super Resolution 1
+
+The upscaling (EASU) and sharpening (RCAS) shaders in `src/vk/gpu_vk/vk_upscale.cpp` are ported from
+[FidelityFX FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR) (`ffx_fsr1.h`, `ffx_a.h`), used under its
+MIT license:
+
+```
+Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 ```
 
 ## Fetched separately (not included in this repository)

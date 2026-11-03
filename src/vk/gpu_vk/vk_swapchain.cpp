@@ -120,6 +120,7 @@ void Swapchain::Destroy()
     if (!dev || !dev->device) return;
     DestroySwapchain();
     DestroyOverlay();
+    upscaler.Destroy();
     dev->DestroyBuffer(readback);
     if (acquired) vkDestroySemaphore(dev->device, acquired, nullptr);
     if (fence) vkDestroyFence(dev->device, fence, nullptr);
@@ -159,23 +160,47 @@ VkResult Swapchain::Present(const Image& src, std::vector<uint32_t>* presented)
     ImageBarrier(cb, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                  VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                  VK_ACCESS_TRANSFER_WRITE_BIT);
-    // Fit the source into the window, keeping its aspect ratio.
-    uint32_t w = extent.width, h = uint32_t(uint64_t(extent.width) * src.height / src.width);
-    if (h > extent.height) { h = extent.height; w = uint32_t(uint64_t(extent.height) * src.width / src.height); }
+    // Fit the source into the window, keeping its aspect ratio (hc09: `stretch` times wider).
+    const double shown = double(src.width) * stretch / double(src.height);
+    uint32_t w = extent.width, h = uint32_t(double(extent.width) / shown + 0.5);
+    if (h > extent.height) { h = extent.height; w = std::min(extent.width, uint32_t(double(extent.height) * shown + 0.5)); }
     int32_t x0 = int32_t(extent.width - w) / 2, y0 = int32_t(extent.height - h) / 2;
-    VkImageBlit blit{};
-    blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-    blit.srcOffsets[1] = { int32_t(src.width), int32_t(src.height), 1 };
-    blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-    blit.dstOffsets[0] = { x0, y0, 0 };
-    blit.dstOffsets[1] = { x0 + int32_t(w), y0 + int32_t(h), 1 };
-    vkCmdBlitImage(cb, src.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
-                   (w == src.width && h == src.height) ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
-    // The overlay: alpha-blended triangles over the blitted image (the live tweaker's; the release build,
-    // HC09_DEV_TOOLS=0, has none and leaves the overlay pipeline out).
     VkImageLayout layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     VkPipelineStageFlags stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
     VkAccessFlags access = VK_ACCESS_TRANSFER_WRITE_BIT;
+    // hc09: scaled with FSR 1 (or the area filter) and sharpened where the swapchain can be rendered to, else (and
+    // at the image's own size) blitted.
+    bool scaled = false;
+    if (upscaler.enabled && !(w == src.width && h == src.height) && index < views.size() && views[index])
+    {
+        ImageBarrier(cb, dst, layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, stage, access, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+        layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        scaled = upscaler.Record(*dev, cb, src, views[index], format, x0, y0, w, h);
+        if (!scaled)
+        {
+            ImageBarrier(cb, dst, layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, stage, access, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_ACCESS_TRANSFER_WRITE_BIT);
+            layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            access = VK_ACCESS_TRANSFER_WRITE_BIT;
+        }
+    }
+    if (!scaled)
+    {
+        VkImageBlit blit{};
+        blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        blit.srcOffsets[1] = { int32_t(src.width), int32_t(src.height), 1 };
+        blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        blit.dstOffsets[0] = { x0, y0, 0 };
+        blit.dstOffsets[1] = { x0 + int32_t(w), y0 + int32_t(h), 1 };
+        vkCmdBlitImage(cb, src.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                       (w == src.width && h == src.height) ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
+    }
+    // The overlay: alpha-blended triangles over the scaled image (the live tweaker's; the release build,
+    // HC09_DEV_TOOLS=0, has none and leaves the overlay pipeline out).
     if (HC09_DEV_TOOLS && !overlay.empty() && index < views.size() && views[index] && EnsureOverlayPipeline())
     {
         const VkDeviceSize vbytes = overlay.size() * sizeof(OverlayVtx);

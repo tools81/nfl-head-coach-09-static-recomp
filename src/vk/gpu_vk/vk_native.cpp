@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "../widescreen.h"
 #include "vk_scene_effects.h"
 #include "vk_shader_compile.h"
 #include "xe_glsl.h"
@@ -478,6 +479,7 @@ struct NativeRenderer::Impl
         VkFormat format = VK_FORMAT_UNDEFINED;
         VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
         uint64_t lastUsed = 0;
+        bool wide = false;   // hc09: widescreen: holds 3D content this frame (drawn wide), so its resolves do too
     };
     std::unordered_map<uint32_t, Target> targets;   // by surface object address (+ depth flag in bit 0)
     // hc09: ambient occlusion and reflections (vk_scene_effects.h), on the frame's first resolve of the target the
@@ -487,6 +489,29 @@ struct NativeRenderer::Impl
     const Target* sceneColor = nullptr;
     const Target* sceneDepth = nullptr;
     uint64_t effectsFrame = ~0ull;
+    // hc09: widescreen (widescreen.h): the squeeze factor (1: off), and the guest ranges that hold resolves of targets
+    // with 3D content (Target::wide).
+    float squeeze = 1.0f / WidescreenStretch();
+    std::vector<std::pair<uint32_t, uint32_t>> wideRanges;
+    // A draw of the 3D scenes: its vertex shader reads c156..c159 (the scenes' camera matrix; gpu/scene_camera.h),
+    // and they hold a perspective projection.
+    bool Perspective(uint32_t vsBase, uint32_t vsSize, const TranslatedShader& m) const
+    {
+        if (vsSize < 160 || vsBase + 160 > 512) return false;
+        bool reads = m.constRelative;
+        for (uint32_t i = 156; i < 160 && !reads; ++i) reads = (m.constUsed[i >> 6] >> (i & 63)) & 1;
+        if (!reads) return false;
+        float c[16];
+        for (uint32_t i = 0; i < 16; ++i) c[i] = AsF(Reg(reg::ALU_CONSTANTS + (vsBase + 156) * 4 + i));
+        return hc09::gpu::CameraFromConstants(c).valid;
+    }
+    bool SamplesWide(const xenos::TextureFetch& tf) const
+    {
+        uint32_t pa = tf.baseAddress() & 0x1FFFFFFFu;
+        for (const auto& [base, bytes] : wideRanges)
+            if (pa >= base && pa < base + bytes) return true;
+        return false;
+    }
     d3dn::Surface bound[4], boundDepth;
     Target* bt[4] = {};
     Target* bd = nullptr;
@@ -955,11 +980,13 @@ struct NativeRenderer::Impl
         return t;
     }();
     bool Tracing() const { return frame >= tracePasses.from && frame < tracePasses.to; }
-    uint32_t traceDraws = 0, traceDepthOnly = 0;
+    uint32_t traceDraws = 0, traceDepthOnly = 0, traceSqueezed = 0;
+    uint64_t hudFrame = ~0ull;
+    uint32_t hudDraws = 0;
     void TraceFlushDraws()
     {
-        if (traceDraws) fprintf(stderr, "[passes]   %u draws (%u depth only)\n", traceDraws, traceDepthOnly);
-        traceDraws = traceDepthOnly = 0;
+        if (traceDraws) fprintf(stderr, "[passes]   %u draws (%u depth only, %u squeezed)\n", traceDraws, traceDepthOnly, traceSqueezed);
+        traceDraws = traceDepthOnly = traceSqueezed = 0;
     }
 
     void SetTargets(const d3dn::Surface rt[4], const d3dn::Surface& depth)
@@ -1070,8 +1097,20 @@ struct NativeRenderer::Impl
         int32_t sc = int32_t(scale);   // rectangles in guest pixels
         int32_t x0 = rect ? std::max(0, rect[0] * sc) : 0, y0 = rect ? std::max(0, rect[1] * sc) : 0;
         int32_t x1 = rect ? std::min<int32_t>(rect[2] * sc, int32_t(areaW)) : int32_t(areaW);
+        // hc09: widescreen (widescreen.h): a clear of part of a screen-sized target moves with the squeezed draws.
+        if (rect && squeeze != 1.0f && bt[0] && bound[0].width >= 1024 && bound[0].height >= 576)
+        {
+            const int32_t w = int32_t(bound[0].width) * sc;
+            const float mid = 0.5f * float(w);
+            if (x0 > 0) x0 = int32_t(std::floor(mid + (float(x0) - mid) * squeeze));
+            if (x1 < w) x1 = int32_t(std::ceil(mid + (float(x1) - mid) * squeeze));
+        }
         int32_t y1 = rect ? std::min<int32_t>(rect[3] * sc, int32_t(areaH)) : int32_t(areaH);
         if (x1 <= x0 || y1 <= y0) return;
+        static const bool traceDrawsOn = Hc09Env("HC09_NATIVE_TRACE_DRAWS") != nullptr;
+        if (traceDrawsOn && Tracing())
+            fprintf(stderr, "[draw] clear flags %X rect %d,%d-%d,%d colour %.2f %.2f %.2f %.2f\n", flags, x0, y0, x1, y1, color[0], color[1], color[2],
+                    color[3]);
         VkClearRect cr{ { { x0, y0 }, { uint32_t(x1 - x0), uint32_t(y1 - y0) } }, 0, 1 };
         Mark(NativeProfile::kGpuOther);
         vkCmdClearAttachments(cb, n, att, 1, &cr);
@@ -1339,7 +1378,8 @@ struct NativeRenderer::Impl
         if (front.image && (front.width != fw || front.height != fh)) { garbage.push_back(front); front = Image{}; }
         if (!front.image &&
             !dev->CreateImage(VK_IMAGE_VIEW_TYPE_2D, fw, fh, 1, VK_FORMAT_R8G8B8A8_UNORM,
-                              VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, front, 1, VK_IMAGE_ASPECT_COLOR_BIT,
+                              VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, front, 1,
+                              VK_IMAGE_ASPECT_COLOR_BIT,
                               VK_FORMAT_R8G8B8A8_UINT))
             return false;
         VkDescriptorSet set = ComputeSet(decodeSetLayout);
@@ -1830,6 +1870,38 @@ struct NativeRenderer::Impl
         C.vpOffset[1] = (vte & 8) ? AsF(Reg(reg::PA_CL_VPORT_YOFFSET)) : 0.0f;
         C.vpOffset[2] = (vte & 32) ? AsF(Reg(reg::PA_CL_VPORT_ZOFFSET)) : 0.0f;
         C.vpOffset[3] = 0.0f;
+        bool squeezed = false;   // hc09: widescreen: the draw is squeezed (its scissor is too, below)
+        C.wideClip = 0.0f;
+        if (squeeze != 1.0f && bt[0])
+        {
+            // On targets of the screen's shape, a 3D draw sees wider (its clip x times the squeeze) and makes its
+            // targets wide. On the screen-sized targets, the rest (menus, HUD, the 2D the game draws into its 3D
+            // scenes) is squeezed; a quad that shows 3D content (full-screen ones, and the panels' backdrops cut from
+            // the scene) keeps the vertices on the screen's edges and makes its targets wide.
+            const float shape = bound[0].height ? float(bound[0].width) / float(bound[0].height) : 0.0f;
+            const bool screenShaped = bound[0].width >= 320 && shape > 1.6f && shape < 1.9f;
+            bool wide = false, showsWide = false;
+            if (screenShaped && Perspective(vsBase, vsSize, vs->meta)) { C.wideClip = squeeze; wide = true; }
+            for (uint32_t s = 0; s < 32 && !wide && !showsWide; ++s)
+                if (slots & (1u << s)) showsWide = SamplesWide(tfOf[s]);
+            if (bound[0].width >= 1024 && bound[0].height >= 576)
+            {
+                if (!wide)
+                {
+                    // Plain: no texture larger than 32x32 (fills; a fade's or bar's ends at the screen's edges stay).
+                    bool plain = !showsWide;
+                    for (uint32_t s = 0; s < 32 && plain; ++s)
+                        if ((slots & (1u << s)) && texOf[s] && (texOf[s]->width > 32 || texOf[s]->height > 32)) plain = false;
+                    C.vpScale[3] = plain || showsWide ? -squeeze : squeeze;
+                    C.vpOffset[3] = 0.5f * float(bound[0].width);
+                    traceSqueezed += Tracing();
+                    squeezed = true;
+                }
+            }
+            if (wide || showsWide)
+                for (Target* t : { bt[0], bt[1], bt[2], bt[3], bd })
+                    if (t) t->wide = true;
+        }
         C.winOfs[0] = 0.0f; C.winOfs[1] = 0.0f; C.winOfs[2] = half; C.winOfs[3] = 0.0f;   // native: no window offset (no tiles)
         // At scale s the window position is s times the guest's (the viewport stays (-K, -K, 2K, 2K)).
         C.rtSize[0] = C.rtSize[1] = kClipScale / float(scale); C.rtSize[2] = C.rtSize[3] = float(scale) / kClipScale;
@@ -1965,7 +2037,38 @@ struct NativeRenderer::Impl
         int32_t sc = int32_t(scale);
         int32_t scx0 = std::max(0, int32_t(Bits(tl, 0, 14)) * sc), scy0 = std::max(0, int32_t(Bits(tl, 16, 14)) * sc);
         int32_t scx1 = std::min<int32_t>(int32_t(Bits(br, 0, 14)) * sc, int32_t(areaW)), scy1 = std::min<int32_t>(int32_t(Bits(br, 16, 14)) * sc, int32_t(areaH));
+        if (squeezed)   // the scissor's sides inside the screen move with the draw (widescreen.h)
+        {
+            const float mid = 0.5f * float(bound[0].width * scale);
+            if (scx0 > 0) scx0 = int32_t(std::floor(mid + (float(scx0) - mid) * squeeze));
+            if (scx1 < int32_t(bound[0].width * scale)) scx1 = int32_t(std::ceil(mid + (float(scx1) - mid) * squeeze));
+        }
         if (scx1 <= scx0 || scy1 <= scy0) { Skip("empty scissor"); return; }
+        // HC09_NATIVE_TRACE_PASSES with HC09_NATIVE_TRACE_DRAWS=1: each draw on a screen-sized single-sampled target (dev).
+        static const bool traceDrawsOn = Hc09Env("HC09_NATIVE_TRACE_DRAWS") != nullptr;
+        // HC09_NATIVE_SKIP_HUD=<a>-<b>: leave out the a-th to b-th draws of each frame on screen-sized single-sampled
+        // targets (dev: finding a draw).
+        static const std::pair<uint32_t, uint32_t> skipHud = [] {
+            uint32_t a = 1, b = 0;
+            if (const char* e = Hc09Env("HC09_NATIVE_SKIP_HUD")) sscanf(e, "%u-%u", &a, &b);
+            return std::make_pair(a, b);
+        }();
+        if (bt[0] && bt[0]->samples == VK_SAMPLE_COUNT_1_BIT && bound[0].width >= 1024)
+        {
+            if (hudFrame != frame) { hudFrame = frame; hudDraws = 0; }
+            ++hudDraws;
+            if (hudDraws >= skipHud.first && hudDraws <= skipHud.second) { Skip("HC09_NATIVE_SKIP_HUD"); return; }
+        }
+        if (traceDrawsOn && Tracing() && bt[0] && bound[0].width >= 320)
+        {
+            std::string tex;
+            for (uint32_t s = 0; s < 32; ++s)
+                if ((slots & (1u << s)) && texOf[s])
+                    tex += " " + std::to_string(texOf[s]->width) + "x" + std::to_string(texOf[s]->height) + (SamplesWide(tfOf[s]) ? "w" : "");
+            fprintf(stderr, "[draw] %ux%u ms%u ps %016llx sq %d 3d %d colour %d stencil %d z %d%d scissor %d,%d-%d,%d n %u tex%s\n", bound[0].width,
+                    bound[0].height, bound[0].msaa, (unsigned long long)psHash, squeezed, C.wideClip != 0.0f, colorOn, stencilOn, zEnable, zWrite,
+                    scx0, scy0, scx1, scy1, d.numIndices, tex.c_str());
+        }
 
         if (pipe != boundPipe) { vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe); boundPipe = pipe; }
         bool fresh = !rec.valid;
@@ -2033,6 +2136,8 @@ struct NativeRenderer::Impl
         if (!(xs > 0.0f) || !(ys < 0.0f) || zs == 0.0f) return;
         camera.depthA = zo + camera.depthA * zs;
         camera.depthB *= zs;
+        camera.sx *= squeeze;   // widescreen: the 3D draws' clip x is squeezed (widescreen.h)
+        camera.cx *= squeeze;
         float s = float(scale);
         sceneView.camera = camera;
         sceneView.x = (xo - xs) * s;
@@ -2130,6 +2235,19 @@ struct NativeRenderer::Impl
                     for (int32_t bx = bx0; bx < bx1; ++bx) sc->cover[size_t(by) * bw + bx] = 1;
             }
             ++stats->resolves;
+            if (squeeze != 1.0f)
+            {
+                // The range holds wide (3D) content now, or no longer does.
+                const uint32_t end = r.destBase + span;
+                wideRanges.erase(std::remove_if(wideRanges.begin(), wideRanges.end(),
+                                                [&](const auto& w) { return w.first < end && r.destBase < w.first + w.second; }),
+                                 wideRanges.end());
+                if (src->wide)
+                {
+                    if (wideRanges.size() >= 64) wideRanges.erase(wideRanges.begin());
+                    wideRanges.emplace_back(r.destBase, span);
+                }
+            }
             InvalidateTextures(r.destBase, span);
             InvalidateIndices(r.destBase, span);
             if (waitAtCopyResolves) SubmitAndWait(NativeProfile::kWaitResolve);
@@ -2422,6 +2540,8 @@ void NativeRenderer::EndFrame()
     I.Submit(false, NativeProfile::kWaitFrame);
     lap.To(NativeProfile::kSubmit);
     I.sceneView = {};
+    if (I.squeeze != 1.0f)
+        for (auto& [k, t] : I.targets) t.wide = false;
     if (++I.frame % 60 == 0)
         for (auto it = I.textures.begin(); it != I.textures.end();)
         {

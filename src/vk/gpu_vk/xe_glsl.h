@@ -33,8 +33,8 @@ struct DrawConsts
     uint32_t bools[8];
     uint32_t loops[32];
     uint32_t fetch[192];      // fetch constants: 32 x 6 dwords (= 96 vertex fetch x 2)
-    float vpScale[4];         // viewport scale x, y, z (1 where VTE disables it)
-    float vpOffset[4];        // offset x, y, z (window and half-pixel offsets: winOfs)
+    float vpScale[4];         // viewport scale x, y, z (1 where VTE disables it); w (hc09): the widescreen squeeze, 0 none, < 0 edges kept
+    float vpOffset[4];        // offset x, y, z (window and half-pixel offsets: winOfs); w (hc09): the squeeze's centre x
     float rtSize[4];          // K, K, 1/K, 1/K: pixels per clip-space unit (viewport (-K, -K, 2K, 2K));
                               // native at resolution scale s: K/s, K/s, s/K, s/K (window = s * the 1x position)
     uint32_t vte;             // bit 0 xy pre-divided, bit 1 z pre-divided, bit 2 W is W (else 1/W)
@@ -44,7 +44,8 @@ struct DrawConsts
     uint32_t vsBase, vsSize, psBase, psSize;   // SQ_VS_CONST / SQ_PS_CONST windows
     float alphaRef;
     float fragScale;          // 1 / resolution scale: gl_FragCoord in the game's (1x) pixels (VPOS)
-    float pad0[2];
+    float wideClip;           // hc09: widescreen (widescreen.h): clip x times this (0: as is), a 3D draw's wider view
+    float pad0;
     float rtScale[4];         // 2^exp_bias per colour target
     float texSize[32][4];     // width, height, kind (0 2D, 1 3D, 2 cube, 3 stacked), depth/layers of the texture at each slot
     // EDRAM renderer (vk_edram): render state read by the pixel shader epilogue.

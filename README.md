@@ -155,6 +155,17 @@ Scale=2
 - `GPU`: on a PC with two graphics chips, `discrete`, `integrated`, or part of the card's name.
 - `Anisotropy`: texture filtering that keeps field lines and yard numbers sharp at the broadcast
   camera's low angles, `16` (the default) down to `2`, or `off` as the original game draws them.
+- `Upscaling`: how the picture is fitted to the window. `fsr` (the default) enlarges it with AMD FidelityFX
+  Super Resolution 1, sharper than plain stretching on a screen larger than the picture (720p on a 1440p or 4K
+  screen), and shrinks a larger picture (`Scale=2` on a 1080p screen) by averaging all the pixels each
+  screen pixel covers.
+  `bilinear` stretches it as before.
+- `Sharpening`: `0` (off) to `100`, `75` by default; applied whenever the picture is scaled.
+- `AspectRatio`: for ultrawide screens, `21:9`, `32:9`, any `<width>:<height>`, or `auto` for your
+  screen's shape; `16:9` (the game's own) by default. The 3D scenes fill the wider screen and show more at
+  the sides, while the menus and on-field graphics keep their shape in the middle. Things just past
+  the original picture's sides can occasionally pop in late, since the game still decides what to draw for
+  16:9.
 
 The Vulkan renderer needs a graphics card and driver with Vulkan 1.3 (any card from the last
 several years). On a PC without one, the game uses the older D3D12 renderer instead, which runs at
@@ -162,7 +173,7 @@ the game's own pace. To use the D3D12 renderer anyway, add `Renderer=d3d12` unde
 `[Graphics]`. HC27's rosters, portraits and logos work with both.
 
 `set HC09_RENDERER=d3d12` (or `vulkan`) picks a renderer for one run, and `HC09_FRAMERATE`,
-`HC09_SCALE`, `HC09_VSYNC`, `HC09_FULLSCREEN`, `HC09_NATIVE_MSAA`, `HC09_GPU` and `HC09_ANISOTROPY` override the
+`HC09_SCALE`, `HC09_VSYNC`, `HC09_FULLSCREEN`, `HC09_NATIVE_MSAA`, `HC09_GPU`, `HC09_ANISOTROPY`, `HC09_UPSCALE`, `HC09_SHARPEN` and `HC09_ASPECT` (width / height) override the
 settings above the same way. `HC09_RESOLUTION_SCALE` is the D3D12 renderer's resolution.
 
 ## Rosters and replacement images

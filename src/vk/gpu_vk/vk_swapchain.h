@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "vk_device.h"
+#include "vk_upscale.h"
 
 namespace hc09vk {
 
@@ -35,13 +36,15 @@ struct Swapchain
     bool transferSrc = false;              // swapchain images can be read back
     bool colorAttachment = false;          // swapchain images can be rendered to (the overlay)
     bool vsync = true;                     // set before Create: false = mailbox/immediate if offered
+    Upscaler upscaler;                     // hc09: FSR 1 / area scaling and sharpening in place of the blit
+    float stretch = 1.0f;                  // hc09: the picture is shown this much wider than its pixels (widescreen.h)
 
     bool Create(Device& device, VkSurfaceKHR surf, uint32_t width, uint32_t height, std::string* err);
     // Rebuild for a new window size (no-op for 0x0, e.g. minimized).
     bool Resize(uint32_t width, uint32_t height, std::string* err);
     void Destroy();   // the surface stays (owned by the caller)
 
-    // Blit `src` (in TRANSFER_SRC_OPTIMAL layout) to the next image and present.
+    // Blit `src` (in TRANSFER_SRC_OPTIMAL layout; with SAMPLED usage, for the upscaler) to the next image and present.
     // `presented`: if non-null, receives the presented pixels (R,G,B,A bytes,
     // extent.width x extent.height) — what the window shows.
     VkResult Present(const Image& src, std::vector<uint32_t>* presented);

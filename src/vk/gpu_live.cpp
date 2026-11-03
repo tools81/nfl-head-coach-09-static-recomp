@@ -29,6 +29,7 @@
 // game thread waits until the GPU has drawn the frame before it (its snapshot half
 // is then free again). The renderer itself keeps two frames in flight (vk_native).
 #include "dev_env.h"
+#include "widescreen.h"
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -1711,7 +1712,10 @@ NativeLive* g_native = nullptr;
 void WindowThread(Live* l, bool show, std::promise<hc09vk::Window*> created)
 {
     HostSetThreadName(nullptr, "hc09 window");
-    hc09vk::Window* w = hc09vk::WindowCreate(hc09::edition::kTitle, 1280, 720, show);
+    // HC09_WINDOW_SIZE=<w>x<h>: the window's first client size (dev; e.g. a hidden window larger than the image).
+    uint32_t ww = 1280, wh = 720;
+    if (const char* e = Hc09Env("HC09_WINDOW_SIZE")) sscanf(e, "%ux%u", &ww, &wh);
+    hc09vk::Window* w = hc09vk::WindowCreate(hc09::edition::kTitle, ww, wh, show);
     if (w) hc09vk::WindowSetEscapeCloses(w, false);
     if (w && EnvOn("HC09_FULLSCREEN", false)) hc09vk::WindowSetFullscreen(w, true);   // Alt+Enter / F11 toggle
     created.set_value(w);
@@ -1806,6 +1810,10 @@ void GpuLiveInit(uint8_t* physicalMemory)
     // HC09_VSYNC=0: present without waiting for the display (mailbox or
     // immediate). The game still paces itself to its own 60 Hz vblank.
     l->swapchain.vsync = EnvOn("HC09_VSYNC", true);
+    // hc09: HC09_UPSCALE=bilinear (or 0): the blit in place of FSR 1; HC09_SHARPEN=0..100 (vk_upscale.h).
+    if (const char* e = Hc09Env("HC09_UPSCALE"); e && (!strcmp(e, "0") || !strcmp(e, "bilinear"))) l->swapchain.upscaler.enabled = false;
+    if (const char* e = Hc09Env("HC09_SHARPEN"); e && *e) l->swapchain.upscaler.sharpening = std::clamp(float(atof(e)), 0.0f, 100.0f) / 100.0f;
+    l->swapchain.stretch = hc09vk::WidescreenStretch();
     l->phys = physicalMemory;
     l->hazard = EnvOn("HC09_GPU_HAZARD", false);
     if (ok && l->window) l->swapchainOk = l->swapchain.Create(l->dev, l->surface, 1280, 720, &err);

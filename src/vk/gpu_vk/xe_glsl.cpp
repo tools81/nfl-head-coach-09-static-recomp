@@ -213,7 +213,7 @@ layout(std430, set = 0, binding = 1) readonly buffer DrawConstsBlock {
     uint psSize;
     float alphaRef;
     float fragScale;
-    float pad1;
+    float wideClip;
     float pad2;
     vec4 rtScale;
     vec4 texSize[32];
@@ -1549,12 +1549,21 @@ TranslatedShader TranslateShader(const ShaderCode& code, const TranslateOptions&
     // order of operations; the viewport maps clip space 1:1 to pixels
     // (x_window = x_ndc * K, K = 1 / rtSize.z), so no rounding is added.
     bool xyFmt = (D.vte & 1u) != 0u, zFmt = (D.vte & 2u) != 0u, w0Fmt = (D.vte & 4u) != 0u;
+    if (D.wideClip != 0.0) pos.x *= D.wideClip;   // hc09: widescreen: a 3D draw sees wider (widescreen.h)
     float invW = w0Fmt ? (pos.w != 0.0 ? xdiv(1.0, pos.w) : 1.0) : pos.w;
     precise vec3 q = vec3(xyFmt ? pos.x : pos.x * invW, xyFmt ? pos.y : pos.y * invW, zFmt ? pos.z : pos.z * invW);
     precise vec3 scr;
     scr.x = ((q.x * D.vpScale.x + D.vpOffset.x) + D.winOfs.x) + D.winOfs.z;
     scr.y = ((q.y * D.vpScale.y + D.vpOffset.y) + D.winOfs.y) + D.winOfs.z;
     scr.z = q.z * D.vpScale.z + D.vpOffset.z;
+    // hc09: widescreen (widescreen.h): the draw moves toward the centre by the squeeze factor (D.vpOffset.w is the
+    // centre). Vertices past the screen's left and right edges stay (what the game keeps off-screen stays there), and
+    // so do those on the edges of a plain draw (negative factor: no texture over 32x32; fades and bars keep the width).
+    {
+        float edge = D.vpScale.w < 0.0 ? 1.0 : -0.5;
+        if (D.vpScale.w != 0.0 && scr.x > edge && scr.x < 2.0 * D.vpOffset.w - edge)
+            scr.x = D.vpOffset.w + (scr.x - D.vpOffset.w) * abs(D.vpScale.w);
+    }
     float cw = invW != 0.0 ? xdiv(1.0, invW) : 1.0;
     gl_Position = vec4(scr.xy * D.rtSize.zw * cw, XE_HOST_Z, cw);
     xeZ = scr.z;
