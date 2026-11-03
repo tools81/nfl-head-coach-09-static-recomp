@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
+#include <mutex>
 #include <set>
 #include <vector>
 
@@ -19,6 +21,7 @@
 #include "gpu/draw.h"
 #include "gpu/shader_compiler.h"
 #include "gpu/swappable_images.h"
+#include "gpu/texture_replacements.h"
 #include "kernel/guest.h"
 #include "memory.h"
 
@@ -1260,30 +1263,18 @@ void cs_untile(uint3 id : SV_DispatchThreadID)
 
     bool TextureCache::GetReplacement(const TextureFetch& fetch, BoundTexture& out)
     {
-        // HC09_NO_REPLACEMENTS=1 draws the game's own images.
-        static const bool disabled = std::getenv("HC09_NO_REPLACEMENTS") != nullptr;
-        if (disabled)
+        if (!ReplacementsEnabled())
             return false;
         const auto image = FindSwappableImage(fetch.baseAddress() & 0x1FFFFFFF);
         if (!image)
             return false;
-        const std::wstring name = L"textures\\swappables\\" + std::wstring(image->library.begin(), image->library.end()) +
-            L"\\" + std::to_wstring(image->id) + L".png";
-        auto [it, inserted] = replacements_.try_emplace(name);
-        if (inserted)
-        {
-            // The edition's own images (hc27\textures\...) come before the shared ones.
-            std::wstring path = name;
-            if (edition::kModFolder)
-            {
-                const std::wstring modded = std::wstring(edition::kModFolder) + L"\\" + name;
-                if (GetFileAttributesW(modded.c_str()) != INVALID_FILE_ATTRIBUTES)
-                    path = modded;
-            }
-            if (LoadReplacement(path, fetch.width(), fetch.height(), it->second))
-                std::fprintf(stderr, "[texture] %ls replaces %s/%u (%ux%u, the game's is %ux%u)\n", path.c_str(), image->library.c_str(),
-                    image->id, it->second.width, it->second.height, fetch.width(), fetch.height());
-        }
+        const std::wstring path = SwappableReplacementPath(*image);
+        if (path.empty())
+            return false;
+        auto [it, inserted] = replacements_.try_emplace(path);
+        if (inserted && LoadReplacement(path, fetch.width(), fetch.height(), it->second))
+            std::fprintf(stderr, "[texture] %ls replaces %s/%u (%ux%u, the game's is %ux%u)\n", path.c_str(), image->library.c_str(),
+                image->id, it->second.width, it->second.height, fetch.width(), fetch.height());
         if (!it->second.resource)
             return false;
         // Sizes stay the game's: shaders scale unnormalized coordinates by them.
@@ -1298,48 +1289,10 @@ void cs_untile(uint3 id : SV_DispatchThreadID)
     bool TextureCache::LoadReplacement(const std::wstring& path, uint32_t originalWidth, uint32_t originalHeight, Replacement& out,
         bool mips)
     {
-        if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
+        std::vector<uint8_t> pixels;
+        uint32_t width = 0, height = 0;
+        if (!LoadReplacementPixels(path, originalWidth, originalHeight, pixels, width, height))
             return false;
-        // Decode with WIC (any PNG, converted to straight RGBA8).
-        thread_local const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        (void)com;
-        ComPtr<IWICImagingFactory> factory;
-        ComPtr<IWICBitmapDecoder> decoder;
-        ComPtr<IWICBitmapFrameDecode> frame;
-        ComPtr<IWICFormatConverter> converter;
-        UINT width = 0, height = 0;
-        if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) ||
-            FAILED(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder)) ||
-            FAILED(decoder->GetFrame(0, &frame)) || FAILED(factory->CreateFormatConverter(&converter)) ||
-            FAILED(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0,
-                WICBitmapPaletteTypeCustom)) ||
-            FAILED(converter->GetSize(&width, &height)) || width == 0 || height == 0)
-        {
-            std::fprintf(stderr, "[texture] cannot read %ls\n", path.c_str());
-            return false;
-        }
-        std::vector<uint8_t> pixels(size_t(width) * height * 4);
-        if (FAILED(converter->CopyPixels(nullptr, width * 4, UINT(pixels.size()), pixels.data())))
-            return false;
-
-        // These front-end images are sampled without mips, so a much larger image would alias:
-        // halve it (2x2 box filter) until it is at most twice the game's size.
-        while (width > 2 * originalWidth && height > 2 * originalHeight && width > 1 && height > 1)
-        {
-            const UINT halfWidth = width / 2, halfHeight = height / 2;
-            std::vector<uint8_t> half(size_t(halfWidth) * halfHeight * 4);
-            for (UINT y = 0; y < halfHeight; y++)
-                for (UINT x = 0; x < halfWidth; x++)
-                    for (int c = 0; c < 4; c++)
-                    {
-                        const auto at = [&](UINT px, UINT py) { return uint32_t(pixels[(size_t(py) * width + px) * 4 + c]); };
-                        half[(size_t(y) * halfWidth + x) * 4 + c] =
-                            uint8_t((at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) + at(2 * x + 1, 2 * y + 1) + 2) / 4);
-                    }
-            pixels.swap(half);
-            width = halfWidth;
-            height = halfHeight;
-        }
 
         // With mips, the full chain down to 1x1 (2x2 box filter, edges clamped on odd sizes).
         uint32_t levels = 1;
@@ -1402,39 +1355,12 @@ void cs_untile(uint3 id : SV_DispatchThreadID)
 
     bool TextureCache::GetHashedReplacement(uint64_t contentHash, const TextureFetch& fetch, uint32_t originalLevels, BoundTexture& out)
     {
-        static const bool disabled = std::getenv("HC09_NO_REPLACEMENTS") != nullptr;
-        if (disabled)
+        const std::wstring* file = ReplacementsEnabled() ? HashedReplacementPath(contentHash) : nullptr;
+        if (!file)
             return false;
-        // The folders are listed once: textures\hashed and the edition's own (which wins).
-        if (!hashedListed_)
-        {
-            hashedListed_ = true;
-            auto list = [this](const std::wstring& folder) {
-                WIN32_FIND_DATAW found;
-                HANDLE search = FindFirstFileW((folder + L"\\*.png").c_str(), &found);
-                if (search == INVALID_HANDLE_VALUE)
-                    return;
-                do
-                {
-                    wchar_t* end = nullptr;
-                    const uint64_t hash = std::wcstoull(found.cFileName, &end, 16);
-                    if (end && _wcsicmp(end, L".png") == 0 && end - found.cFileName == 16)
-                        hashedFiles_[hash] = folder + L"\\" + found.cFileName;
-                } while (FindNextFileW(search, &found));
-                FindClose(search);
-            };
-            list(L"textures\\hashed");
-            if (edition::kModFolder)
-                list(std::wstring(edition::kModFolder) + L"\\textures\\hashed");
-            if (!hashedFiles_.empty())
-                std::fprintf(stderr, "[texture] %zu replacements by content hash\n", hashedFiles_.size());
-        }
-        auto file = hashedFiles_.find(contentHash);
-        if (file == hashedFiles_.end())
-            return false;
-        auto [it, inserted] = replacements_.try_emplace(file->second);
-        if (inserted && LoadReplacement(file->second, fetch.width(), fetch.height(), it->second, true))
-            std::fprintf(stderr, "[texture] %ls replaces texture %016llX (%ux%u, the game's is %ux%u)\n", file->second.c_str(),
+        auto [it, inserted] = replacements_.try_emplace(*file);
+        if (inserted && LoadReplacement(*file, fetch.width(), fetch.height(), it->second, true))
+            std::fprintf(stderr, "[texture] %ls replaces texture %016llX (%ux%u, the game's is %ux%u)\n", file->c_str(),
                 (unsigned long long)contentHash, it->second.width, it->second.height, fetch.width(), fetch.height());
         if (!it->second.resource)
             return false;
@@ -1443,6 +1369,177 @@ void cs_untile(uint3 id : SV_DispatchThreadID)
         out.view.Texture2D.MipLevels = originalLevels > 1 ? it->second.levels : 1;
         // The image holds the colours as drawn (the swizzle already applied, as dumps are saved).
         out.view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        return true;
+    }
+}
+
+// ---- Replacement images (texture_replacements.h) --------------------------------------------------------------
+
+namespace hc09::gpu
+{
+    bool ReplacementsEnabled()
+    {
+        static const bool enabled = std::getenv("HC09_NO_REPLACEMENTS") == nullptr;
+        return enabled;
+    }
+
+    std::wstring SwappableReplacementPath(const SwappableImage& image)
+    {
+        static std::mutex mutex;
+        static std::map<std::pair<std::string, uint32_t>, std::wstring> found;  // empty: no file
+        std::lock_guard lock(mutex);
+        auto [it, inserted] = found.try_emplace({ image.library, image.id });
+        if (inserted)
+        {
+            const std::wstring name = L"textures\\swappables\\" + std::wstring(image.library.begin(), image.library.end()) + L"\\" +
+                std::to_wstring(image.id) + L".png";
+            std::vector<std::wstring> candidates;
+            if (edition::kModFolder)
+                candidates.push_back(std::wstring(edition::kModFolder) + L"\\" + name);
+            candidates.push_back(name);
+            for (const auto& candidate : candidates)
+                if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES)
+                {
+                    it->second = candidate;
+                    break;
+                }
+        }
+        return it->second;
+    }
+
+    const std::wstring* HashedReplacementPath(uint64_t contentHash)
+    {
+        // The folders are listed once: textures\hashed and the edition's own (which wins).
+        static const std::unordered_map<uint64_t, std::wstring> files = [] {
+            std::unordered_map<uint64_t, std::wstring> list;
+            auto add = [&list](const std::wstring& folder) {
+                WIN32_FIND_DATAW entry;
+                HANDLE search = FindFirstFileW((folder + L"\\*.png").c_str(), &entry);
+                if (search == INVALID_HANDLE_VALUE)
+                    return;
+                do
+                {
+                    wchar_t* end = nullptr;
+                    const uint64_t hash = std::wcstoull(entry.cFileName, &end, 16);
+                    if (end && _wcsicmp(end, L".png") == 0 && end - entry.cFileName == 16)
+                        list[hash] = folder + L"\\" + entry.cFileName;
+                } while (FindNextFileW(search, &entry));
+                FindClose(search);
+            };
+            add(L"textures\\hashed");
+            if (edition::kModFolder)
+                add(std::wstring(edition::kModFolder) + L"\\textures\\hashed");
+            if (!list.empty())
+                std::fprintf(stderr, "[texture] %zu replacements by content hash\n", list.size());
+            return list;
+        }();
+        auto it = files.find(contentHash);
+        return it == files.end() ? nullptr : &it->second;
+    }
+
+    bool TextureContentHash(const uint32_t fetchWords[6], uint64_t& hash)
+    {
+        // TextureCache::Get's source layout for a single 2D texture (one face, no volume rows).
+        TextureFetch fetch;
+        std::memcpy(fetch.words, fetchWords, sizeof(fetch.words));
+        FormatInfo info;
+        if (fetch.type() != 2 || fetch.dimension() != 1 || (fetch.stacked() && fetch.stackDepth() > 1) ||
+            !LookupFormat(fetch.format(), info))
+            return false;
+        const uint32_t width = fetch.width(), height = fetch.height();
+        const uint32_t blockSize = info.compressed ? 4 : 1;
+        const uint32_t unit = info.blockBytes;
+        const uint32_t blocksWide = (width + blockSize - 1) / blockSize;
+        const uint32_t blocksHigh = (height + blockSize - 1) / blockSize;
+        const uint32_t pitchBlocks = std::max(fetch.pitchTexels() / blockSize, blocksWide);
+        const uint32_t sourceRows = fetch.tiled() ? ((blocksHigh + 31) & ~31u) : blocksHigh;
+        const uint32_t sourcePitchBlocks = fetch.tiled() ? ((pitchBlocks + 31) & ~31u) : pitchBlocks;
+        const uint64_t sourceBytes = uint64_t(sourcePitchBlocks) * sourceRows * unit;
+
+        uint32_t levels = 1;
+        if (fetch.mipAddress() != 0 && fetch.mipMaxLevel() > 0)
+        {
+            uint32_t sizeMax = 0;
+            while ((std::max(width, height) >> (sizeMax + 1)) != 0)
+                sizeMax++;
+            levels = std::min(fetch.mipMaxLevel(), sizeMax) + 1;
+        }
+        auto log2Ceil = [](uint32_t value) {
+            uint32_t log2 = 0;
+            while ((1u << log2) < value)
+                log2++;
+            return log2;
+        };
+        const uint32_t log2W = log2Ceil(width), log2H = log2Ceil(height);
+        const uint32_t shorterLog2 = std::min(log2W, log2H);
+        const uint32_t packedBase = !fetch.packedMips() ? 32u : shorterLog2 > 4 ? shorterLog2 - 4 : 0u;
+        uint64_t mipBytes = 0;
+        for (uint32_t level = 1; level < levels && level <= packedBase; level++)
+        {
+            uint32_t pitch = (std::max((1u << log2W) >> level, 1u) + blockSize - 1) / blockSize;
+            uint32_t rows = (std::max((1u << log2H) >> level, 1u) + blockSize - 1) / blockSize;
+            if (fetch.tiled())
+            {
+                pitch = (pitch + 31) & ~31u;
+                rows = (rows + 31) & ~31u;
+            }
+            else
+                pitch = ((pitch * unit + 255) & ~255u) / unit;
+            mipBytes += (uint64_t(pitch) * rows * unit + 4095) & ~4095ull;
+        }
+
+        hash = XXH3_64bits(GuestToHost(PhysicalToGuest(fetch.baseAddress())), sourceBytes);
+        if (mipBytes)
+            hash ^= XXH3_64bits(GuestToHost(PhysicalToGuest(fetch.mipAddress())), mipBytes) * 0x9E3779B97F4A7C15ull;
+        return true;
+    }
+
+    bool LoadReplacementPixels(const std::wstring& path, uint32_t originalWidth, uint32_t originalHeight,
+        std::vector<uint8_t>& pixels, uint32_t& width, uint32_t& height)
+    {
+        if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
+            return false;
+        // Decode with WIC (any PNG, converted to straight RGBA8).
+        thread_local const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        (void)com;
+        ComPtr<IWICImagingFactory> factory;
+        ComPtr<IWICBitmapDecoder> decoder;
+        ComPtr<IWICBitmapFrameDecode> frame;
+        ComPtr<IWICFormatConverter> converter;
+        UINT decodedWidth = 0, decodedHeight = 0;
+        if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) ||
+            FAILED(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder)) ||
+            FAILED(decoder->GetFrame(0, &frame)) || FAILED(factory->CreateFormatConverter(&converter)) ||
+            FAILED(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0,
+                WICBitmapPaletteTypeCustom)) ||
+            FAILED(converter->GetSize(&decodedWidth, &decodedHeight)) || decodedWidth == 0 || decodedHeight == 0)
+        {
+            std::fprintf(stderr, "[texture] cannot read %ls\n", path.c_str());
+            return false;
+        }
+        width = decodedWidth;
+        height = decodedHeight;
+        pixels.assign(size_t(width) * height * 4, 0);
+        if (FAILED(converter->CopyPixels(nullptr, width * 4, UINT(pixels.size()), pixels.data())))
+            return false;
+
+        // Halve (2x2 box filter) until at most twice the game's size.
+        while (width > 2 * originalWidth && height > 2 * originalHeight && width > 1 && height > 1)
+        {
+            const uint32_t halfWidth = width / 2, halfHeight = height / 2;
+            std::vector<uint8_t> half(size_t(halfWidth) * halfHeight * 4);
+            for (uint32_t y = 0; y < halfHeight; y++)
+                for (uint32_t x = 0; x < halfWidth; x++)
+                    for (int c = 0; c < 4; c++)
+                    {
+                        const auto at = [&](uint32_t px, uint32_t py) { return uint32_t(pixels[(size_t(py) * width + px) * 4 + c]); };
+                        half[(size_t(y) * halfWidth + x) * 4 + c] =
+                            uint8_t((at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) + at(2 * x + 1, 2 * y + 1) + 2) / 4);
+                    }
+            pixels.swap(half);
+            width = halfWidth;
+            height = halfHeight;
+        }
         return true;
     }
 }

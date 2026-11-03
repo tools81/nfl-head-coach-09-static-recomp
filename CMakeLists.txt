@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(HC09Recomp VERSION 0.8.2 LANGUAGES C CXX)
+project(HC09Recomp VERSION 0.9.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -36,7 +36,10 @@ target_compile_options(HC09RecompLib PRIVATE
 # modern roster and coaches from tools/roster_import; see src/common/edition.h).
 set(HC09_HOST_SOURCES
     src/main.cpp
+    src/common/draft_picks.cpp
     src/common/edition.cpp
+    src/common/fifth_year_option.cpp
+    src/common/rookie_scale.cpp
     src/common/settings.cpp
     src/common/updates.cpp
     src/memory.cpp
@@ -106,6 +109,64 @@ endif()
 # FFmpeg (LGPL shared build in thirdparty/ffmpeg) for XMA audio decoding.
 set(HC09_FFMPEG ${CMAKE_SOURCE_DIR}/thirdparty/ffmpeg)
 
+# The native Vulkan renderer (src/vk: from NFL Head Coach 09 for PC, MIT, see src/vk/LICENSE), built when its
+# dependencies are in thirdparty/vulkan: Vulkan-Headers, volk (loads vulkan-1.dll at run time) and glslang's
+# release package (GLSL to SPIR-V). Its sources compile into the games themselves: they replace recompiled
+# functions (sub_<address>), which only works for objects the linker always takes.
+set(HC09_VULKAN_DIR ${CMAKE_SOURCE_DIR}/thirdparty/vulkan)
+# Missing ones are downloaded here at configure time (HC09_FETCH_VULKAN=OFF: never; the games then use D3D12 only).
+option(HC09_FETCH_VULKAN "Download the Vulkan renderer's dependencies into thirdparty/vulkan when missing" ON)
+function(hc09_fetch_vulkan_dep name url marker)
+    if(EXISTS ${HC09_VULKAN_DIR}/${name}/${marker})
+        return()
+    endif()
+    message(STATUS "Downloading ${name} (${url})")
+    set(archive ${CMAKE_BINARY_DIR}/vulkan-deps/${name}.zip)
+    set(staging ${CMAKE_BINARY_DIR}/vulkan-deps/${name})
+    file(DOWNLOAD ${url} ${archive} STATUS status TLS_VERIFY ON)
+    list(GET status 0 code)
+    if(NOT code EQUAL 0)
+        message(WARNING "Downloading ${name} failed (${status}): the Vulkan renderer is left out")
+        return()
+    endif()
+    file(REMOVE_RECURSE ${staging})
+    file(ARCHIVE_EXTRACT INPUT ${archive} DESTINATION ${staging})
+    # GitHub's source archives hold one top-level folder; glslang's release package does not.
+    file(GLOB entries ${staging}/*)
+    list(LENGTH entries count)
+    if(count EQUAL 1 AND IS_DIRECTORY "${entries}")
+        set(staging ${entries})
+    endif()
+    file(REMOVE_RECURSE ${HC09_VULKAN_DIR}/${name})
+    file(MAKE_DIRECTORY ${HC09_VULKAN_DIR})
+    file(RENAME ${staging} ${HC09_VULKAN_DIR}/${name})
+endfunction()
+if(HC09_FETCH_VULKAN)
+    set(HC09_VULKAN_TAG vulkan-sdk-1.4.350.1)
+    hc09_fetch_vulkan_dep(Vulkan-Headers
+        https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/${HC09_VULKAN_TAG}.zip include/vulkan/vulkan.h)
+    hc09_fetch_vulkan_dep(volk https://github.com/zeux/volk/archive/refs/tags/${HC09_VULKAN_TAG}.zip volk.c)
+    hc09_fetch_vulkan_dep(glslang
+        https://github.com/KhronosGroup/glslang/releases/download/16.6.0/glslang-16.6.0-windows-x86_64-release.zip lib/glslang.lib)
+endif()
+if(EXISTS ${HC09_VULKAN_DIR}/Vulkan-Headers/include/vulkan/vulkan.h AND EXISTS ${HC09_VULKAN_DIR}/volk/volk.c
+        AND EXISTS ${HC09_VULKAN_DIR}/glslang/lib/glslang.lib)
+    set(HC09_VULKAN ON)
+    message(STATUS "Vulkan renderer: on (${HC09_VULKAN_DIR})")
+    add_library(HC09Volk STATIC ${HC09_VULKAN_DIR}/volk/volk.c)
+    target_include_directories(HC09Volk PUBLIC ${HC09_VULKAN_DIR}/Vulkan-Headers/include ${HC09_VULKAN_DIR}/volk)
+    target_compile_definitions(HC09Volk PUBLIC VK_NO_PROTOTYPES PRIVATE VK_USE_PLATFORM_WIN32_KHR WIN32_LEAN_AND_MEAN NOMINMAX)
+    file(GLOB HC09_VK_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/vk/*.cpp ${CMAKE_SOURCE_DIR}/src/vk/xenos/*.cpp
+        ${CMAKE_SOURCE_DIR}/src/vk/gpu_vk/*.cpp)
+    set(HC09_GLSLANG_LIBS)
+    foreach(lib glslang glslang-default-resource-limits SPIRV MachineIndependent GenericCodeGen OSDependent SPIRV-Tools-opt SPIRV-Tools)
+        list(APPEND HC09_GLSLANG_LIBS ${HC09_VULKAN_DIR}/glslang/lib/${lib}.lib)
+    endforeach()
+else()
+    set(HC09_VULKAN OFF)
+    message(STATUS "Vulkan renderer: off (thirdparty/vulkan is missing; the games use the D3D12 renderer)")
+endif()
+
 foreach(game HC09 HC27)
     add_executable(${game} ${HC09_HOST_SOURCES})
     target_include_directories(${game} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/thirdparty/XenonRecomp/thirdparty/xxHash
@@ -119,6 +180,13 @@ foreach(game HC09 HC27)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${HC09_FFMPEG}/bin/avcodec-62.dll ${HC09_FFMPEG}/bin/avutil-60.dll ${HC09_FFMPEG}/bin/swresample-6.dll
             $<TARGET_FILE_DIR:${game}>)
+    if(HC09_VULKAN)
+        target_sources(${game} PRIVATE ${HC09_VK_SOURCES})
+        target_include_directories(${game} PRIVATE ${CMAKE_SOURCE_DIR}/src/vk ${CMAKE_SOURCE_DIR}/src/vk/xenos
+            ${CMAKE_SOURCE_DIR}/src/vk/gpu_vk ${HC09_VULKAN_DIR}/glslang/include)
+        target_compile_definitions(${game} PRIVATE HC09_HAVE_VULKAN)
+        target_link_libraries(${game} PRIVATE HC09Volk ${HC09_GLSLANG_LIBS})
+    endif()
     if(HC09_DXC_DIR)
         add_custom_command(TARGET ${game} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "${HC09_DXC_DIR}/dxcompiler.dll" "${HC09_DXC_DIR}/dxil.dll"

@@ -40,6 +40,7 @@
 #include "gpu/shader_compiler.h"
 #include "gpu/shaders.h"
 #include "gpu/shared_memory.h"
+#include "vk/vk_select.h"
 #include "gpu/texture_cache.h"
 #include "kernel/guest.h"
 
@@ -2505,7 +2506,8 @@ float ps_main(float4 position : SV_Position) : SV_Target
 
         Renderer* GetRenderer()
         {
-            if (!g_renderer && !g_rendererFailed && !std::getenv("HC09_NO_RENDER"))
+            // The Vulkan renderer draws instead (src/vk/vk_select.h): the command processor only runs the ring.
+            if (!g_renderer && !g_rendererFailed && !std::getenv("HC09_NO_RENDER") && !vk::Selected())
             {
                 g_renderer = new Renderer();
                 if (!g_renderer->Initialize())

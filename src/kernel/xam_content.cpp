@@ -6,9 +6,12 @@
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <vector>
 
+#include "common/draft_picks.h"
 #include "kernel/guest.h"
 #include "kernel/objects.h"
 #include "kernel/vfs.h"
@@ -28,6 +31,10 @@ namespace hc09
         constexpr uint32_t kOpenExisting = 3;
         constexpr uint32_t kOpenAlways = 4;
         constexpr uint32_t kTruncateExisting = 5;
+
+        // Career saves being written, by the root they are mounted as (for draft_picks.h).
+        std::mutex g_careerSavesMutex;
+        std::map<std::string, std::filesystem::path> g_careerSaves;
 
         struct ContentData
         {
@@ -215,6 +222,14 @@ PPC_FUNC(__imp__XamContentCreateEx)
         data.contentType, root.c_str(), result);
     if (result == error::kSuccess)
     {
+        // HC27: a career about to be saved gets the real 2028 draft pick trades (once; see draft_picks.h),
+        // in memory now and in the file when the game closes the package.
+        if (disposition != kOpenExisting && data.fileName.rfind("CAREER-", 0) == 0)
+        {
+            edition::ApplyDraftPickTrades();
+            std::lock_guard lock(g_careerSavesMutex);
+            g_careerSaves[root] = directory / data.fileName;
+        }
         std::filesystem::create_directories(directory, ec);
         if (created)
             SaveDisplayName(data);
@@ -233,6 +248,14 @@ PPC_FUNC(__imp__XamContentClose)
 {
     // (root_name, overlapped)
     const std::string root = GuestCString(Arg32(ctx, 0));
+    {
+        std::lock_guard lock(g_careerSavesMutex);
+        if (auto it = g_careerSaves.find(root); it != g_careerSaves.end())
+        {
+            edition::ApplyDraftPickTradesToSave(it->second);
+            g_careerSaves.erase(it);
+        }
+    }
     RemoveSymbolicLink(root + ":");
     Unmount("\\Device\\Content\\" + root);
     Return(ctx, CompleteRequest(Arg32(ctx, 1), error::kSuccess));

@@ -35,7 +35,22 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
+## NFL Head Coach 09 for PC
+
+The Vulkan renderer and frame pacing in `src/vk` (everything there except the adapter files `vk_adapter.cpp`,
+`vk_select.h`, `vk_stubs.cpp`, `runtime.h` and `kernel.h`) come from NFL Head Coach 09 for PC 1.1.3, used under
+its MIT license (`src/vk/LICENSE`):
+
+```
+Copyright (c) 2026 ibukun5588 and the NFL Head Coach 09 for PC contributors
+```
+
 ## Fetched separately (not included in this repository)
 
 - [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) — MIT; modified by `patches/xenonrecomp.patch`.
 - [FFmpeg](https://ffmpeg.org) — LGPL 2.1+ shared build, dynamically linked.
+- For the Vulkan renderer, downloaded into `thirdparty/vulkan` when the project is configured:
+  [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) (Apache 2.0 / MIT),
+  [volk](https://github.com/zeux/volk) (MIT; loads the Vulkan driver at run time) and the
+  [glslang](https://github.com/KhronosGroup/glslang) release package with SPIRV-Tools (BSD 3-clause / Apache 2.0;
+  statically linked).

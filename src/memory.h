@@ -27,4 +27,9 @@ namespace hc09
     bool AllocateGuestMemory();
 
     inline uint8_t* GuestToHost(uint32_t address) { return g_base + address; }
+
+    // One more view of the 512 MiB of physical memory, outside the guest address space, whose pages are never
+    // protected (the Vulkan renderer reads guest data and imports the memory through it, while the guest's own
+    // views are write-tracked). Mapped on first use; null if it cannot be.
+    uint8_t* PhysicalAlias();
 }

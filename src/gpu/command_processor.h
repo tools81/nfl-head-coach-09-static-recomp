@@ -45,4 +45,9 @@ namespace hc09::gpu
 
     // Number of swaps (presents) processed so far.
     uint32_t SwapCount();
+
+    // Native fences (the Vulkan renderer): the fence values EVENT_WRITE_SHD writes to the dword at physical
+    // `address` go to `sink` instead of memory; StoreFenceWord writes such a value as the CP would (big-endian).
+    void RedirectFenceWord(uint32_t address, void (*sink)(uint32_t value));
+    void StoreFenceWord(uint32_t address, uint32_t value);
 }

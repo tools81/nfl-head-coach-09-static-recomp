@@ -22,6 +22,7 @@
 #include "gpu/shaders.h"
 #include "kernel/guest.h"
 #include "kernel/threads.h"
+#include "vk/vk_select.h"
 
 namespace hc09::gpu
 {
@@ -74,6 +75,9 @@ namespace hc09::gpu
         bool g_tracingFences = false;   // HC09_TRACE_FENCES triggered
         uint32_t g_rptrWriteBack = 0;   // guest address, 0 = disabled
         std::atomic<uint32_t> g_swapCount{ 0 };
+        // RedirectFenceWord: the physical dword whose fence writes go to the sink instead.
+        std::atomic<uint32_t> g_fenceWord{ ~0u };
+        std::atomic<void (*)(uint32_t)> g_fenceSink{ nullptr };
 
         // ---- Interrupts ------------------------------------------------------------------
         //
@@ -469,6 +473,12 @@ namespace hc09::gpu
                         address, value, reader.index(), reader.size() == g_ringSizeDwords ? "ring" : "indirect",
                         g_readPointer, ReadRegister(reg::kCpRbWptr));
                 }
+                if (!(initiator >> 31) && ((address & ~3u) & 0x1FFFFFFF) == g_fenceWord.load())
+                    if (auto sink = g_fenceSink.load())
+                    {
+                        sink(value);
+                        break;
+                    }
                 GpuWrite(address, (initiator >> 31) ? g_swapCount.load() : value);
                 break;
             }
@@ -804,7 +814,19 @@ namespace hc09::gpu
         g_ringSizeDwords = (1u << (sizeLog2 + 3)) / 4;
         g_readPointer = 0;
         std::fprintf(stderr, "[gpu] ring buffer at 0x%08X, %u dwords\n", g_ringBase, g_ringSizeDwords);
+        vk::Start();  // the Vulkan renderer, when selected (its window and device)
         std::thread(CommandProcessorThread).detach();
+    }
+
+    void RedirectFenceWord(uint32_t address, void (*sink)(uint32_t value))
+    {
+        g_fenceSink.store(sink);
+        g_fenceWord.store((address & ~3u) & 0x1FFFFFFF);
+    }
+
+    void StoreFenceWord(uint32_t address, uint32_t value)
+    {
+        Store<uint32_t>(PhysicalToGuest((address & ~3u) & 0x1FFFFFFF), value);
     }
 
     void EnableReadPointerWriteBack(uint32_t address, uint32_t blockSizeLog2)

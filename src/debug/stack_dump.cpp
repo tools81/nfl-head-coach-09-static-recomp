@@ -108,7 +108,10 @@ namespace hc09::debug
                 const uint64_t length = g_watches[i].length == 8 ? 2 : g_watches[i].length == 4 ? 3 : g_watches[i].length == 2 ? 1 : 0;
                 *slots[i] = reinterpret_cast<DWORD64>(GuestToHost(g_watches[i].address));
                 context.Dr7 |= 1ull << (i * 2);              // local enable
-                context.Dr7 |= 1ull << (16 + i * 4);         // RW = 01: data writes
+                // RW = 01: data writes; 11 with HC09_WATCH_READS=1: reads and writes.
+                static const bool reads = std::getenv("HC09_WATCH_READS") != nullptr;
+                context.Dr7 &= ~(3ull << (16 + i * 4));
+                context.Dr7 |= (reads ? 3ull : 1ull) << (16 + i * 4);
                 context.Dr7 &= ~(3ull << (18 + i * 4));
                 context.Dr7 |= length << (18 + i * 4);
             }
@@ -144,7 +147,7 @@ namespace hc09::debug
                         continue;
                     seen.push_back(stack);
                 }
-                std::fprintf(stderr, "[watch] write to 0x%08X, value now 0x%llX, host thread %lu:\n%s",
+                std::fprintf(stderr, "[watch] access to 0x%08X, value now 0x%llX, host thread %lu:\n%s",
                     g_watches[i].address, (unsigned long long)value, GetCurrentThreadId(), stack.c_str());
                 std::fflush(stderr);
             }
@@ -360,6 +363,104 @@ namespace hc09::debug
                         if (usage[i].first >= 1.0)
                             std::fprintf(stderr, " 0x%X=%.0f", usage[i].second, usage[i].first);
                     std::fprintf(stderr, "\n");
+                }
+            }).detach();
+        }
+
+        // HC09_SCAN_TDB=<seconds>[,...]: at each time, lists the EA TDB databases in guest memory
+        // (pool, virtual and physical heaps) that hold a table named by HC09_SCAN_TABLE (default
+        // DRPK), with the table's address and record count.
+        if (const char* scan = std::getenv("HC09_SCAN_TDB"))
+        {
+            std::vector<int> at;
+            for (const char* p = scan; *p;)
+            {
+                char* end = nullptr;
+                at.push_back(int(std::strtol(p, &end, 10)));
+                if (end == p)
+                    break;
+                p = *end == ',' ? end + 1 : end;
+            }
+            std::thread([at] {
+                const char* wanted = std::getenv("HC09_SCAN_TABLE") ? std::getenv("HC09_SCAN_TABLE") : "DRPK";
+                const char reversed[4] = { wanted[3], wanted[2], wanted[1], wanted[0] };
+                auto be32 = [](const uint8_t* p) { return uint32_t(p[0]) << 24 | p[1] << 16 | p[2] << 8 | p[3]; };
+                int waited = 0;
+                for (int seconds : at)
+                {
+                    std::this_thread::sleep_for(std::chrono::seconds(seconds - waited));
+                    waited = seconds;
+                    const std::pair<uint32_t, uint32_t> ranges[] = { { 0x00010000, 0x82000000 }, { 0xA0000000, 0xC0000000 } };
+                    // HC09_SCAN_BYTES=<text>: every place the text occurs (up to 40), whatever holds it.
+                    if (const char* text = std::getenv("HC09_SCAN_BYTES"))
+                    {
+                        int found = 0;
+                        const size_t length = std::strlen(text);
+                        for (auto [lo, hi] : ranges)
+                            for (uint32_t a = lo; a < hi - 64 && found < 40; a++)
+                                if (GuestToHost(a)[0] == uint8_t(text[0]) && std::memcmp(GuestToHost(a), text, length) == 0)
+                                {
+                                    const uint8_t* p = GuestToHost(a);
+                                    std::fprintf(stderr, "[tdb] %ds: \"%s\" at 0x%08X: %02X%02X%02X%02X %02X%02X%02X%02X | %02X%02X%02X%02X %02X%02X%02X%02X\n",
+                                        seconds, text, a, p[-8], p[-7], p[-6], p[-5], p[-4], p[-3], p[-2], p[-1], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11]);
+                                    found++;
+                                }
+                    }
+                    for (auto [lo, hi] : ranges)
+                        for (uint32_t a = lo; a < hi - 64; a += 4)
+                        {
+                            const uint8_t* p = GuestToHost(a);
+                            if (p[0] != 'D' || p[1] != 'B' || p[2] != 0 || p[3] != 8)
+                                continue;
+                            const uint32_t size = be32(p + 8), tables = be32(p + 16);
+                            if (tables == 0 || tables > 256 || size < 64 || size > 0x4000000)
+                                continue;
+                            const uint8_t* dir = p + 24;
+                            const uint8_t* data = dir + tables * 8 + 4;
+                            for (uint32_t t = 0; t < tables; t++)
+                                if (std::memcmp(dir + t * 8, reversed, 4) == 0)
+                                {
+                                    const uint8_t* table = data + be32(dir + t * 8 + 4);
+                                    const uint32_t address = uint32_t(table - GuestToHost(0));
+                                    if (std::memcmp(wanted, "DRPK", 4) == 0)
+                                    {
+                                        // Picks held by another team than their own (DPID bits 0-9, DPOD 10-19).
+                                        const uint32_t recordBytes = be32(table + 4), count = uint32_t(table[18]) << 8 | table[19];
+                                        const uint8_t* records = table + 36 + 16 * table[24];
+                                        int traded = 0;
+                                        for (uint32_t r = 0; r < count; r++)
+                                        {
+                                            const uint32_t bits = be32(records + r * recordBytes);
+                                            traded += (bits >> 22) != ((bits >> 12) & 0x3FF);
+                                        }
+                                        std::fprintf(stderr, "[tdb] DRPK: %d picks held by another team; record 0 at 0x%08X\n", traded,
+                                            uint32_t(records - GuestToHost(0)));
+                                    }
+                                    std::fprintf(stderr, "[tdb] %ds: database 0x%08X (%u tables, %u bytes): %s at 0x%08X, %u of %u records\n",
+                                        seconds, a, tables, size, wanted, address,
+                                        uint32_t(table[18]) << 8 | table[19], uint32_t(table[16]) << 8 | table[17]);
+                                    // HC09_SCAN_WATCH=<offset hex>[,...]: write watches (2 bytes) at those offsets
+                                    // from the table, armed on every guest thread.
+                                    if (const char* offsets = std::getenv("HC09_SCAN_WATCH"); offsets && g_watches.empty())
+                                    {
+                                        AddVectoredExceptionHandler(1, OnWatchHit);
+                                        for (const char* q = offsets; *q && g_watches.size() < 4;)
+                                        {
+                                            char* end = nullptr;
+                                            const uint32_t offset = uint32_t(std::strtoul(q, &end, 16));
+                                            if (end == q)
+                                                break;
+                                            g_watches.push_back({ address + offset, 2 });
+                                            std::fprintf(stderr, "[watch] 0x%08X (table + 0x%X) armed\n", address + offset, offset);
+                                            q = *end == ',' ? end + 1 : end;
+                                        }
+                                        std::lock_guard lock(g_mutex);
+                                        for (const auto& entry : g_threads)
+                                            ArmWatches(entry.handle);
+                                    }
+                                }
+                        }
+                    std::fflush(stderr);
                 }
             }).detach();
         }

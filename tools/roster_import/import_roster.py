@@ -26,6 +26,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tdb import SaveFile  # noqa: E402
+import draft_rounds  # noqa: E402
 
 FREE_AGENTS = 1009
 NO_PLAYER = 32767
@@ -320,9 +321,16 @@ def set_last_season(team_table):
             team_table.set(i, "TPST", ties)
 
 
+# The depth the game allows at each depth chart position (DCHT.PPOS; 91 in all). As a game starts it
+# copies both teams' charts into a table of 182 entries (DCGA): a deeper chart cuts the other team's
+# copy short and the game hangs at the kickoff (src/game_fixes.cpp).
+POSITION_DEPTH = [3, 4, 3, 6, 3, 3, 3, 3, 3, 3, 3, 3, 5, 3, 4, 3, 5, 3, 3, 3, 3, 5, 5, 3, 3, 3]
+
+
 def build_depth_charts(play, dcht, records_by_team):
-    """Rewrites DCHT in place: every rostered player at his position, best first, plus the
-    special-teams slots (21 KR, 22 PR, 23 kickoff, 24 long snapper, 25 third-down back).
+    """Rewrites DCHT in place: the rostered players at each position, best first, as deep as the game
+    allows (POSITION_DEPTH), plus the special-teams slots (21 KR, 22 PR, 23 kickoff, 24 long snapper,
+    25 third-down back).
     The table keeps its record count: lower slots are trimmed or the deepest positions padded
     with repeats until the total matches."""
     def rating(i, field):
@@ -336,7 +344,7 @@ def build_depth_charts(play, dcht, records_by_team):
             by_position.setdefault(play.get(i, "PPOS"), []).append(i)
         for position in range(21):
             ranked = sorted(by_position.get(position, []), key=lambda i: -rating(i, "POVR"))
-            entries += [(position, depth, play.get(i, "PGID")) for depth, i in enumerate(ranked)]
+            entries += [(position, depth, play.get(i, "PGID")) for depth, i in enumerate(ranked[:POSITION_DEPTH[position]])]
         returners = sorted((i for i in records if play.get(i, "PPOS") in (1, 3, 16, 17, 18)),
                            key=lambda i: -(rating(i, "PKRT") * 2 + rating(i, "PSPD")))
         kickers = sorted(by_position.get(19, []), key=lambda i: -rating(i, "POVR"))
@@ -517,6 +525,8 @@ def import_roster(csv_path, roster_path, out_path, report_path=None, contracts_p
     build_depth_charts(play, dcht, roster)
 
     clear_draft_class(db)
+    if contracts_path:
+        draft_rounds.set_draft_rounds(play, draft_rounds.contract_totals(contracts_path, play))
     rate_teams(play, team_table)
     set_last_season(team_table)
 

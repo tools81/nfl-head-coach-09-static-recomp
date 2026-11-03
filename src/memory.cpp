@@ -26,6 +26,18 @@ namespace hc09
 
         constexpr uint64_t kPhysicalSize = 0x20000000;
         constexpr uint64_t kPhysicalViews[] = { 0xA0000000, 0xC0000000, 0xE0000000 };
+        HANDLE g_physicalSection = nullptr;
+    }
+
+    uint8_t* PhysicalAlias()
+    {
+        static uint8_t* const alias = [] {
+            void* view = g_physicalSection ? MapViewOfFile(g_physicalSection, FILE_MAP_ALL_ACCESS, 0, 0, kPhysicalSize) : nullptr;
+            if (!view)
+                std::fprintf(stderr, "[memory] cannot map another view of physical memory (%lu)\n", GetLastError());
+            return static_cast<uint8_t*>(view);
+        }();
+        return alias;
     }
 
     bool AllocateGuestMemory()
@@ -68,6 +80,7 @@ namespace hc09
         HANDLE section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, DWORD(kPhysicalSize), nullptr);
         if (!section)
             return false;
+        g_physicalSection = section;
         // HC09_NO_E_WINDOW=1 leaves 0xE0000000 unmapped, so any use of it faults (debugging).
         const bool skipEWindow = std::getenv("HC09_NO_E_WINDOW") != nullptr;
         for (uint64_t view : kPhysicalViews)

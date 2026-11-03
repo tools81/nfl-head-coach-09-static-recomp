@@ -52,9 +52,22 @@ Good to know:
 
 - HC27 uses the same disc image as the original game, and the two keep separate saves
   (HC27's are in `build\userdata-hc27`), so a career in one never touches the other.
+- The rosters are up to date through week 8 of the 2026 season: trades, waiver claims, signings and
+  releases since the ratings were taken are applied. Players the ratings don't have (most practice
+  squad call-ups) are missing.
 - Updates (automatic, or running setup again) bring new versions of the rosters and images too.
 - If HC27 says the disc's default roster is not where it expects it, your disc image is a
   different version of the game from the one the rosters were made from; HC09.exe still works.
+- Draft picks get today's rookie contracts: when a career's draft ends, every pick is signed to the
+  four-year deal his pick number pays, with no negotiating with agents. Rosters can then run past
+  53 players until the training camp cut day, as NFL offseason rosters do.
+- First-round picks come with the fifth-year option. In the off-season before a first-round pick's
+  fourth year, he appears on the restricted free agent tender screen with two choices instead of
+  the tenders: decline the option, or exercise it for a fifth year at his position's option salary
+  (the average of the 3rd to 25th highest salaries at the position; the Pro Bowl tiers are not
+  applied). The computer's teams decide on their own. A career started before this release needs
+  its players' draft rounds set once: `python tools/roster_import/draft_rounds.py --save
+  build/userdata-hc27/content/00000001/CAREER-<name>/CAREER-<name>`.
 - The original game is unchanged: HC09.exe ignores the `hc27` folder.
 
 ## Status
@@ -72,6 +85,7 @@ Good to know:
 | Physical memory windows (0xA0000000 / 0xC0000000 / 0xE0000000 aliased) | implemented (0xE0000000's 4 KiB offset not reproduced) |
 | Xenos shader microcode → HLSL translator | implemented; all 148 shaders captured from menus and gameplay translate and compile. Compiled with DXC (shader model 6.0, `dxcompiler.dll` and `dxil.dll` copied from the Windows SDK at build time) in the background and cached in `build/shadercache`: the 148 take about 5 s in all, at most 0.12 s each, against 52 s and up to 6 s with D3DCompile, which is used when DXC is missing or the GPU lacks shader model 6.0 |
 | D3D12 renderer | draws, depth/stencil, culling, blending, alpha test, textures (linear/tiled, full mip chains incl. packed mip tails, render-to-texture mips, anisotropic filtering, border colours, cube maps, volumes, stacked arrays with normalized layer coordinates, common formats, resolved depth), resolves (incl. tiled colour and depth strips and the red/blue copy swap), present, fast clears through multisampled EDRAM aliases, 4x MSAA for the multisampled surfaces the 3D scenes render to (`HC09_NO_MSAA=1` turns it off) |
+| Vulkan renderer (default) | from NFL Head Coach 09 for PC (`src/vk`): draws the game's Direct3D calls with Vulkan; up to 240 fps (`FrameRate`) and 4x resolution (`Scale`); falls back to D3D12 without Vulkan 1.3 |
 | Audio output | WASAPI shared mode, 5.1 mix downmixed to stereo |
 | XMA decoder | FFmpeg's XMA2 decoder (LGPL build in `thirdparty/ffmpeg`), 16-bit PCM into the title's output rings |
 | Music player (XMP) | no user soundtrack: always idle, controls accepted |
@@ -97,11 +111,11 @@ window has focus: Enter = Start, Esc = Back, Z/Space = A, X = B, C = X, V = Y, Q
 F11 or Alt+Enter toggles borderless fullscreen. The window can be resized freely; the picture
 keeps its 16:9 shape, with black bars where the window's shape differs.
 
-`set HC09_RESOLUTION_SCALE=2` (up to 4) renders at that multiple of the game's 1280x720, e.g.
+With the D3D12 renderer, `set HC09_RESOLUTION_SCALE=2` (up to 4) renders at that multiple of the game's 1280x720, e.g.
 2560x1440, for a sharper picture in fullscreen on a high-resolution display. Menus and gameplay
 held 30-35 fps at 2x in testing; 1x is the default.
 
-The 3D scenes get two effects the original does not have: ambient occlusion (soft shading where
+With the D3D12 renderer (see below), the 3D scenes get two effects the original does not have: ambient occlusion (soft shading where
 surfaces meet, such as a player's feet on the field or the folds of a coach's jacket) and
 reflections on the field. The turf is no mirror, so a reflection is drawn dark and with strong
 contrast, like a shadow cast by the player near where he stands, longest at low camera angles. Both work from the scene's depth buffer, so they cost little and need no change to the
@@ -114,6 +128,41 @@ Reflections=1
 ```
 
 `set HC09_SSAO=<strength>` and `set HC09_SSR=<strength>` override the file for one run.
+
+### Renderers: Vulkan (60 fps, 1440p) and D3D12
+
+The game is drawn by a renderer built on Vulkan (it comes from the NFL Head Coach 09 for PC
+project; see `THIRD_PARTY_NOTICES.md`), which can run the game at 60 frames per second and at
+higher resolutions. By default it keeps the original game's pace (about 35 fps) at 720p. To get
+60 fps at 1440p, open `hc09.ini` in your install folder with Notepad and add:
+
+```ini
+[Graphics]
+FrameRate=60
+Scale=2
+```
+
+(If the file already has a `[Graphics]` section, add the two lines under it.) The settings:
+
+- `FrameRate`: frames per second, 30 to 240. Leave it out (or use 35) for the game's own pace.
+  The game's clock runs in real time at any setting: plays and game time are not sped up.
+- `Scale`: the picture is drawn at this multiple of the game's 1280x720: 1 = 720p, 2 = 1440p,
+  3 = 4K. Higher looks sharper in fullscreen and needs a faster graphics card.
+- `VSync=off` presents without waiting for the display (may tear); on by default.
+- `Fullscreen=on` starts in borderless fullscreen (F11 or Alt+Enter still toggles it).
+- `MSAA`: anti-aliasing, `1` as the game asks (4x in 3D scenes, the default), `2` at most 2x, `0`
+  off. Lower settings help slower cards at `Scale=3`.
+- `GPU`: on a PC with two graphics chips, `discrete`, `integrated`, or part of the card's name.
+
+The Vulkan renderer needs a graphics card and driver with Vulkan 1.3 (any card from the last
+several years). On a PC without one, the game uses the older D3D12 renderer instead, which runs at
+the game's own pace and draws the ambient occlusion and field reflections described above (the
+Vulkan renderer does not). To use the D3D12 renderer anyway, add `Renderer=d3d12` under
+`[Graphics]`. HC27's rosters, portraits and logos work with both.
+
+`set HC09_RENDERER=d3d12` (or `vulkan`) picks a renderer for one run, and `HC09_FRAMERATE`,
+`HC09_SCALE`, `HC09_VSYNC`, `HC09_FULLSCREEN`, `HC09_NATIVE_MSAA` and `HC09_GPU` override the
+settings above the same way. `HC09_RESOLUTION_SCALE` is the D3D12 renderer's resolution.
 
 ## Rosters and replacement images
 
@@ -253,6 +302,8 @@ tag, re-patches XenonRecomp if the pin changed, and recompiles and rebuilds the 
 | `config/HC09_switch_tables.toml` | Generated by XenonAnalyse |
 | `patches/` | XenonRecomp changes: new instructions, `bdnzf` fix |
 | `src/` | Host runtime: memory map, thread block, kernel/XAM imports |
+| `src/gpu/` | Command processor and the D3D12 renderer |
+| `src/vk/` | The Vulkan renderer and frame pacing (MIT, `src/vk/LICENSE`) and their adapter (`vk_adapter.cpp`) |
 | `src/common/` | Shared by the game and setup: `hc09.ini` settings, GitHub release check |
 | `tools/installer/` | `HC09Setup.exe`: install/update wizard (disc import, build pipeline) |
 | `tools/` | Extraction, decryption and analysis scripts |
@@ -269,7 +320,12 @@ tag, re-patches XenonRecomp if the pin changed, and recompiles and rebuilds the 
   8 bytes at (pointer stored at 0x83229400) + 0x164, resolved 5 s after startup.
   `A6713ED4:4` watches 4 bytes (1, 2, 4 or 8, aligned); `HC09_WATCH_VALUE=<hex>` reports only
   writes that leave that value and `HC09_WATCH_AFTER=<seconds>` arms the watches that late. Each
-  distinct writer stack is printed once.
+  distinct writer stack is printed once. `HC09_WATCH_READS=1` catches reads as well (e.g. which
+  code uses a string in the image).
+- `set HC09_SCAN_TDB=40,230` lists, at those seconds after startup, the game's databases in guest
+  memory that hold the table `HC09_SCAN_TABLE` (default `DRPK`, the draft picks), with its address
+  and record count. `HC09_SCAN_WATCH=B4,BC` puts write watches at those offsets from the table found;
+  `HC09_SCAN_BYTES=<text>` lists where a text occurs in memory.
 - `set HC09_ENGINE_LOG=1` prints the engine's own debug messages (compiled out in retail) as
   `[engine] ...`, e.g. `Asset missing, using default: <path>` for every texture a material
   references that no loaded package provides.
@@ -310,8 +366,9 @@ tag, re-patches XenonRecomp if the pin changed, and recompiles and rebuilds the 
 - `set HC09_DUMP_SHADERS=1` writes each new shader's microcode to `build/shaders/`;
   `build\hc09\XenosDisasm.exe [--hlsl] build\shaders\*.bin` disassembles, translates and
   compiles them.
-- `set HC09_SCREENSHOT=300` saves frame 300 as `build/screenshot.bmp`
-  (`python tools/bmp_to_png.py build/screenshot.bmp out.png`).
+- `set HC09_SCREENSHOT=300,900` saves frames 300 and 900 (counted as `HC09_PRESS` counts them) as
+  `build/screenshot_300.bmp` and so on (`python tools/bmp_to_png.py build/screenshot_300.bmp out.png`). With
+  either renderer: Vulkan saves the window as shown, D3D12 its back buffer.
 - `set HC09_TRACE_NAMES=1` (HC27) prints each distinct asset name the game looks up in its archives
   (packages, models, textures), with the caller.
 - `set HC09_FXC=1` compiles shaders with D3DCompile instead of DXC; `HC09_SYNC_SHADERS=1` compiles each

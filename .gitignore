@@ -5,6 +5,7 @@ ppc/
 .venv/
 thirdparty/XenonRecomp/
 thirdparty/ffmpeg/
+thirdparty/vulkan/
 __pycache__/
 *.pyc
 hc09.ini

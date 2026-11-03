@@ -193,8 +193,6 @@ namespace hc09::gpu
         uint64_t stagingSize_ = 0;
         D3D12_RESOURCE_STATES stagingState_ = D3D12_RESOURCE_STATE_COMMON;
         std::unordered_map<std::wstring, Replacement> replacements_;
-        std::unordered_map<uint64_t, std::wstring> hashedFiles_;  // content hash -> replacement file
-        bool hashedListed_ = false;
         std::unordered_map<uint64_t, Entry> entries_;
         std::map<uint32_t, Resolved> resolved_;
         std::unordered_map<uint32_t, Composed> composed_;

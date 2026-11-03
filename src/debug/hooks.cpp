@@ -20,8 +20,6 @@
 #include "kernel/threads.h"
 
 extern "C" PPC_FUNC(__imp__sub_82D357D0);
-extern "C" PPC_FUNC(__imp__sub_823288C8);
-extern "C" PPC_FUNC(__imp__sub_82323A30);
 
 using namespace hc09;
 
@@ -36,44 +34,10 @@ PPC_FUNC(sub_82D357D0)
         Load<int32_t>(self + 0x3C), Load<int32_t>(self + 0x40), ctx.r3.u32);
 }
 
-// D3D fence wait (device, target, flags): loops on sub_82323A30 while the GPU-written fence
-// value at *(device + 10896) has not passed `target` relative to the latest issued fence
-// (device + 10908). Reports a wait every second while it lasts.
 namespace
 {
-    // HC09_TRACE_D3D=1 enables the D3D fence-wait and kickoff diagnostics below.
+    // HC09_TRACE_D3D=1 enables the D3D kickoff and worker diagnostics below.
     const bool g_traceD3d = std::getenv("HC09_TRACE_D3D") != nullptr;
-    thread_local uint32_t t_waitDevice = 0, t_waitTarget = 0;
-    thread_local std::chrono::steady_clock::time_point t_waitStart, t_waitReported;
-}
-
-PPC_FUNC(sub_823288C8)
-{
-    t_waitDevice = ctx.r3.u32;
-    t_waitTarget = ctx.r4.u32;
-    t_waitStart = t_waitReported = std::chrono::steady_clock::now();
-    __imp__sub_823288C8(ctx, base);
-    t_waitDevice = 0;
-}
-
-PPC_FUNC(sub_82323A30)
-{
-    __imp__sub_82323A30(ctx, base);
-    if (!g_traceD3d || t_waitDevice == 0)
-        return;
-    const auto now = std::chrono::steady_clock::now();
-    if (now - t_waitReported < std::chrono::seconds(1))
-        return;
-    t_waitReported = now;
-    const uint32_t device = t_waitDevice, fencePtr = Load<uint32_t>(device + 10896);
-    std::fprintf(stderr, "[hook] fence wait %.0f s (thread 0x%X): device 0x%08X target 0x%08X issued 0x%08X completed@0x%08X = 0x%08X\n",
-        std::chrono::duration<double>(now - t_waitStart).count(), CurrentThreadId(), device, t_waitTarget, Load<uint32_t>(device + 10908),
-        fencePtr, Load<uint32_t>(fencePtr));
-    // The two D3D worker contexts (threads 0x130 and 0x134): queue indices, entries, event.
-    for (uint32_t worker : { 0xAA7FD4DCu, 0xAA7FD52Cu })
-        std::fprintf(stderr, "    worker 0x%08X idx %u queue consumed %u produced %u [%08X %08X %08X %08X] event state %d%c", worker,
-            Load<uint32_t>(worker + 4), Load<uint32_t>(worker + 60), Load<uint32_t>(worker + 56), Load<uint32_t>(worker + 64),
-            Load<uint32_t>(worker + 68), Load<uint32_t>(worker + 72), Load<uint32_t>(worker + 76), Load<int32_t>(worker + 32 + 4), 10);
 }
 
 // D3D KickOff (device): publishes the device's ring write position to CP_RB_WPTR. Logs any
@@ -105,25 +69,6 @@ PPC_FUNC(sub_82327F80)
             gpu::FenceTraceActive()) && kicksTraced++ < 600)
         std::fprintf(stderr, "[kick] thread 0x%X caller 0x%08X wptr %u -> %u%c", CurrentThreadId(), caller, before,
             gpu::ReadRegister(0x1C5), 10);
-}
-
-// D3D submit routine (device, list, flags), run by the render thread and, on its 30 ms
-// wait timeout, by the D3D worker thread.
-extern "C" PPC_FUNC(__imp__sub_82333410);
-
-PPC_FUNC(sub_82333410)
-{
-    static const int traceKicksAfter = std::getenv("HC09_TRACE_KICKS") ? std::atoi(std::getenv("HC09_TRACE_KICKS")) : -1;
-    static const auto start = std::chrono::steady_clock::now();
-    static std::atomic<int> traced{ 0 };
-    const bool trace = ((traceKicksAfter >= 0 && std::chrono::steady_clock::now() - start > std::chrono::seconds(traceKicksAfter)) ||
-        gpu::FenceTraceActive()) && traced++ < 300;
-    const uint32_t thread = CurrentThreadId(), list = ctx.r4.u32, flags = ctx.r5.u32, caller = uint32_t(ctx.lr);
-    if (trace)
-        std::fprintf(stderr, "[submit] enter thread 0x%X caller 0x%08X list 0x%08X flags 0x%X%c", thread, caller, list, flags, 10);
-    __imp__sub_82333410(ctx, base);
-    if (trace)
-        std::fprintf(stderr, "[submit] leave thread 0x%X%c", thread, 10);
 }
 
 

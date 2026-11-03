@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,7 @@
 #include "kernel/heap.h"
 #include "kernel/threads.h"
 #include "kernel/variables.h"
+#include "vk/vk_select.h"
 #include "kernel/vfs.h"
 #include "kernel/xex.h"
 
@@ -89,7 +91,8 @@ namespace
                 std::fprintf(stderr, "[fault] %s guest address 0x%08llX\n",
                     record->ExceptionInformation[0] ? "write to" : "read from", uint64_t(address - guest));
             else
-                std::fprintf(stderr, "[fault] host address %p\n", reinterpret_cast<void*>(address));
+                std::fprintf(stderr, "[fault] %s host address %p (guest memory at %p)\n", record->ExceptionInformation[0] ? "write to" : "read from",
+                    reinterpret_cast<void*>(address), static_cast<void*>(hc09::g_base));
 
             // A jump to 0 (an indirect guest call with no recompiled target) leaves the
             // caller's return address at the top of the stack; unwind from there.
@@ -100,8 +103,12 @@ namespace
                 context.Rsp += 8;
                 std::fprintf(stderr, "[fault] jump to address 0 (missing indirect call target?)\n");
             }
-            static std::atomic<bool> reported{ false };
-            if (!reported.exchange(true))
+            // Several threads can fault together; the first unhandled one ends the process, so each waits its
+            // turn and the stacks print one after the other (a few at most).
+            static std::mutex mutex;
+            static int reported = 0;
+            std::lock_guard lock(mutex);
+            if (reported++ < 4)
                 hc09::debug::PrintStackFromContext(&context);
         }
         else if (record->ExceptionCode == EXCEPTION_BREAKPOINT)
@@ -187,6 +194,7 @@ int main(int argc, char** argv)
     timeBeginPeriod(1);
     FindProjectFolder();
     const hc09::Settings settings = hc09::LoadSettings(std::filesystem::current_path());
+    hc09::vk::Configure();  // the Vulkan renderer's switches, when hc09.ini or HC09_RENDERER selects it
     if (settings.autoUpdate && OfferUpdate())
         return EXIT_SUCCESS;
     const char* imagePath = argc > 1 ? argv[1] : "build/default.pe";
@@ -199,6 +207,7 @@ int main(int argc, char** argv)
 
     if (!hc09::AllocateGuestMemory())
         return StartupFailure("Failed to reserve the 4 GiB guest address space.");
+    hc09::vk::ReserveMemory();
     if (!LoadImage(imagePath))
     {
         std::snprintf(message, sizeof(message),

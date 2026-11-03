@@ -157,6 +157,42 @@ the game's default: everything it needs goes in the `hc27` folder of the install
    They write their tables to `hc27/disc` too; each tool replaces only its own files there.
 9. Run `build/hc09/HC27.exe`. Its saves are kept in `build/userdata-hc27`, apart from HC09's.
 
+## Keeping up with the season
+
+- `roster_moves.py` brings a roster up to date with the league's transactions (trades, waiver claims,
+  signings, releases) from NFL.com's transaction pages, saved as a CSV: each player goes to the team
+  of his latest transaction, and depth charts and team ratings are rebuilt. Players the roster does
+  not have (practice squad and undrafted players missing from the ratings) cannot be added. The
+  week 8 2026 roster was made with
+
+  ```sh
+  python tools/roster_import/roster_moves.py --roster hc27/ROSTER --transactions tools/roster_import/data/transactions_2026.csv \
+      --since 2026/08/01 --out tools/roster_import/data/ROSTER-M27_week8 --report tools/roster_import/data/moves_week8.csv
+  ```
+
+  and is `hc27/ROSTER`, with its depth charts rebuilt and `draft_rounds.py` applied. The tools
+  build depth charts no deeper than the game allows at each position (`POSITION_DEPTH` in
+  `import_roster.py`, 91 entries a team); a deeper chart makes the game hang at the kickoff.
+- `career_picks.py` gives new careers the real owners of the 2027 and 2028 draft picks (the trades
+  are listed in the script). A career takes its picks from a template on the disc (the 2008 game's,
+  with 2008's trades); `python tools/roster_import/career_picks.py --iso "iso/NFL Head Coach 09.iso"`
+  writes the template to `hc27/disc` with the 2027 trades, and `hc27/draft_picks.txt` with the 2028
+  ones, which HC27 gives a career the first time it is saved (a pre-season start makes the 2028
+  picks itself; `src/common/draft_picks.cpp`). `--career <save>` instead applies both years' trades
+  to an existing career saved in its first season (a `.bak` copy is kept).
+- `rookie_scale.py` writes `hc27/rookie_scale.txt`, the rookie wage scale: for each of the draft's
+  224 picks, a four-year deal's total value, signing bonus and yearly salaries, taken from the 2026
+  draft class's real contracts in `hc27/ROSTER` (ranked by value, so the nth largest is the nth
+  pick's). When a career's draft ends, HC27 signs every pick to his slot instead of leaving the
+  teams to negotiate with their picks' agents (`src/common/rookie_scale.cpp`). Rerun it after
+  rebuilding the roster with new contracts.
+- `draft_rounds.py` sets the draft round and pick (PDRO, PDPI) of the players still on their rookie
+  contracts, which the imported players otherwise take from the 2008 records: ranking each class's
+  four-year rookie deals by their value as signed (from `data/contracts.csv`) gives back the draft
+  order. HC27's fifth-year option (`src/common/fifth_year_option.cpp`) needs the first round.
+  `import_roster.py` runs it; `python tools/roster_import/draft_rounds.py` applies it to
+  `hc27/ROSTER`, and `--save <career>` to a career started before it.
+
 The roster can also be played in HC09 as a save: copy it to
 `build/userdata/content/00000001/ROSTER-M27/ROSTER-M27`, create `ROSTER-M27.name` beside that
 folder holding a name in UTF-16, and load it with **My Coach > File Management > Load** (HC09
