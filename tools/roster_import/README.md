@@ -100,16 +100,28 @@ the game's default: everything it needs goes in the `hc27` folder of the install
    when creating a coach. Without coaches,
    copy `data/ROSTER-M27` to `hc27/ROSTER` instead.
 
-   Then rename the free agents:
+   Then fill the free-agent pool, which is otherwise the 2008 game's (its own free agents, its
+   2008 draft class and the 2008 players the import left over). EA's ratings site leaves free
+   agents out; madden.tools lists them. Open https://madden.tools/players in a browser, run the
+   `EXPORT_JS` snippet from `madden_tools.py` in the console, save what it returns as
+   `data/madden_tools_fa.txt`, and:
 
    ```sh
-   python tools/roster_import/free_agents.py --roster hc27/ROSTER
+   python tools/roster_import/madden_tools.py --export tools/roster_import/data/madden_tools_fa.txt \
+       --out tools/roster_import/data/free_agents.csv
+   python tools/roster_import/free_agents.py --roster hc27/ROSTER --players tools/roster_import/data/free_agents.csv \
+       --report tools/roster_import/data/free_agents_report.csv
+   python tools/roster_import/fetch_portraits.py --report tools/roster_import/data/free_agents_report.csv \
+       --roster hc27/ROSTER --keep
    ```
 
-   The free-agent pool is otherwise the 2008 game's (its own free agents, its 2008 draft class
-   and the 2008 players the import left over). Each of them gets a made-up name that no real
-   player, 2008 or current, has, and the generic portrait. Their ratings, ages and positions
-   stay as they are.
+   The best free agents by overall (up to the pool's 512 records) take over its records, one of
+   their position first, unsigned like the game's own. Only portrait ids the game's library has can
+   show a picture, and the rostered players hold most of them, so the best free agents get the
+   rest (about 275) and the others the silhouette. `--keep` leaves the rostered players' pictures
+   in place. Without `--players`, every free agent gets a made-up name (never a real player's)
+   and the silhouette instead; with too few players, the records left over do.
+
 5. Team logos (optional; `TEAMS` in the script lists the textures known so far for every team): the game's images of a team's logo and name
    are textures inside the disc's archives, so they are replaced by their contents. Run HC27 once
    with `set HC09_DUMP_HASHED=1` and go through the screens that show the team: Coach Now's Team

@@ -158,6 +158,9 @@ def main():
     parser.add_argument("--looks", help="CSV of first, last, skin (light, medium or dark) and optionally head "
                                         "(PGHE): overrides the skin tone measured from those players' images")
     parser.add_argument("--delay", type=float, default=0.05, help="seconds between downloads")
+    parser.add_argument("--keep", action="store_true", help="keep the images already installed that the report "
+                                                            "does not list (for a report of only some players, "
+                                                            "such as free_agents.py's)")
     args = parser.parse_args()
 
     os.makedirs(args.cache, exist_ok=True)
@@ -187,7 +190,7 @@ def main():
         shutil.copyfile(cached, os.path.join(args.out, name))
 
     removed = 0
-    for name in os.listdir(args.out):
+    for name in [] if args.keep else os.listdir(args.out):
         if name.lower().endswith(".png") and name not in wanted:
             os.remove(os.path.join(args.out, name))
             removed += 1

@@ -1,23 +1,35 @@
-"""Turns the roster's free agents into made-up players.
+"""The roster's free-agent pool: real free agents where there are ratings for them, made-up
+players for the rest.
 
-    python tools/roster_import/free_agents.py --roster hc27/ROSTER [--out hc27/ROSTER] [--seed 2026]
+    python tools/roster_import/free_agents.py --roster hc27/ROSTER [--players data/free_agents.csv] \
+        [--report data/free_agents_report.csv] [--out hc27/ROSTER] [--seed 2026]
 
 After import_roster.py the free-agent pool (TGID 1009) is the 2008 game's: its own free agents,
 its 2008 draft class and the 2008 players the import left over (Keith Rivers, Peyton Hillis, ...).
-This gives each of them a made-up name (first and last name drawn from the lists below, never one
-an imported player has, never two the same) and the game's generic portrait, so the pool reads
-as present-day unknowns. Ratings, ages, positions, bodies and colleges stay as they are. Run it
-after import_coaches.py has written hc27/ROSTER (it changes the file in place unless --out).
+
+--players is a ratings CSV of today's free agents (madden_tools.py makes one from madden.tools,
+which lists them; EA's ratings site does not). Each takes over a free-agent record, one of his
+position first, exactly as import_roster.py fills the teams' records: name, body, ratings, a
+portrait id of his own (the record's 2008 one where nobody else has it), and no contract, like the
+game's own free agents. --report lists them in import_roster.py's report format, for
+fetch_portraits.py --keep, which installs their pictures and matches their heads.
+
+The records left over get a made-up name (drawn from the lists below, never one a real player,
+2008 or current, has, never two the same) and the generic portrait. Their 2008 ratings are kept.
+Run it on the roster import_coaches.py wrote, before any earlier run of this (it needs the 2008
+records' portrait ids); it changes the file in place unless --out.
 """
 
 import argparse
 import collections
+import csv
 import os
 import random
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tdb import SaveFile  # noqa: E402
+import import_roster as importer  # noqa: E402
 
 FREE_AGENTS = 1009
 
@@ -55,15 +67,53 @@ Sutton Swanson Talbot Tate Teague Thornton Tillman Townsend Trammell Tucker Unde
 Vaughn Wade Walton Ware Watkins Weaver Webster Whitfield Wilder Winslow Wooten Yates York""".split()
 
 
-def rename_free_agents(roster, out, seed):
+def build_free_agents(roster, out, seed, players_path=None, report_path=None):
     save = SaveFile(roster)
     play = save.db.tables["PLAY"]
-    fa = [i for i in range(play.count) if play.get(i, "TGID") == FREE_AGENTS]
-    taken = {(play.get(i, "PFNA"), play.get(i, "PLNA")) for i in range(play.count)}  # nobody real, 2008 or now
+    records = [i for i in range(play.count) if play.get(i, "TGID") == FREE_AGENTS]
+    real = importer.load_players(players_path) if players_path else []
+    real.sort(key=lambda p: -p["stats"]["overall"])
+    if len(real) > len(records):
+        print(f"{len(real) - len(records)} free agents left out: the pool has {len(records)} records")
+        real = real[:len(records)]
+
+    # Real free agents into records of their position first, then any.
+    available = list(records)
+    chosen = {}
+    for p in real:
+        match = next((i for i in available if play.get(i, "PPOS") == p["position"]), None)
+        if match is not None:
+            available.remove(match)
+            chosen[id(p)] = match
+    for p in real:
+        if id(p) not in chosen:
+            chosen[id(p)] = available.pop(0)
+    assignments = [(chosen[id(p)], p) for p in real]
+    for i, p in assignments:
+        importer.write_player(play, i, p, FREE_AGENTS)
+        for field in importer.CONTRACT_FIELDS:  # unsigned
+            play.set(i, field, 0)
+    # Portrait ids: the rostered players keep theirs, each real free agent gets one of his own.
+    # Only ids the game's portrait library has can show a picture, and those are the ids the 2008
+    # roster uses: the ones no rostered player holds go to the best free agents (the retired
+    # legends' too, who then show the silhouette); the rest get the silhouette.
+    counts = collections.Counter(play.get(i, "PSXP") for i in range(play.count))
+    generic = max((k for k in counts if k), key=lambda k: counts[k])
+    rostered = [i for i in range(play.count) if 1 <= play.get(i, "TGID") <= 32
+                and play.get(i, "PSXP") not in (0, generic)]  # the silhouette ones stay so
+    held = {play.get(i, "PSXP") for i in rostered}
+    room = sum(1 for k, n in counts.items() if k and n == 1 and k not in held)
+    pictured = [i for i, p in assignments if p["avatar"]][:room]
+    unpictured = [i for i, _ in assignments if i not in set(pictured)]
+    importer.assign_portrait_ids(play, rostered + pictured, unpictured)
+    pictured = set(pictured)
+
+    # The rest: made-up names, the generic portrait.
+    taken = {(play.get(i, "PFNA"), play.get(i, "PLNA")) for i in range(play.count)}
     counts = collections.Counter(play.get(i, "PSXP") for i in range(play.count))
     generic = max((k for k in counts if k), key=lambda k: counts[k])
     rng = random.Random(seed)
-    for i in fa:
+    for i in available:
         while True:
             name = (rng.choice(FIRST), rng.choice(LAST))
             if name not in taken:
@@ -74,13 +124,25 @@ def rename_free_agents(roster, out, seed):
         play.set(i, "PSXP", generic)  # no 2008 player's photo
     save.fix_checksums()
     save.save(out)
-    print(f"{len(fa)} free agents renamed; wrote {out}")
+    print(f"{len(assignments)} real free agents ({len(pictured)} with their picture), {len(available)} made up; "
+          f"wrote {out}")
+
+    if report_path:
+        with open(report_path, "w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["pgid", "portrait_id", "madden_id", "first", "last", "team", "position", "overall", "avatarUrl"])
+            for i, p in assignments:
+                w.writerow([play.get(i, "PGID"), play.get(i, "PSXP"), p["id"], p["first"], p["last"], FREE_AGENTS,
+                            importer.POSITION_NAMES[p["position"]], p["stats"]["overall"],
+                            p["avatar"] if i in pictured else ""])
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--roster", required=True)
+    parser.add_argument("--players", help="ratings CSV of today's free agents (madden_tools.py)")
+    parser.add_argument("--report", help="write the real free agents with their player and portrait ids")
     parser.add_argument("--out", help="defaults to --roster (in place)")
     parser.add_argument("--seed", type=int, default=2026)
     args = parser.parse_args()
-    rename_free_agents(args.roster, args.out or args.roster, args.seed)
+    build_free_agents(args.roster, args.out or args.roster, args.seed, args.players, args.report)
