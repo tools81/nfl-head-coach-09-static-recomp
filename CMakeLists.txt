@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(HC09Recomp VERSION 0.9.3 LANGUAGES C CXX)
+project(HC09Recomp VERSION 0.9.4 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -199,6 +199,11 @@ target_compile_definitions(HC27 PRIVATE HC09_EDITION_HC27)
 add_executable(XenosDisasm tools/xenos_disasm.cpp src/gpu/ucode.cpp src/gpu/hlsl_translator.cpp)
 target_link_libraries(XenosDisasm PRIVATE d3dcompiler)
 target_include_directories(XenosDisasm PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+# The HD texture pack maker (hc09.ini HDTextures=on; the game starts it when it closes).
+add_executable(HC09HDPack tools/hdpack/hdpack.cpp)
+target_compile_definitions(HC09HDPack PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(HC09HDPack PRIVATE windowscodecs ole32 bcrypt)
 
 # XMA decoder experiment tool (decodes HC09_XMA_DUMP output under several configurations).
 add_executable(XmaTest tools/xma_test.cpp)

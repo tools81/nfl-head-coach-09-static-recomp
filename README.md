@@ -127,7 +127,8 @@ AmbientOcclusion=1
 Reflections=1
 ```
 
-`set HC09_SSAO=<strength>` and `set HC09_SSR=<strength>` override the file for one run.
+`set HC09_SSAO=<strength>` and `set HC09_SSR=<strength>` override the file for one run. The Vulkan renderer
+also has post-processing (bloom, colour grading and depth of field; see its settings below).
 
 ### Renderers: Vulkan (60 fps, 1440p) and D3D12
 
@@ -161,6 +162,30 @@ Scale=2
   screen pixel covers.
   `bilinear` stretches it as before.
 - `Sharpening`: `0` (off) to `100`, `75` by default; applied whenever the picture is scaled.
+- `SmoothMotion`: `on` by default. The game draws players and the camera at the full frame rate, but
+  the ball and a few objects only move 30 times a second; this draws them in even steps between those
+  moves (about 1/30 s behind). `off` shows them as the game moves them.
+- `HDTextures`: `on` builds an HD texture pack on your PC as you play. The game saves each texture
+  it loads into `build\hashed`, and when you close it, `HC09HDPack.exe` upscales the new ones 4x with
+  [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) on your graphics card and saves them in
+  `textures\hd`, where the game loads them from the next start. The first run downloads the upscaler
+  (45 MB) into `thirdparty\realesrgan`. Data textures (normal maps, masks) are left as the game has
+  them. The pack is made from your own copy of the game and stays on your PC. `off` by default.
+- `Bloom`, `ColorGrading` and `DepthOfField`: post-processing of the 3D scenes (never the menus or
+  on-field graphics), each a strength where `0` is off and `1` the default. Bloom makes stadium lights and
+  other near-white highlights glow softly. Colour grading adds a filmic roll-off into white (so the bloom
+  never clips), a little contrast and colour, and a faint vignette. Depth of field softens what lies beyond
+  the middle of the picture, as a TV camera's long lens does, focusing as the camera moves; it is `0` (off)
+  by default, since it also softens the far side of the field during play. Try `DepthOfField=1`.
+- `HDR`: `on` shows the game in HDR on an HDR monitor (turn HDR on in Windows' display settings first; without
+  it the game stays in SDR). The picture keeps its look, with SDR white at `HDRPaperWhite` nits (`200` by
+  default; raise it if the game looks dim next to the desktop), while the 3D scene's highlights (stadium lights,
+  sky, sunlit white uniforms, field paint) go brighter, up to `HDRPeak` nits (`1000` by default; set it to your
+  monitor's peak brightness). The menus and on-field graphics stay at paper white. `off` by default.
+- `Crowd`: `on` by default. The game fills the stands with cards of 16 animated fans, so every fan of a kind
+  moves in step with the others. This gives each seat its own moment of the fans' last second of movement, and
+  mirrors and shades some of them, so the stands look less like a repeating pattern. `off` draws the crowd as
+  the game does.
 - `AspectRatio`: for ultrawide screens, `21:9`, `32:9`, any `<width>:<height>`, or `auto` for your
   screen's shape; `16:9` (the game's own) by default. The 3D scenes fill the wider screen and show more at
   the sides, while the menus and on-field graphics keep their shape in the middle. Things just past
@@ -173,7 +198,7 @@ the game's own pace. To use the D3D12 renderer anyway, add `Renderer=d3d12` unde
 `[Graphics]`. HC27's rosters, portraits and logos work with both.
 
 `set HC09_RENDERER=d3d12` (or `vulkan`) picks a renderer for one run, and `HC09_FRAMERATE`,
-`HC09_SCALE`, `HC09_VSYNC`, `HC09_FULLSCREEN`, `HC09_NATIVE_MSAA`, `HC09_GPU`, `HC09_ANISOTROPY`, `HC09_UPSCALE`, `HC09_SHARPEN` and `HC09_ASPECT` (width / height) override the
+`HC09_SCALE`, `HC09_VSYNC`, `HC09_FULLSCREEN`, `HC09_NATIVE_MSAA`, `HC09_GPU`, `HC09_ANISOTROPY`, `HC09_UPSCALE`, `HC09_SHARPEN`, `HC09_SMOOTH_MOTION` and `HC09_ASPECT` (width / height) override the
 settings above the same way. `HC09_RESOLUTION_SCALE` is the D3D12 renderer's resolution.
 
 ## Rosters and replacement images

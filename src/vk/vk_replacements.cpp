@@ -5,8 +5,11 @@
 // applied the fetch swizzle, so a file's colours (as drawn) go in unchanged. The texture keeps the game's size
 // (vk_native.cpp sets it after a replacement): the shaders' texel units.
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <mutex>
 #include <string>
@@ -14,6 +17,7 @@
 #include <vector>
 
 #include "vk_native.h"
+#include "xenos_texture.h"
 #include "gpu/swappable_images.h"
 #include "gpu/texture_replacements.h"
 
@@ -60,6 +64,58 @@ namespace
         }
         const std::wstring* file = hc09::gpu::TextureContentHash(tf.dword, hash) ? hc09::gpu::HashedReplacementPath(hash) : nullptr;
         return file ? *file : std::wstring();
+    }
+
+    // HC09_DUMP_HASHED=1: each 2D texture the game loads, once per content, as build\hashed\<content hash>.png in
+    // the colours a replacement of it uses (texture_replacements.h; tools/hdpack makes replacements of them). A
+    // texture whose memory the CPU keeps rewriting (videos, drawn-on images) is not a texture to replace: after its
+    // third content at one address, that address's files are deleted and it is not dumped again.
+    constexpr size_t kDynamic = 3;
+    std::mutex g_dumpMutex;
+    std::unordered_map<uint64_t, bool> g_dumped;
+    std::unordered_map<uint32_t, std::vector<uint64_t>> g_dumpedAt;   // contents seen at an address; kDynamic+: dynamic
+
+    // Whether a texture is still dumped (not at a dynamic address): the renderer decodes it on the CPU for the dump.
+    bool Dumping(const xenos::TextureFetch& tf)
+    {
+        std::lock_guard lock(g_dumpMutex);
+        auto it = g_dumpedAt.find(tf.baseAddress() & 0x1FFFFFFFu);
+        return it == g_dumpedAt.end() || it->second.size() <= kDynamic - 1;
+    }
+
+    void Dump(const xenos::TextureFetch& tf, const xenos::Image& img)
+    {
+        uint64_t hash = 0;
+        if (!IsSingle2D(tf) || img.width < 8 || img.height < 8 || !hc09::gpu::TextureContentHash(tf.dword, hash))
+            return;
+        std::mutex& mutex = g_dumpMutex;
+        auto& done = g_dumped;
+        auto& byAddress = g_dumpedAt;
+        auto pathOf = [](uint64_t h) {
+            char path[64];
+            std::snprintf(path, sizeof(path), "build/hashed/%016llX.png", (unsigned long long)h);
+            return std::string(path);
+        };
+        std::vector<uint64_t> drop;
+        {
+            std::lock_guard lock(mutex);
+            std::vector<uint64_t>& seen = byAddress[tf.baseAddress() & 0x1FFFFFFFu];
+            if (seen.size() > kDynamic) return;
+            if (std::find(seen.begin(), seen.end(), hash) == seen.end()) seen.push_back(hash);
+            if (seen.size() == kDynamic)
+            {
+                drop = seen;
+                seen.push_back(0);   // dynamic from now on
+            }
+            else if (!done.try_emplace(hash, true).second)
+                return;
+        }
+        for (uint64_t h : drop) std::filesystem::remove(pathOf(h));
+        if (!drop.empty()) return;
+        static const bool folder = [] { std::filesystem::create_directories("build/hashed"); return true; }();
+        (void)folder;
+        const std::string path = pathOf(hash);
+        if (!std::filesystem::exists(path)) xenos::WritePng(path, img);
     }
 
     bool Has(const xenos::TextureFetch& tf, uint32_t set)
@@ -111,6 +167,7 @@ namespace hc09::vk
         override.set = Set;
         override.replace = Replace;
         override.has = Has;
+        if (std::getenv("HC09_DUMP_HASHED")) { override.dump = Dump; override.dumping = Dumping; }
         hc09vk::SetTextureOverride(override);
     }
 }

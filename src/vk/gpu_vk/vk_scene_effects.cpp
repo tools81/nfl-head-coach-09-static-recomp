@@ -20,9 +20,10 @@ struct Constants
     float depthA, depthB, invProj[2];
     float center[2], proj[2];
     float up[3], radius;
-    float occlusion, reflections, debug, pad0;
-    float blurDirection[2], origin[2];
-    float targetInvSize[2], pad1[2];
+    float occlusion, reflections, debug, peakRatio;   // peakRatio: HDR output's peak / paper white
+    float blurDirection[2], origin[2];   // the bloom passes: blurDirection is their output's 1 / size
+    float targetInvSize[2], inputInvSize[2];
+    float bloom, grade, depthOfField, sourceInRect;
 };
 static_assert(sizeof(Constants) <= 128, "push constants");
 
@@ -37,7 +38,7 @@ void main()
 // src/gpu/scene_effects.cpp's shaders. Pixel coordinates are the effect's rectangle (the scene's viewport):
 // the passes into the scene's own target are offset by its origin, and so are depth reads.
 const char* const kFragment = R"GLSL(
-layout(push_constant) uniform Effects { vec4 r0, r1, r2, r3, r4, r5, r6; } E;
+layout(push_constant) uniform Effects { vec4 r0, r1, r2, r3, r4, r5, r6, r7; } E;
 #define size E.r0.xy
 #define invSize E.r0.zw
 #define depthA E.r1.x
@@ -50,9 +51,16 @@ layout(push_constant) uniform Effects { vec4 r0, r1, r2, r3, r4, r5, r6; } E;
 #define occlusionStrength E.r4.x
 #define reflectionStrength E.r4.y
 #define debugView E.r4.z
+#define peakRatio E.r4.w
 #define blurDirection E.r5.xy
 #define origin E.r5.zw
 #define targetInvSize E.r6.xy
+#define outputInvSize E.r5.xy
+#define inputInvSize E.r6.zw
+#define bloomStrength E.r7.x
+#define gradeStrength E.r7.y
+#define depthOfFieldStrength E.r7.z
+#define sourceInRect E.r7.w
 
 #if MSAA
 layout(set = 0, binding = 0) uniform sampler2DMS depthTexture;
@@ -60,6 +68,7 @@ layout(set = 0, binding = 0) uniform sampler2DMS depthTexture;
 layout(set = 0, binding = 0) uniform sampler2D depthTexture;
 #endif
 layout(set = 0, binding = 1) uniform sampler2D input0;
+layout(set = 0, binding = 2) uniform sampler2D input1;
 layout(location = 0) out vec4 outColor;
 
 float RawDepth(ivec2 p) { return texelFetch(depthTexture, p + ivec2(origin), 0).r; }
@@ -282,10 +291,200 @@ void main()
     outColor = debugView == 2.0 ? vec4(sum.rgb, 1.0) : sum;
 }
 #endif
+
+// ---- post-processing: the scene's 8-bit colours are display (gamma 2.2) values ----
+vec3 Linear(vec3 c) { return pow(max(c, vec3(0.0)), vec3(2.2)); }
+vec3 Gamma(vec3 c) { return pow(max(c, vec3(0.0)), vec3(1.0 / 2.2)); }
+
+#if PASS_BLOOM_PREFILTER
+// Half size: the 4x4 scene pixels under each output pixel in linear light, each weighted down by its brightness
+// (so one bright pixel doesn't flicker the bloom), and only what is brighter than the threshold, with a soft knee.
+void main()
+{
+    ivec2 base = ivec2(gl_FragCoord.xy) * 2 - 1;
+    vec3 sum = vec3(0.0);
+    float weights = 0.0;
+    for (int y = 0; y < 4; y++)
+    {
+        for (int x = 0; x < 4; x++)
+        {
+            ivec2 q = clamp(base + ivec2(x, y), ivec2(0), ivec2(size) - 1);
+            vec3 c = Linear(texelFetch(input0, q + ivec2(origin), 0).rgb);
+            float weight = 1.0 / (1.0 + max(c.r, max(c.g, c.b)));
+            sum += c * weight;
+            weights += weight;
+        }
+    }
+    vec3 c = sum / weights;
+    const float kThreshold = 0.8, kKnee = 0.15;
+    float brightness = max(c.r, max(c.g, c.b));
+    float soft = clamp(brightness - kThreshold + kKnee, 0.0, 2.0 * kKnee);
+    soft = soft * soft / (4.0 * kKnee + 1e-5);
+    outColor = vec4(c * max(soft, brightness - kThreshold) / max(brightness, 1e-4), 1.0);
+}
+#endif
+
+#if PASS_BLOOM_DOWN
+// Half size again (the dual filter's downsample: the middle and four diagonal taps, each a bilinear 2x2).
+void main()
+{
+    vec2 uv = gl_FragCoord.xy * outputInvSize;
+    vec2 d = inputInvSize;
+    vec3 sum = textureLod(input0, uv, 0.0).rgb * 4.0;
+    sum += textureLod(input0, uv + vec2(-d.x, -d.y), 0.0).rgb;
+    sum += textureLod(input0, uv + vec2(d.x, -d.y), 0.0).rgb;
+    sum += textureLod(input0, uv + vec2(-d.x, d.y), 0.0).rgb;
+    sum += textureLod(input0, uv + vec2(d.x, d.y), 0.0).rgb;
+    outColor = vec4(sum / 8.0, 1.0);
+}
+#endif
+
+#if PASS_BLOOM_UP
+// The next smaller level, enlarged (the dual filter's upsample, eight taps) and added to this one (blend: add).
+void main()
+{
+    vec2 uv = gl_FragCoord.xy * outputInvSize;
+    vec2 d = inputInvSize;
+    vec3 sum = textureLod(input0, uv + vec2(-2.0 * d.x, 0.0), 0.0).rgb;
+    sum += textureLod(input0, uv + vec2(2.0 * d.x, 0.0), 0.0).rgb;
+    sum += textureLod(input0, uv + vec2(0.0, -2.0 * d.y), 0.0).rgb;
+    sum += textureLod(input0, uv + vec2(0.0, 2.0 * d.y), 0.0).rgb;
+    sum += textureLod(input0, uv + vec2(-d.x, -d.y), 0.0).rgb * 2.0;
+    sum += textureLod(input0, uv + vec2(d.x, -d.y), 0.0).rgb * 2.0;
+    sum += textureLod(input0, uv + vec2(-d.x, d.y), 0.0).rgb * 2.0;
+    sum += textureLod(input0, uv + vec2(d.x, d.y), 0.0).rgb * 2.0;
+    outColor = vec4(sum / 12.0, 1.0);
+}
+#endif
+
+#if PASS_FOCUS
+// The focus distance (one pixel): the harmonic mean of the view distance over a 5x5 grid in the middle of the
+// picture (sky left out), eased from the last frame's (input0) so it pulls focus rather than jumping.
+void main()
+{
+    float sum = 0.0, n = 0.0;
+    for (int y = -2; y <= 2; y++)
+    {
+        for (int x = -2; x <= 2; x++)
+        {
+            ivec2 p = ivec2(size * 0.5 + vec2(x, y) * size * vec2(0.05, 0.06));
+            if (RawDepth(p) >= kSky)
+                continue;
+            sum += 1.0 / max(ViewDepth(p), 1e-3);
+            n += 1.0;
+        }
+    }
+    float previous = texelFetch(input0, ivec2(0), 0).r;
+    bool known = previous > 1e-3 && previous < 1e6;
+    if (n == 0.0)
+    {
+        outColor = vec4(known ? previous : 1000.0, 0.0, 0.0, 0.0);
+        return;
+    }
+    float target = n / sum;
+    outColor = vec4(known ? 1.0 / mix(1.0 / previous, 1.0 / target, 0.08) : target, 0.0, 0.0, 0.0);
+}
+#endif
+
+#if PASS_DEPTH_OF_FIELD
+// Each pixel's blur circle grows with its distance past the focus (input1) in inverse depth, as a lens's does; it
+// gathers 24 taps in its circle, each counted only if its own circle reaches back here, so a sharp subject doesn't
+// smear over the blurred background behind it.
+float focusDistance;
+float maxRadius;
+
+float Circle(ivec2 p)
+{
+    p = clamp(p, ivec2(0), ivec2(size) - 1);
+    float w = RawDepth(p) >= kSky ? 1e6 : ViewDepth(p);
+    // Only what is past the focus (and past a little of it) blurs: a nearer player stays sharp, as with a TV
+    // camera's long lens, rather than the miniature look of blurring both ways.
+    return clamp((1.0 - focusDistance / max(w, 1e-3) - 0.1) / 0.9, 0.0, 1.0) * maxRadius;
+}
+
+vec3 SceneAt(ivec2 p)
+{
+    return texelFetch(input0, clamp(p, ivec2(0), ivec2(size) - 1) + ivec2(origin), 0).rgb;
+}
+
+void main()
+{
+    focusDistance = texelFetch(input1, ivec2(0), 0).r;
+    maxRadius = depthOfFieldStrength * 6.0 * size.y / 720.0;
+    vec2 pixel = gl_FragCoord.xy;
+    ivec2 p = ivec2(pixel);
+    vec3 middle = SceneAt(p);
+    float circle = Circle(p);
+    if (circle < 0.5)
+    {
+        outColor = vec4(middle, 1.0);
+        return;
+    }
+    vec3 sum = middle;
+    float weights = 1.0;
+    float angle = Noise(pixel) * 6.2831853;
+    const int kTaps = 24;
+    for (int i = 0; i < kTaps; i++)
+    {
+        float r = sqrt((float(i) + 0.5) / float(kTaps)) * circle;
+        float a = angle + float(i) * 2.3999632;
+        ivec2 q = ivec2(pixel + vec2(cos(a), sin(a)) * r);
+        float weight = clamp(Circle(q) - r + 1.0, 0.0, 1.0);
+        sum += SceneAt(q) * weight;
+        weights += weight;
+    }
+    outColor = vec4(sum / weights, 1.0);
+}
+#endif
+
+#if PASS_POST
+// The scene (input0: the copy, or the depth of field's output when sourceInRect) with the bloom (input1) added
+// in linear light, then graded, written over the scene's target.
+void main()
+{
+    ivec2 p = ivec2(FragPixel());
+    vec4 scene = sourceInRect > 0.0 ? texelFetch(input0, p, 0) : texelFetch(input0, p + ivec2(origin), 0);
+    vec3 c = Linear(scene.rgb);
+    if (bloomStrength > 0.0)
+        c += textureLod(input1, (vec2(p) + 0.5) * invSize, 0.0).rgb * (bloomStrength * 0.35);
+    // Filmic shoulder: unchanged up to the knee, then rolled off towards white instead of clipping.
+    const float kKnee = 0.75;
+    vec3 over = max(c - kKnee, vec3(0.0));
+    vec3 shoulder = min(c, vec3(kKnee)) + (1.0 - kKnee) * (1.0 - exp(-over / (1.0 - kKnee)));
+    vec3 unclipped = c;
+    c = mix(min(c, vec3(1.0)), shoulder, min(gradeStrength, 1.0));
+    vec3 g = Gamma(c);
+    if (gradeStrength > 0.0)
+    {
+        g = mix(g, g * g * (3.0 - 2.0 * g), 0.12 * gradeStrength);           // S-curve: a little more contrast
+        float luminance = dot(g, vec3(0.2126, 0.7152, 0.0722));
+        g = mix(vec3(luminance), g, 1.0 + 0.10 * gradeStrength);            // saturation
+        vec2 d = ((vec2(p) + 0.5) * invSize - 0.5) * vec2(size.x / size.y, 1.0);
+        g *= 1.0 - 0.10 * gradeStrength * smoothstep(0.45, 1.1, length(d));  // vignette
+    }
+    g += (Noise(gl_FragCoord.xy) - 0.5) / 255.0;   // dither: no banding in the 8-bit target
+#if HDR_GAIN
+    // HDR output (vk_hdr.h): how much brighter than shown the pixel should be, and its brightness as shown (so the
+    // HDR pass can tell the scene from what is drawn over it). Near-white highlights are spread up to the peak
+    // (the game's own lights and sky were clipped at SDR white), and bloom past white keeps its brightness.
+    vec3 shown = clamp(g, 0.0, 1.0);
+    const vec3 kLuma = vec3(0.2126, 0.7152, 0.0722);
+    float sdrLuminance = dot(Linear(shown), kLuma);
+    float t = clamp((sdrLuminance - 0.55) / 0.45, 0.0, 1.0);
+    float hdrLuminance = max(sdrLuminance * (1.0 + (peakRatio - 1.0) * t * t * sqrt(t)), dot(unclipped, kLuma));
+    outColor = vec4(clamp(hdrLuminance / max(sdrLuminance, 1e-4), 1.0, peakRatio), dot(shown, kLuma), 0.0, 0.0);
+#else
+    outColor = vec4(clamp(g, 0.0, 1.0), scene.a);
+    if (debugView == 3.0 && p.x < int(size.x) / 2)   // the left half without bloom and grading, to compare
+        outColor = scene;
+#endif
+}
+#endif
 )GLSL";
 
 constexpr VkFormat kOcclusionFormat = VK_FORMAT_R16G16_SFLOAT;          // occlusion, view distance
 constexpr VkFormat kReflectionFormat = VK_FORMAT_R16G16B16A16_SFLOAT;   // premultiplied colour, opacity
+constexpr VkFormat kBloomFormat = VK_FORMAT_R16G16B16A16_SFLOAT;        // linear colour (bloom, depth of field)
 
 float Strength(const char* value, float fallback)
 {
@@ -324,15 +523,25 @@ bool SceneEffects::Init(Device& dev)
     dev_ = &dev;
     occlusion_ = Strength(Hc09Env("HC09_SSAO"), 1.0f);
     reflections_ = Strength(Hc09Env("HC09_SSR"), 1.0f);
-    // HC09_EFFECTS_DEBUG=1 shows the occlusion alone, 2 the reflections alone (as the D3D12 renderer).
+    // HC09_EFFECTS_DEBUG=1 shows the occlusion alone, 2 the reflections alone (as the D3D12 renderer), 3 the
+    // post-processing on the right half of the picture only.
     if (const char* e = Hc09Env("HC09_EFFECTS_DEBUG")) debug_ = std::atoi(e);
-    if (debug_ == 1) reflections_ = 0;
-    else if (debug_ == 2) occlusion_ = 0;
+    bloom_ = Strength(Hc09Env("HC09_BLOOM"), 1.0f);
+    grade_ = Strength(Hc09Env("HC09_GRADE"), 1.0f);
+    dof_ = Strength(Hc09Env("HC09_DOF"), 0.0f);
+    // HDR output's gain (vk_hdr.h): with HC09_HDR on, or its debug view.
+    const char* hdr = Hc09Env("HC09_HDR");
+    const char* hdrDebug = Hc09Env("HC09_HDR_DEBUG");
+    hdr_ = (hdr && *hdr && std::strcmp(hdr, "0")) || (hdrDebug && std::atoi(hdrDebug) != 0);
+    const float paperWhite = std::max(Strength(Hc09Env("HC09_HDR_PAPER_WHITE"), 200.0f), 80.0f);
+    peakRatio_ = std::max(Strength(Hc09Env("HC09_HDR_PEAK"), 1000.0f), paperWhite) / paperWhite;
+    if (debug_ == 1) reflections_ = bloom_ = grade_ = dof_ = 0;
+    else if (debug_ == 2) occlusion_ = bloom_ = grade_ = dof_ = 0;
     if (!Enabled()) return true;
 
     VkDevice d = dev.device;
-    VkDescriptorSetLayoutBinding b[2]{};
-    for (uint32_t i = 0; i < 2; ++i)
+    VkDescriptorSetLayoutBinding b[3]{};
+    for (uint32_t i = 0; i < 3; ++i)
     {
         b[i].binding = i;
         b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -340,7 +549,7 @@ bool SceneEffects::Init(Device& dev)
         b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     }
     VkDescriptorSetLayoutCreateInfo lci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    lci.bindingCount = 2;
+    lci.bindingCount = 3;
     lci.pBindings = b;
     VkPushConstantRange pcr{ VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Constants) };
     VkPipelineLayoutCreateInfo pci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
@@ -358,11 +567,13 @@ bool SceneEffects::Init(Device& dev)
         vkCreatePipelineLayout(d, &pci, nullptr, &pipeLayout_) != VK_SUCCESS || vkCreateSampler(d, &sci, nullptr, &nearest_) != VK_SUCCESS ||
         vkCreateSampler(d, &lin, nullptr, &linear_) != VK_SUCCESS || !vs_)
     {
-        std::fprintf(stderr, "[effects] setup failed; ambient occlusion and reflections are off\n");
-        occlusion_ = reflections_ = 0;
+        std::fprintf(stderr, "[effects] setup failed; ambient occlusion, reflections and post-processing are off\n");
+        occlusion_ = reflections_ = bloom_ = grade_ = dof_ = 0;
+        hdr_ = false;
         return false;
     }
-    std::fprintf(stderr, "[effects] ambient occlusion %.2f, reflections %.2f\n", occlusion_, reflections_);
+    std::fprintf(stderr, "[effects] ambient occlusion %.2f, reflections %.2f, bloom %.2f, colour grading %.2f, depth of field %.2f\n",
+                 occlusion_, reflections_, bloom_, grade_, dof_);
     return true;
 }
 
@@ -371,11 +582,15 @@ void SceneEffects::Shutdown()
     if (!dev_ || !dev_->device) return;
     VkDevice d = dev_->device;
     for (Pipelines& p : pipelines_)
-        for (VkPipeline pipe : { p.occlusion, p.blur, p.composite, p.reflections, p.reflectionComposite })
+        for (VkPipeline pipe : { p.occlusion, p.blur, p.composite, p.reflections, p.reflectionComposite, p.bloomPrefilter, p.bloomDown,
+                                 p.bloomUp, p.focus, p.depthOfField, p.post, p.hdrGain })
             if (pipe) vkDestroyPipeline(d, pipe, nullptr);
     pipelines_.clear();
-    for (Image* img : { &occlusionRaw_, &occlusionBlurred_, &sceneCopy_, &reflectionTarget_ })
+    for (Image* img : { &occlusionRaw_, &occlusionBlurred_, &sceneCopy_, &reflectionTarget_, &focus_[0], &focus_[1], &depthOfFieldTarget_,
+                        &hdrGain_ })
         if (img->image) dev_->DestroyImage(*img);
+    for (Image& img : bloomLevels_)
+        if (img.image) dev_->DestroyImage(img);
     if (vs_) vkDestroyShaderModule(d, vs_, nullptr);
     if (linear_) vkDestroySampler(d, linear_, nullptr);
     if (nearest_) vkDestroySampler(d, nearest_, nullptr);
@@ -414,10 +629,10 @@ VkPipeline SceneEffects::CreatePipeline(VkShaderModule fs, VkFormat target, VkSa
     cba.colorWriteMask = 0xF;
     if (blend)
     {
-        // 1: destination * source colour; 2: premultiplied source over destination. Alpha kept.
+        // 1: destination * source colour; 2: premultiplied source over destination; 3: source added. Alpha kept.
         cba.blendEnable = VK_TRUE;
         cba.srcColorBlendFactor = blend == 1 ? VK_BLEND_FACTOR_ZERO : VK_BLEND_FACTOR_ONE;
-        cba.dstColorBlendFactor = blend == 1 ? VK_BLEND_FACTOR_SRC_COLOR : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        cba.dstColorBlendFactor = blend == 1 ? VK_BLEND_FACTOR_SRC_COLOR : blend == 2 ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ONE;
         cba.colorBlendOp = VK_BLEND_OP_ADD;
         cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
         cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
@@ -471,6 +686,13 @@ SceneEffects::Pipelines* SceneEffects::GetPipelines(VkFormat format, VkSampleCou
         { "PASS_COMPOSITE", true, format, samples, debug_ == 1 ? 0 : 1, &p.composite },
         { "PASS_REFLECTIONS", false, kReflectionFormat, VK_SAMPLE_COUNT_1_BIT, 0, &p.reflections },
         { "PASS_REFLECTION_COMPOSITE", true, format, samples, debug_ == 2 ? 0 : 2, &p.reflectionComposite },
+        { "PASS_BLOOM_PREFILTER", false, kBloomFormat, VK_SAMPLE_COUNT_1_BIT, 0, &p.bloomPrefilter },
+        { "PASS_BLOOM_DOWN", false, kBloomFormat, VK_SAMPLE_COUNT_1_BIT, 0, &p.bloomDown },
+        { "PASS_BLOOM_UP", false, kBloomFormat, VK_SAMPLE_COUNT_1_BIT, 3, &p.bloomUp },
+        { "PASS_FOCUS", false, kOcclusionFormat, VK_SAMPLE_COUNT_1_BIT, 0, &p.focus },
+        { "PASS_DEPTH_OF_FIELD", false, kBloomFormat, VK_SAMPLE_COUNT_1_BIT, 0, &p.depthOfField },
+        { "PASS_POST", true, format, samples, 0, &p.post },
+        { "HDR_GAIN 1\n#define PASS_POST", false, kOcclusionFormat, VK_SAMPLE_COUNT_1_BIT, 0, &p.hdrGain },
     };
     for (const Entry& e : entries)
     {
@@ -499,6 +721,7 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
                          const std::function<VkDescriptorSet(VkDescriptorSetLayout)>& allocate, std::vector<Image>& retired)
 {
     const hc09::gpu::SceneCamera& camera = view.camera;
+    gainMade_ = false;
     if (!Enabled() || !camera.valid) return;
     if (color.format != VK_FORMAT_R8G8B8A8_UNORM && color.format != VK_FORMAT_A2B10G10R10_UNORM_PACK32 &&
         color.format != VK_FORMAT_R16G16B16A16_SFLOAT)
@@ -518,12 +741,27 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
         if (!had || image.image != before) fresh.push_back(image);
         return true;
     };
+    // Post-processing takes the scene's colours as display values: 8-bit targets only.
+    const bool post = Post() && color.format == VK_FORMAT_R8G8B8A8_UNORM;
+    uint32_t bloomWidth[kBloomLevels], bloomHeight[kBloomLevels];
+    for (int i = 0; i < kBloomLevels; ++i)
+    {
+        bloomWidth[i] = std::max(1u, ((i ? bloomWidth[i - 1] : width) + 1) / 2);
+        bloomHeight[i] = std::max(1u, ((i ? bloomHeight[i - 1] : height) + 1) / 2);
+    }
+    const VkImageUsageFlags attachment = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    bool ready = pipelines && prepare(occlusionBlurred_, kOcclusionFormat, width, height, attachment);
     // The blurred occlusion target is also the (unread) input of the occlusion pass.
-    if (!pipelines || !prepare(occlusionBlurred_, kOcclusionFormat, width, height, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) ||
-        (occlusion_ > 0 && !prepare(occlusionRaw_, kOcclusionFormat, width, height, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) ||
-        (reflections_ > 0 && (!prepare(sceneCopy_, color.format, color.width, color.height, VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
-                              !prepare(reflectionTarget_, kReflectionFormat, width, height, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))))
-        return;
+    if (ready && occlusion_ > 0) ready = prepare(occlusionRaw_, kOcclusionFormat, width, height, attachment);
+    if (ready && (reflections_ > 0 || post)) ready = prepare(sceneCopy_, color.format, color.width, color.height, VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    if (ready && reflections_ > 0) ready = prepare(reflectionTarget_, kReflectionFormat, width, height, attachment);
+    if (post && bloom_ > 0)
+        for (int i = 0; ready && i < kBloomLevels; ++i) ready = prepare(bloomLevels_[i], kBloomFormat, bloomWidth[i], bloomHeight[i], attachment);
+    if (ready && post && dof_ > 0)
+        ready = prepare(focus_[0], kOcclusionFormat, 1, 1, attachment) && prepare(focus_[1], kOcclusionFormat, 1, 1, attachment) &&
+                prepare(depthOfFieldTarget_, kBloomFormat, width, height, attachment);
+    if (ready && post && hdr_) ready = prepare(hdrGain_, kOcclusionFormat, width, height, attachment);
+    if (!ready) return;
 
     Constants c{};
     c.size[0] = float(width);
@@ -543,6 +781,7 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
     c.occlusion = std::min(occlusion_, 1.0f);
     c.reflections = reflections_;
     c.debug = float(debug_);
+    c.peakRatio = peakRatio_;
     c.origin[0] = float(x0);
     c.origin[1] = float(y0);
     c.targetInvSize[0] = 1.0f / float(color.width);
@@ -569,15 +808,17 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
     }
     Barrier(cb);
 
-    // One full-screen pass: `target` (the scene's own colour target is drawn at the rectangle), reading the depth
-    // buffer and `input`.
-    auto pass = [&](VkPipeline pipe, const Image& target, bool inTarget, const Image& input, VkSampler inputSampler) {
+    // One full-screen pass: `target` (the scene's own colour target is drawn at the rectangle, others whole), reading
+    // the depth buffer, `input` and `input1` (`input` if none). `load` keeps the target's contents (for blending).
+    auto pass = [&](VkPipeline pipe, const Image& target, bool inTarget, const Image& input, VkSampler inputSampler,
+                    const Image* input1 = nullptr, bool load = false) {
         VkDescriptorSet set = allocate(setLayout_);
         if (!set) return;
-        VkDescriptorImageInfo images[2] = { { nearest_, depthView, VK_IMAGE_LAYOUT_GENERAL },
-                                            { inputSampler, input.view, VK_IMAGE_LAYOUT_GENERAL } };
-        VkWriteDescriptorSet w[2]{};
-        for (uint32_t i = 0; i < 2; ++i)
+        VkDescriptorImageInfo images[3] = { { nearest_, depthView, VK_IMAGE_LAYOUT_GENERAL },
+                                            { inputSampler, input.view, VK_IMAGE_LAYOUT_GENERAL },
+                                            { linear_, (input1 ? *input1 : input).view, VK_IMAGE_LAYOUT_GENERAL } };
+        VkWriteDescriptorSet w[3]{};
+        for (uint32_t i = 0; i < 3; ++i)
         {
             w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             w[i].dstSet = set;
@@ -586,20 +827,20 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             w[i].pImageInfo = &images[i];
         }
-        vkUpdateDescriptorSets(dev_->device, 2, w, 0, nullptr);
+        vkUpdateDescriptorSets(dev_->device, 3, w, 0, nullptr);
         VkRenderingAttachmentInfo ca{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
         ca.imageView = target.view;
         ca.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        ca.loadOp = inTarget ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        ca.loadOp = inTarget || load ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        VkRect2D area = inTarget ? VkRect2D{ { x0, y0 }, { width, height } } : VkRect2D{ { 0, 0 }, { width, height } };
+        VkRect2D area = inTarget ? VkRect2D{ { x0, y0 }, { width, height } } : VkRect2D{ { 0, 0 }, { target.width, target.height } };
         VkRenderingInfo ri{ VK_STRUCTURE_TYPE_RENDERING_INFO };
         ri.renderArea = area;
         ri.layerCount = 1;
         ri.colorAttachmentCount = 1;
         ri.pColorAttachments = &ca;
         vkCmdBeginRendering(cb, &ri);
-        VkViewport vp{ float(area.offset.x), float(area.offset.y), float(width), float(height), 0.0f, 1.0f };
+        VkViewport vp{ float(area.offset.x), float(area.offset.y), float(area.extent.width), float(area.extent.height), 0.0f, 1.0f };
         vkCmdSetViewport(cb, 0, 1, &vp);
         vkCmdSetScissor(cb, 0, 1, &area);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
@@ -619,9 +860,8 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
         c.blurDirection[1] = 1;
         pass(pipelines->composite, color, true, occlusionBlurred_, nearest_);
     }
-    if (reflections_ > 0)
-    {
-        // A single-sampled copy of the scene (with its occlusion) to reflect.
+    // A single-sampled copy of the scene as it is so far.
+    auto copyScene = [&] {
         if (samples != VK_SAMPLE_COUNT_1_BIT)
         {
             VkImageResolve r{};
@@ -637,9 +877,67 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
             vkCmdCopyImage(cb, color.image, VK_IMAGE_LAYOUT_GENERAL, sceneCopy_.image, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
         }
         Barrier(cb);
+    };
+    if (reflections_ > 0)
+    {
+        copyScene();   // with its occlusion, to reflect
         pass(pipelines->reflections, reflectionTarget_, false, sceneCopy_, linear_);
         pass(pipelines->reflectionComposite, color, true, reflectionTarget_, nearest_);
     }
+    if (!post) return;
+
+    copyScene();
+    c.bloom = bloom_;
+    c.grade = grade_;
+    c.depthOfField = dof_;
+    if (bloom_ > 0)
+    {
+        pass(pipelines->bloomPrefilter, bloomLevels_[0], false, sceneCopy_, nearest_);
+        auto sizes = [&](int out, int in) {
+            c.blurDirection[0] = 1.0f / float(bloomWidth[out]);
+            c.blurDirection[1] = 1.0f / float(bloomHeight[out]);
+            c.inputInvSize[0] = 1.0f / float(bloomWidth[in]);
+            c.inputInvSize[1] = 1.0f / float(bloomHeight[in]);
+        };
+        for (int i = 1; i < kBloomLevels; ++i)
+        {
+            sizes(i, i - 1);
+            pass(pipelines->bloomDown, bloomLevels_[i], false, bloomLevels_[i - 1], linear_);
+        }
+        for (int i = kBloomLevels - 2; i >= 0; --i)
+        {
+            sizes(i, i + 1);
+            pass(pipelines->bloomUp, bloomLevels_[i], false, bloomLevels_[i + 1], linear_, nullptr, true);
+        }
+    }
+    const Image* source = &sceneCopy_;
+    if (dof_ > 0)
+    {
+        // This frame's focus from the last frame's.
+        const Image& focus = focus_[focusIndex_];
+        pass(pipelines->focus, focus, false, focus_[focusIndex_ ^ 1], nearest_);
+        focusIndex_ ^= 1;
+        pass(pipelines->depthOfField, depthOfFieldTarget_, false, sceneCopy_, nearest_, &focus);
+        source = &depthOfFieldTarget_;
+        c.sourceInRect = 1.0f;
+    }
+    if (hdr_)
+    {
+        pass(pipelines->hdrGain, hdrGain_, false, *source, nearest_, bloom_ > 0 ? &bloomLevels_[0] : nullptr);
+        gainMade_ = true;
+        gainRect_[0] = float(x0);
+        gainRect_[1] = float(y0);
+        gainRect_[2] = float(width);
+        gainRect_[3] = float(height);
+    }
+    pass(pipelines->post, color, true, *source, nearest_, bloom_ > 0 ? &bloomLevels_[0] : nullptr);
+}
+
+const Image* SceneEffects::HdrGain(float rect[4]) const
+{
+    if (!gainMade_ || !hdrGain_.image) return nullptr;
+    for (int i = 0; i < 4; ++i) rect[i] = gainRect_[i];
+    return &hdrGain_;
 }
 
 }  // namespace hc09vk

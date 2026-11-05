@@ -31,6 +31,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <windows.h>
+
 namespace {
 using Clock = std::chrono::steady_clock;
 const Clock::time_point g_t0 = Clock::now();
@@ -648,19 +650,74 @@ bool InterpTraceOn()
     return on;
 }
 
-bool InterpLoopsWanted() { return InterpTraceOn(); }
+bool InterpLoopsWanted() { return InterpTraceOn() || MotionOn(); }
+
+bool MotionOn()
+{
+    // On unless HC09_SMOOTH_MOTION=0 (hc09.ini SmoothMotion=off). Only the Vulkan renderer's front end asks for frames.
+    static const bool on = [] {
+        const char* e = Hc09Env("HC09_SMOOTH_MOTION");
+        return !e || !*e || strcmp(e, "0") != 0;
+    }();
+    return on;
+}
+
+namespace {
+// Smooth motion: the simulation's ticks (when each began; its period, measured) and the render frames' state.
+std::atomic<double> g_simBeganAt{ 0 }, g_doneBeganAt{ 0 }, g_simPeriod{ 1.0 / 30.0 };
+std::atomic<uint64_t> g_motionTick{ 0 };
+std::atomic<float> g_motionFraction{ 1.0f };
+double g_minLead = 0.0;   // render thread: the least lead (ticks) a frame begins with after its tick, slowly forgotten
+
+void MotionSimBegin()
+{
+    const double now = Now(), last = g_simBeganAt.load();
+    if (last > 0)
+    {
+        const double dt = now - last;
+        // Ticks at least 1/240 s apart and at most 1/10 s (pauses, loads) update the period.
+        if (dt > 1.0 / 240.0 && dt < 0.1) g_simPeriod.store(g_simPeriod.load() * 0.95 + dt * 0.05);
+    }
+    g_simBeganAt.store(now);
+}
+
+void MotionRenderBegin()
+{
+    // The newest finished tick's state stands for the simulation's time when that tick began. The frame shows the
+    // time `lead` ticks after it, less the least lead frames had lately: so the fraction runs from 0, right after
+    // a tick, to 1 just before the next.
+    const double lead = (Now() - g_doneBeganAt.load()) / g_simPeriod.load();
+    g_minLead = std::min(lead, g_minLead + 0.02);
+    g_motionFraction.store(float(std::clamp(lead - g_minLead, 0.0, 1.0)));
+    g_motionTick.store(g_simDone.load());
+}
+}  // namespace
+
+void MotionFrameState(uint64_t* tick, float* fraction)
+{
+    *tick = g_motionTick.load();
+    *fraction = g_motionFraction.load();
+}
 
 void InterpLoopUpdate(int loop, bool begin)
 {
     if (loop >= 2) { if (InterpTraceOn()) Small60Edge(loop - 2, begin); return; }
     if (loop == 0)
     {
-        if (begin) { g_simBusy.store(1); g_simBegun.fetch_add(1); if (InterpTraceOn()) SmallSimEdge(true); }
-        else { if (InterpTraceOn()) SmallSimEdge(false); g_simDoneAt.store(Now()); g_simDone.fetch_add(1); g_simBusy.store(0); }
+        if (begin) { g_simBusy.store(1); g_simBegun.fetch_add(1); MotionSimBegin(); if (InterpTraceOn()) SmallSimEdge(true); }
+        else
+        {
+            if (InterpTraceOn()) SmallSimEdge(false);
+            g_simDoneAt.store(Now());
+            g_doneBeganAt.store(g_simBeganAt.load());
+            g_simDone.fetch_add(1);
+            g_simBusy.store(0);
+        }
         return;
     }
     if (begin)
     {
+        if (MotionOn()) MotionRenderBegin();
         if (g_simBusy.load()) g_renderBusySim.fetch_add(1);
         t_renderSimBegun = g_simBegun.load();
         t_renderSimDone = g_simDone.load();

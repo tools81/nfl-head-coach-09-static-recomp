@@ -38,8 +38,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## NFL Head Coach 09 for PC
 
 The Vulkan renderer and frame pacing in `src/vk` (everything there except the adapter files `vk_adapter.cpp`,
-`vk_select.h`, `vk_stubs.cpp`, `runtime.h` and `kernel.h`, and this project's additions `widescreen.h`, `gpu_vk/vk_scene_effects.*`
-and `gpu_vk/vk_upscale.*`) come from NFL Head Coach 09 for PC 1.1.3, used under its MIT license (`src/vk/LICENSE`):
+`vk_select.h`, `vk_stubs.cpp`, `runtime.h` and `kernel.h`, and this project's additions `widescreen.h`, `gpu_vk/vk_scene_effects.*`,
+`gpu_vk/vk_upscale.*` and `gpu_vk/vk_motion.*`) come from NFL Head Coach 09 for PC 1.1.3, used under its MIT license (`src/vk/LICENSE`):
 
 ```
 Copyright (c) 2026 ibukun5588 and the NFL Head Coach 09 for PC contributors
@@ -74,6 +74,11 @@ THE SOFTWARE.
 ```
 
 ## Fetched separately (not included in this repository)
+
+- With `HDTextures=on`, `HC09HDPack.exe` downloads
+  [Real-ESRGAN ncnn Vulkan](https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan) (MIT) with the
+  [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) models (BSD 3-clause) into `thirdparty/realesrgan`
+  on the player's PC, checked against a pinned SHA-256.
 
 - [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) — MIT; modified by `patches/xenonrecomp.patch`.
 - [FFmpeg](https://ffmpeg.org) — LGPL 2.1+ shared build, dynamically linked.

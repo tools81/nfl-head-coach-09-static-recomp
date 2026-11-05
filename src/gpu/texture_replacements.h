@@ -5,6 +5,8 @@
 //   textures\swappables\<library>\<id>.png  a swappable front-end image (portraits, logos), swappable_images.h
 //   textures\hashed\<content hash>.png      any 2D texture by its contents (16 hex digits, as HC09_DUMP_HASHED
 //                                           names the game's images)
+//   textures\hd\<content hash>.png          the same, made by tools/hdpack (the HD texture pack); the folders above
+//                                           win
 // An edition's own folder (hc27\textures\...) comes before the shared one. HC09_NO_REPLACEMENTS=1 turns them off.
 
 #include <cstdint>

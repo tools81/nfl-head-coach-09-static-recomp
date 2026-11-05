@@ -51,6 +51,7 @@ struct Device
     VkDeviceSize hostImportAlignment = 0;
     bool pixelInterlock = false;       // fragment shader pixel interlock + fragment stores + clip distances + fp64 (EDRAM renderer)
     float anisotropy = 1.0f;           // the most sampler anisotropy the device allows (1: none)
+    bool geometryShader = false;       // hc09: the feature is on (gl_PrimitiveID in fragment shaders: the crowd)
 
     // Step 1: the instance, with the window's surface extensions.
     bool CreateInstance(const std::vector<const char*>& extensions, std::string* err);

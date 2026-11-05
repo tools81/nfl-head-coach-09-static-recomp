@@ -20,6 +20,7 @@
 #include "d3d_state.h"
 #include "vk_device.h"
 #include "vk_edram.h"   // RendererStats
+#include "vk_hdr.h"
 #include "xenos.h"
 #include "xenos_shader.h"
 #include "xenos_texture.h"
@@ -87,6 +88,9 @@ public:
     void EndFrame();
     // Wait until the GPU finished everything submitted.
     void Finish();
+    // hc09: smooth motion (vk_motion.h): the frame whose draws follow comes after simulation tick `tick`, `fraction`
+    // of a tick past it. Without calls, draws are drawn as the game gives them.
+    void SetMotionFrame(uint64_t tick, float fraction);
     // Before the CPU reads [pa, pa + bytes) of guest memory: resolved data the GPU
     // keeps (HC09_NATIVE_RESOLVE_GPU) is written back, and everything waited for.
     void SyncToGuest(uint32_t pa, uint32_t bytes);
@@ -107,6 +111,8 @@ public:
     // At resolution scale s > 1 the image is s times the size when the front buffer's last
     // resolve left a scaled copy (NATIVE_RENDERER.md 7.11), else the guest size.
     const Image* DecodeFrontBuffer(uint32_t frontBuffer, uint32_t width, uint32_t height);
+    // HDR output: the scene's gain for the front buffer DecodeFrontBuffer made (none if this frame drew no 3D scene).
+    HdrGain SceneHdrGain() const;
     // Resolution scale (HC09_SCALE, hc09.ini [display] scale).
     uint32_t Scale() const;
     // The image DecodeFrontBuffer made last, read back (RGBA8, row-major; waits for the GPU): dumps.
@@ -136,6 +142,10 @@ struct TextureOverride
     bool (*replace)(const xenos::TextureFetch& tf, uint32_t set, xenos::Image& img) = nullptr;
     // hc09: whether `replace` has an image for the texture (it is then decoded on the CPU, not by DecodeOnGpu).
     bool (*has)(const xenos::TextureFetch& tf, uint32_t set) = nullptr;
+    // hc09: when set, every single-layer 2D texture the game loads (not one a resolve wrote) is given to it as decoded,
+    // before any replacement; those `dumping` says yes to are decoded on the CPU for it.
+    void (*dump)(const xenos::TextureFetch& tf, const xenos::Image& img) = nullptr;
+    bool (*dumping)(const xenos::TextureFetch& tf) = nullptr;
 };
 void SetTextureOverride(const TextureOverride& o);
 

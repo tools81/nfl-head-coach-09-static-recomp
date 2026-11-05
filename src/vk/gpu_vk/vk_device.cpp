@@ -60,6 +60,16 @@ bool Device::CreateInstance(const std::vector<const char*>& extensions, std::str
         return false;
     }
     std::vector<const char*> exts = extensions;
+    // hc09: with a window, the swapchain's HDR10 colour space (vk_hdr.h), where the driver has it.
+    if (!extensions.empty())
+    {
+        uint32_t count = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr);
+        std::vector<VkExtensionProperties> available(count);
+        vkEnumerateInstanceExtensionProperties(nullptr, &count, available.data());
+        for (const VkExtensionProperties& e : available)
+            if (!strcmp(e.extensionName, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME)) exts.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+    }
     std::vector<const char*> layers;
     const char* v = Hc09Env("HC09_VK_VALIDATION");
     validation = v && atoi(v) != 0;
@@ -216,6 +226,7 @@ bool Device::CreateDevice(VkSurfaceKHR surface, std::string* err)
     f2.features.shaderClipDistance = supported.shaderClipDistance;
     f2.features.shaderFloat64 = supported.shaderFloat64;   // exact divisions in the EDRAM arithmetic
     f2.features.geometryShader = supported.geometryShader;
+    geometryShader = supported.geometryShader != VK_FALSE;
     f2.features.depthClamp = supported.depthClamp;
     f2.features.independentBlend = supported.independentBlend;   // MRT targets blend differently
     f2.features.shaderSampledImageArrayDynamicIndexing = supported.shaderSampledImageArrayDynamicIndexing;

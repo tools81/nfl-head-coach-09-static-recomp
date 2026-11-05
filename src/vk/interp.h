@@ -24,6 +24,12 @@ bool InterpTraceOn();
 // (begin = true) or ends. hooks_pacing.cpp, with the loop told apart by the rate it set.
 void InterpLoopUpdate(int loop, bool begin);   // loop: 0 simulation, 1 render
 bool InterpLoopsWanted();
+// hc09: smooth motion (hc09.ini [Graphics] SmoothMotion, as HC09_SMOOTH_MOTION; gpu_vk/vk_motion.h): on (the default).
+bool MotionOn();
+// hc09: smooth motion: where the frame the render loop is building falls, taken when its update begins: the last
+// finished simulation tick and the fraction (0..1) of a tick since then, so the frame shows the state that much
+// past the previous tick's (one tick late).
+void MotionFrameState(uint64_t* tick, float* fraction);
 // Native front end (game thread): a frame was presented.
 void InterpFrame();
 // Native front end (game thread, at the hand-over): a draw's pointer-loaded float

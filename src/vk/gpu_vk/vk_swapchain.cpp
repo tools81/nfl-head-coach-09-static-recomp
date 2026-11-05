@@ -43,6 +43,21 @@ bool Swapchain::Build(uint32_t width, uint32_t height, std::string* err)
     for (const auto& f : fmts)
         if ((f.format == VK_FORMAT_B8G8R8A8_UNORM || f.format == VK_FORMAT_R8G8B8A8_UNORM) &&
             f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { chosen = f; break; }
+    // hc09: HDR10 (10-bit PQ, BT.2020) when asked for and offered (Windows offers it with HDR on in its settings).
+    hdrActive = false;
+    if (hdrRequested && (caps.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))
+        for (const auto& f : fmts)
+            if ((f.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || f.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32) &&
+                f.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT) { chosen = f; hdrActive = true; break; }
+    static bool logged = false;
+    if (hdrRequested && !logged)
+    {
+        logged = true;
+        if (hdrActive)
+            fprintf(stderr, "[hdr] HDR10 output: paper white %.0f nits, peak %.0f nits\n", hdr.paperWhite, hdr.peak);
+        else
+            fprintf(stderr, "[hdr] the display offers no HDR10 output (is HDR on in Windows' display settings?); SDR it is\n");
+    }
     format = chosen.format;
     extent = caps.currentExtent.width != 0xFFFFFFFFu ? caps.currentExtent : VkExtent2D{ width, height };
     extent.width = std::clamp(extent.width, caps.minImageExtent.width, caps.maxImageExtent.width);
@@ -121,6 +136,8 @@ void Swapchain::Destroy()
     DestroySwapchain();
     DestroyOverlay();
     upscaler.Destroy();
+    hdr.Destroy();
+    if (sdr_.image) dev->DestroyImage(sdr_);
     dev->DestroyBuffer(readback);
     if (acquired) vkDestroySemaphore(dev->device, acquired, nullptr);
     if (fence) vkDestroyFence(dev->device, fence, nullptr);
@@ -146,7 +163,23 @@ VkResult Swapchain::Present(const Image& src, std::vector<uint32_t>* presented)
             wantReadback = false;
     }
 
-    VkImage dst = images[index];
+    // hc09: HDR (or its debug view): the picture is made in sdr_ as it would be in the window, then the HDR pass
+    // writes the window from it.
+    const VkImage swapImage = images[index];
+    const VkImageView swapView = index < views.size() ? views[index] : VK_NULL_HANDLE;
+    bool viaHdr = (hdrActive || hdr.debug) && swapView;
+    if (viaHdr && (sdr_.width != extent.width || sdr_.height != extent.height))
+    {
+        if (sdr_.image) dev->DestroyImage(sdr_);   // the fence: the last frame's work is done
+        viaHdr = dev->CreateImage(VK_IMAGE_VIEW_TYPE_2D, extent.width, extent.height, 1, VK_FORMAT_R8G8B8A8_UNORM,
+                                  VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                      VK_IMAGE_USAGE_SAMPLED_BIT,
+                                  sdr_);
+        if (!viaHdr) sdr_ = Image{};
+    }
+    const VkImage dst = viaHdr ? sdr_.image : swapImage;
+    const VkImageView dstView = viaHdr ? sdr_.view : swapView;
+    const VkFormat dstFormat = viaHdr ? VK_FORMAT_R8G8B8A8_UNORM : format;
     vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -171,14 +204,14 @@ VkResult Swapchain::Present(const Image& src, std::vector<uint32_t>* presented)
     // hc09: scaled with FSR 1 (or the area filter) and sharpened where the swapchain can be rendered to, else (and
     // at the image's own size) blitted.
     bool scaled = false;
-    if (upscaler.enabled && !(w == src.width && h == src.height) && index < views.size() && views[index])
+    if (upscaler.enabled && !(w == src.width && h == src.height) && dstView)
     {
         ImageBarrier(cb, dst, layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, stage, access, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                      VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
         layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        scaled = upscaler.Record(*dev, cb, src, views[index], format, x0, y0, w, h);
+        scaled = upscaler.Record(*dev, cb, src, dstView, dstFormat, x0, y0, w, h);
         if (!scaled)
         {
             ImageBarrier(cb, dst, layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, stage, access, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -201,7 +234,7 @@ VkResult Swapchain::Present(const Image& src, std::vector<uint32_t>* presented)
     }
     // The overlay: alpha-blended triangles over the scaled image (the live tweaker's; the release build,
     // HC09_DEV_TOOLS=0, has none and leaves the overlay pipeline out).
-    if (HC09_DEV_TOOLS && !overlay.empty() && index < views.size() && views[index] && EnsureOverlayPipeline())
+    if (HC09_DEV_TOOLS && !overlay.empty() && dstView && EnsureOverlayPipeline(dstFormat))
     {
         const VkDeviceSize vbytes = overlay.size() * sizeof(OverlayVtx);
         if (ovVerts.size < vbytes)
@@ -217,7 +250,7 @@ VkResult Swapchain::Present(const Image& src, std::vector<uint32_t>* presented)
                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                          VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
             VkRenderingAttachmentInfo att{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
-            att.imageView = views[index];
+            att.imageView = dstView;
             att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
             att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -244,22 +277,73 @@ VkResult Swapchain::Present(const Image& src, std::vector<uint32_t>* presented)
         }
     }
     overlay.clear();
+    // What is read back: the window's image, or with HDR the SDR picture it was made from (the debug view: the
+    // window's image).
+    VkImage readImage = dst;
+    VkFormat readFormat = dstFormat;
+    bool copiedSdr = false;
+    if (viaHdr)
+    {
+        ImageBarrier(cb, sdr_.image, layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, stage, access, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                     VK_ACCESS_SHADER_READ_BIT);
+        ImageBarrier(cb, swapImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
+                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+        if (!hdr.Record(*dev, cb, sdr_, src, x0, y0, w, h, gain, swapView, format, extent, hdrActive))
+        {
+            // No HDR pass: the SDR picture as it is (wrong colours on an HDR10 swapchain, but a picture).
+            ImageBarrier(cb, sdr_.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+            ImageBarrier(cb, swapImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+            VkImageBlit blit{};
+            blit.srcSubresource = blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            blit.srcOffsets[1] = blit.dstOffsets[1] = { int32_t(extent.width), int32_t(extent.height), 1 };
+            vkCmdBlitImage(cb, sdr_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                           VK_FILTER_NEAREST);
+            ImageBarrier(cb, sdr_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, 0);
+            ImageBarrier(cb, swapImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0);
+        }
+        if (wantReadback && hdrActive)
+        {
+            ImageBarrier(cb, sdr_.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+            VkBufferImageCopy copy{};
+            copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            copy.imageExtent = { extent.width, extent.height, 1 };
+            vkCmdCopyImageToBuffer(cb, sdr_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.buffer, 1, &copy);
+            wantReadback = false;   // the copy is recorded; the pixels are read below
+            copiedSdr = true;
+        }
+        else
+        {
+            readImage = swapImage;
+            readFormat = format;
+        }
+        layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    }
+    gain = {};
     if (wantReadback)
     {
-        ImageBarrier(cb, dst, layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stage, access, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        ImageBarrier(cb, readImage, layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stage, access, VK_PIPELINE_STAGE_TRANSFER_BIT,
                      VK_ACCESS_TRANSFER_READ_BIT);
         VkBufferImageCopy copy{};
         copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
         copy.imageExtent = { extent.width, extent.height, 1 };
-        vkCmdCopyImageToBuffer(cb, dst, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.buffer, 1, &copy);
-        ImageBarrier(cb, dst, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        vkCmdCopyImageToBuffer(cb, readImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.buffer, 1, &copy);
+        ImageBarrier(cb, readImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                      VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0);
     }
     else
-        ImageBarrier(cb, dst, layout, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, stage, access, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0);
+        ImageBarrier(cb, swapImage, layout, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, stage, access, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0);
+    if (copiedSdr) wantReadback = true;
     vkEndCommandBuffer(cb);
 
-    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    // The image is first written by a transfer (the clear) or, with HDR, as a colour attachment.
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
     si.waitSemaphoreCount = 1;
     si.pWaitSemaphores = &acquired;
@@ -283,7 +367,7 @@ VkResult Swapchain::Present(const Image& src, std::vector<uint32_t>* presented)
         vkWaitForFences(d, 1, &fence, VK_TRUE, UINT64_MAX);
         presented->resize(size_t(extent.width) * extent.height);
         memcpy(presented->data(), readback.mapped, size_t(bytes));
-        if (format == VK_FORMAT_B8G8R8A8_UNORM)   // B,G,R,A -> R,G,B,A
+        if (readFormat == VK_FORMAT_B8G8R8A8_UNORM)   // B,G,R,A -> R,G,B,A
             for (uint32_t& p : *presented) p = (p & 0xFF00FF00u) | ((p >> 16) & 0xFFu) | ((p & 0xFFu) << 16);
     }
     return r;
@@ -291,9 +375,9 @@ VkResult Swapchain::Present(const Image& src, std::vector<uint32_t>* presented)
 
 // The overlay pipeline: 2-D triangles in pixels, vertex colour, alpha blending, dynamic rendering into the
 // swapchain image. Made on first use (and again if the swapchain format changes).
-bool Swapchain::EnsureOverlayPipeline()
+bool Swapchain::EnsureOverlayPipeline(VkFormat target)
 {
-    if (ovPipeline && ovFormat == format) return true;
+    if (ovPipeline && ovFormat == target) return true;
     if (ovFailed) return false;
     DestroyOverlay();
     static const char* kVs =
@@ -378,7 +462,7 @@ bool Swapchain::EnsureOverlayPipeline()
     ds.pDynamicStates = dyn;
     VkPipelineRenderingCreateInfo rinfo{ VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
     rinfo.colorAttachmentCount = 1;
-    rinfo.pColorAttachmentFormats = &format;
+    rinfo.pColorAttachmentFormats = &target;
     VkGraphicsPipelineCreateInfo pi{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
     pi.pNext = &rinfo;
     pi.stageCount = 2;
@@ -400,7 +484,7 @@ bool Swapchain::EnsureOverlayPipeline()
         ovFailed = true;
         return false;
     }
-    ovFormat = format;
+    ovFormat = target;
     return true;
 }
 

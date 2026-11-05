@@ -1426,6 +1426,7 @@ namespace hc09::gpu
                 } while (FindNextFileW(search, &entry));
                 FindClose(search);
             };
+            add(L"textures\\hd");   // a generated HD pack (tools/hdpack): any hand-made replacement wins
             add(L"textures\\hashed");
             if (edition::kModFolder)
                 add(std::wstring(edition::kModFolder) + L"\\textures\\hashed");

@@ -5,6 +5,7 @@ ppc/
 .venv/
 thirdparty/XenonRecomp/
 thirdparty/ffmpeg/
+thirdparty/realesrgan/
 thirdparty/vulkan/
 __pycache__/
 *.pyc
@@ -15,3 +16,6 @@ tools/roster_import/*.csv
 tools/roster_import/ROSTER-*
 tools/roster_import/data/
 /textures/
+
+# Personal Claude Code settings
+.claude/settings.local.json

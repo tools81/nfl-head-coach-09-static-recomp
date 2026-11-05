@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "vk_device.h"
+#include "vk_hdr.h"
 #include "vk_upscale.h"
 
 namespace hc09vk {
@@ -38,6 +39,10 @@ struct Swapchain
     bool vsync = true;                     // set before Create: false = mailbox/immediate if offered
     Upscaler upscaler;                     // hc09: FSR 1 / area scaling and sharpening in place of the blit
     float stretch = 1.0f;                  // hc09: the picture is shown this much wider than its pixels (widescreen.h)
+    bool hdrRequested = false;             // hc09: set before Create: an HDR10 swapchain if the display offers one
+    bool hdrActive = false;                // hc09: the swapchain is HDR10 (vk_hdr.h)
+    HdrOutput hdr;                         // hc09: the SDR picture to HDR10 (or its debug view)
+    HdrGain gain;                          // hc09: the scene's HDR gain for the next Present (cleared by it)
 
     bool Create(Device& device, VkSurfaceKHR surf, uint32_t width, uint32_t height, std::string* err);
     // Rebuild for a new window size (no-op for 0x0, e.g. minimized).
@@ -52,10 +57,11 @@ struct Swapchain
 private:
     bool Build(uint32_t width, uint32_t height, std::string* err);
     void DestroySwapchain();
-    bool EnsureOverlayPipeline();
+    bool EnsureOverlayPipeline(VkFormat target);
     void DestroyOverlay();
 
     std::vector<VkImageView> views;        // one per swapchain image (overlay rendering)
+    Image sdr_;                            // hc09: HDR: the window's picture in SDR, before the HDR pass
     VkPipeline ovPipeline = VK_NULL_HANDLE;
     VkPipelineLayout ovLayout = VK_NULL_HANDLE;
     VkFormat ovFormat = VK_FORMAT_UNDEFINED;

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "../widescreen.h"
+#include "vk_motion.h"
 #include "vk_scene_effects.h"
 #include "vk_shader_compile.h"
 #include "xe_glsl.h"
@@ -89,6 +90,7 @@ struct Texture
     uint32_t pa = 0, bytes = 0;
     uint64_t epoch = 0;
     uint64_t lastUsed = 0;
+    uint32_t extra = 0;   // hc09: mip levels above the game's (a replacement 2^extra times its size)
 };
 
 void MakeMips(std::vector<xenos::Image>& levels, uint32_t maxLevel)
@@ -485,10 +487,199 @@ struct NativeRenderer::Impl
     // hc09: ambient occlusion and reflections (vk_scene_effects.h), on the frame's first resolve of the target the
     // 3D scene was drawn into (with its camera from the scene's draws, until then).
     SceneEffects effects;
+    // hc09: smooth motion (vk_motion.h): on once the front end gives frame states.
+    MotionInterpolator motion;
+    bool motionOn = false;
+    std::vector<float> motionScratch = std::vector<float>(512 * 4);
     SceneView sceneView;
     const Target* sceneColor = nullptr;
     const Target* sceneDepth = nullptr;
     uint64_t effectsFrame = ~0ull;
+    uint64_t gainFrame = ~0ull;   // the frame whose scene made the HDR gain image
+    bool frontGain = false;       // the front buffer DecodeFrontBuffer made last is that frame's
+
+    // hc09: the crowd (roadmap 11). The stands are cards (pixel shader kCrowdPs, its fetch slot 1) cut from an atlas
+    // of 16 fans the game renders each frame, so every card showing the same fan moves with it. Every other frame
+    // the atlas is kept in a ring of kCrowdLayers layers, and each card shows a moment of that history of its own
+    // (up to about a second back), mirrored or not and a little lighter or darker (CrowdPatch). hc09.ini
+    // Crowd=on (the default) / off, as HC09_CROWD; HC09_CROWD_DUMP=1 (dev): the first captured atlas as
+    // build/crowd_atlas.png.
+    static constexpr uint64_t kCrowdPs = 0xd77adb6f57ac1922ull;
+    static constexpr uint32_t kCrowdLayers = 24, kCrowdLevels = 4;
+    bool crowdOn = false;             // Init: the setting, and the device can give the shader gl_PrimitiveID
+    uint32_t crowdAtlas = 0;          // the atlas's address, learned from the cards' draws
+    Texture crowdHistory;             // the ring (2D array: the cube binding of the slot)
+    uint32_t crowdNewest = 0, crowdFilled = 0;
+    uint64_t crowdFrame = ~0ull;
+    bool crowdDumped = false;
+
+    void CrowdBarrier(uint32_t baseLevel, uint32_t levels, uint32_t layer, uint32_t layers, VkImageLayout from, VkImageLayout to,
+                      VkPipelineStageFlags srcStage, VkAccessFlags srcAccess, VkPipelineStageFlags dstStage, VkAccessFlags dstAccess)
+    {
+        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = crowdHistory.img.image;
+        b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, baseLevel, levels, layer, layers };
+        b.oldLayout = from;
+        b.newLayout = to;
+        b.srcAccessMask = srcAccess;
+        b.dstAccessMask = dstAccess;
+        vkCmdPipelineBarrier(cb, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
+    }
+
+    // The atlas's resolve: its pixels (the render target's, before the resolve to memory) into the ring's next layer,
+    // with mipmaps.
+    void CaptureCrowd(Target* src, const d3dn::ResolveOp& r)
+    {
+        if (frame == crowdFrame || (frame & 1)) return;
+        const uint32_t w = uint32_t(r.x1 - r.x0) * scale, h = uint32_t(r.y1 - r.y0) * scale;
+        const uint32_t sx = uint32_t(r.x0) * scale, sy = uint32_t(r.y0) * scale;
+        if (!w || !h || sx + w > src->img.width || sy + h > src->img.height) return;
+        Image& img = crowdHistory.img;
+        if (img.image && (img.width != w || img.height != h || img.format != src->img.format))
+        {
+            garbage.push_back(img);
+            img = Image{};
+            crowdFilled = 0;
+        }
+        const bool fresh = !img.image;
+        if (fresh)
+        {
+            if (!dev->CreateImage(VK_IMAGE_VIEW_TYPE_2D_ARRAY, w, h, kCrowdLayers, src->img.format,
+                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, img, kCrowdLevels))
+            {
+                img = Image{};
+                crowdOn = false;
+                Warn("the crowd's history image could not be made; the crowd is drawn as the game draws it");
+                return;
+            }
+            crowdHistory.width = w;
+            crowdHistory.height = h;
+            crowdHistory.depth = kCrowdLayers;
+            crowdHistory.kind = kTexCube;
+            crowdNewest = 0;
+            crowdFilled = 0;
+        }
+        crowdFrame = frame;
+        EndRendering();
+        Begin();
+        const uint32_t layer = crowdFilled ? (crowdNewest + 1) % kCrowdLayers : 0;
+        MemoryBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        if (fresh)
+            CrowdBarrier(0, kCrowdLevels, 0, kCrowdLayers, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        else
+            CrowdBarrier(0, kCrowdLevels, layer, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+        if (src->samples != VK_SAMPLE_COUNT_1_BIT)
+        {
+            VkImageResolve re{};
+            re.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            re.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, layer, 1 };
+            re.srcOffset = { int32_t(sx), int32_t(sy), 0 };
+            re.extent = { w, h, 1 };
+            vkCmdResolveImage(cb, src->img.image, VK_IMAGE_LAYOUT_GENERAL, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &re);
+        }
+        else
+        {
+            VkImageCopy co{};
+            co.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+            co.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, layer, 1 };
+            co.srcOffset = { int32_t(sx), int32_t(sy), 0 };
+            co.extent = { w, h, 1 };
+            vkCmdCopyImage(cb, src->img.image, VK_IMAGE_LAYOUT_GENERAL, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &co);
+        }
+        for (uint32_t level = 1; level < kCrowdLevels; ++level)
+        {
+            CrowdBarrier(level - 1, 1, layer, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+            VkImageBlit bl{};
+            bl.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level - 1, layer, 1 };
+            bl.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level, layer, 1 };
+            bl.srcOffsets[1] = { int32_t(std::max(1u, w >> (level - 1))), int32_t(std::max(1u, h >> (level - 1))), 1 };
+            bl.dstOffsets[1] = { int32_t(std::max(1u, w >> level)), int32_t(std::max(1u, h >> level)), 1 };
+            vkCmdBlitImage(cb, img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl,
+                           VK_FILTER_LINEAR);
+        }
+        CrowdBarrier(0, kCrowdLevels - 1, layer, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+        CrowdBarrier(kCrowdLevels - 1, 1, layer, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+        if (fresh)   // the layers not written yet: sampled only once they are, but kept in the layout the descriptor names
+            for (uint32_t l = 0; l < kCrowdLayers; ++l)
+                if (l != layer)
+                    CrowdBarrier(0, kCrowdLevels, l, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0);
+        crowdNewest = layer;
+        crowdFilled = std::min(crowdFilled + 1, kCrowdLayers);
+        if (!crowdDumped && Hc09Env("HC09_CROWD_DUMP")) DumpCrowd(layer);
+    }
+
+    // HC09_CROWD_DUMP (dev): a captured layer, read back (waits for the GPU), as build/crowd_atlas.png.
+    void DumpCrowd(uint32_t layer)
+    {
+        crowdDumped = true;
+        const Image& img = crowdHistory.img;
+        Buffer buf;
+        if (!dev->CreateBuffer(VkDeviceSize(img.width) * img.height * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, buf))
+            return;
+        CrowdBarrier(0, 1, layer, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        VkBufferImageCopy copy{};
+        copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, layer, 1 };
+        copy.imageExtent = { img.width, img.height, 1 };
+        vkCmdCopyImageToBuffer(cb, img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf.buffer, 1, &copy);
+        CrowdBarrier(0, 1, layer, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                     0, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+        SubmitAndWait();
+        xenos::Image out{ img.width, img.height, std::vector<uint32_t>(size_t(img.width) * img.height) };
+        memcpy(out.rgba.data(), buf.mapped, out.rgba.size() * 4);
+        if (img.format == VK_FORMAT_B8G8R8A8_UNORM)
+            for (uint32_t& p : out.rgba) p = (p & 0xFF00FF00u) | ((p >> 16) & 0xFFu) | ((p & 0xFFu) << 16);
+        xenos::WritePng("build/crowd_atlas.png", out);
+        fprintf(stderr, "[crowd] wrote build/crowd_atlas.png (%ux%u, format %d)\n", img.width, img.height, int(img.format));
+        dev->DestroyBuffer(buf);
+    }
+
+    // The cards' shader: the atlas fetch made xeCrowd, a layer of the history and a mirror and shade per card (the
+    // card: its quad, gl_PrimitiveID / 2, in its draw, the index buffer's address hashed into DrawConsts::pad0).
+    void CrowdPatch(std::string& glsl)
+    {
+        const std::string fetch = "texture(tex2d[1], uv, ";
+        const size_t at = glsl.find(fetch), mainAt = glsl.find("void main()");
+        if (at == std::string::npos || mainAt == std::string::npos || at < mainAt)
+        {
+            Warn("the crowd's shader is not as expected; the crowd is drawn as the game draws it");
+            crowdOn = false;
+            return;
+        }
+        glsl.replace(at, fetch.size(), "xeCrowd(uv, ");
+        const std::string fn =
+            "// hc09: the crowd (vk_native.cpp, kCrowdPs).\n"
+            "vec4 xeCrowd(vec2 uv, float bias)\n"
+            "{\n"
+            "    uint info = floatBitsToUint(D.pad2);\n"
+            "    uint filled = (info >> 8) & 0xFFu;\n"
+            "    if (filled == 0u) return texture(tex2d[1], uv, bias);\n"
+            "    uint h = (uint(gl_PrimitiveID) >> 1) * 0x9E3779B9u ^ (info >> 16) * 0x85EBCA6Bu;\n"
+            "    h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12; h *= 0x297A2D39u; h ^= h >> 15;\n"
+            "    uint layer = ((info & 0xFFu) + " + std::to_string(kCrowdLayers) + "u - h % filled) % " + std::to_string(kCrowdLayers) + "u;\n"
+            "    if (CROWD_MIRROR != 0 && (h & 0x10000u) != 0u) { float cell = floor(uv.x * 16.0); uv.x = (2.0 * cell + 1.0) / 16.0 - uv.x; }\n"
+            "    vec4 c = texture(texCube[1], vec3(uv, float(layer)), bias);\n"
+            "    c.rgb *= 0.92 + 0.16 * float((h >> 20) & 0xFFu) / 255.0;\n"
+            "    if (CROWD_DEBUG != 0)   // each card coloured by how far back it looks\n"
+            "    {\n"
+            "        float back = float(h % filled) / float(filled);\n"
+            "        c.rgb = c.a * clamp(abs(fract(back + vec3(0.0, 0.33, 0.67)) * 6.0 - 3.0) - 1.0, 0.0, 1.0);\n"
+            "    }\n"
+            "    return c;\n"
+            "}\n\n";
+        // HC09_CROWD_DEBUG=1 (dev): the cards coloured by their moment of the history.
+        glsl.insert(mainAt, "#define CROWD_MIRROR " + std::string(crowdMirror ? "1" : "0") + "\n#define CROWD_DEBUG " +
+                                std::string(Hc09Env("HC09_CROWD_DEBUG") ? "1" : "0") + "\n" + fn);
+    }
+    bool crowdMirror = true;          // per-card mirroring about the card's cell (the atlas: 16 cells in a row, each fan in the middle; HC09_CROWD_MIRROR=0: none)
     // hc09: widescreen (widescreen.h): the squeeze factor (1: off), and the guest ranges that hold resolves of targets
     // with 3D content (Target::wide).
     float squeeze = 1.0f / WidescreenStretch();
@@ -1140,6 +1331,7 @@ struct NativeRenderer::Impl
         if (it != shaders.end()) return it->second.ok ? &it->second : nullptr;
         ShaderEntry& e = shaders[key];
         e.meta = TranslateShader(code, translate);
+        if (!vs && hash == kCrowdPs && crowdOn && e.meta.error.empty()) CrowdPatch(e.meta.glsl);
         char name[64];
         snprintf(name, sizeof(name), "native_%s_%016llx", vs ? "vs" : "ps", (unsigned long long)hash);
         if (!e.meta.error.empty()) { Warn(std::string("shader ") + name + " failed: " + e.meta.error); return nullptr; }
@@ -1438,8 +1630,18 @@ struct NativeRenderer::Impl
             if (!e.dynamic && lo < pa + bytes && pa < lo + n) e.dynamic = true;
         }
     }
+    // hc09: the guest pages resolves have written (render-to-texture: not the game's own images), for the texture dump.
+    std::vector<uint64_t> resolvedPages = std::vector<uint64_t>((0x20000000u >> 12) / 64);
+    bool Resolved(uint32_t pa, uint32_t bytes) const
+    {
+        for (uint32_t p = pa >> 12; p <= (pa + std::max(bytes, 1u) - 1) >> 12 && p < (0x20000000u >> 12); ++p)
+            if ((resolvedPages[p >> 6] >> (p & 63)) & 1) return true;
+        return false;
+    }
     void InvalidateTextures(uint32_t pa, uint32_t bytes)
     {
+        for (uint32_t p = pa >> 12; p <= (pa + std::max(bytes, 1u) - 1) >> 12 && p < (0x20000000u >> 12); ++p)
+            resolvedPages[p >> 6] |= 1ull << (p & 63);
         for (auto it = textures.begin(); it != textures.end();)
         {
             const Texture& t = it->second;
@@ -1515,6 +1717,7 @@ struct NativeRenderer::Impl
         uint32_t kind = tf.is3D() ? kTex3D : tf.dimension() == 3 || tf.stacked() ? kTexCube : kTex2D;
         t.stacked = tf.stacked();
         if (kind == kTex2D && tf.dimension() == 1 && (tf.format() == 6 || tf.format() == 22) &&
+            !(g_texOverride.dump && g_texOverride.dumping(tf) && !Resolved(t.pa, t.bytes)) &&
             !(g_texOverride.has && g_texOverride.has(tf, key[6])) && DecodeOnGpu(t, tf))
             return &t;
         if (resolveGpu) ReleaseOverlapping(t.pa, t.bytes);
@@ -1526,9 +1729,18 @@ struct NativeRenderer::Impl
         {
             std::string why;
             if (!xenos::DecodeTextureLayer(tf, l, layers[l][0], &why)) { Warn("texture not decoded: " + why); return &dummy[kTex2D]; }
+            if (n == 1 && kind == kTex2D && g_texOverride.dump && !Resolved(t.pa, t.bytes)) g_texOverride.dump(tf, layers[l][0]);
             // hc09: replace is asked for every single-layer texture (replacements by content hash have no set).
-            if (n == 1 && g_texOverride.replace && g_texOverride.replace(tf, key[6], layers[l][0])) replaced = true;
-            if (kind != kTex3D) MakeMips(layers[l], Bits(tf.dword[4], 6, 4));
+            if (n == 1 && g_texOverride.replace && g_texOverride.replace(tf, key[6], layers[l][0]))
+            {
+                replaced = true;
+                // A larger replacement gets a level per doubling more, down to the game's own sizes: shrunk on the
+                // screen (or into a render target, as the jerseys' names), it is filtered from them, not aliased.
+                t.extra = 0;
+                while (t.extra < 4 && (layers[l][0].width >> (t.extra + 1)) >= tf.width() && (layers[l][0].height >> (t.extra + 1)) >= tf.height())
+                    ++t.extra;
+            }
+            if (kind != kTex3D) MakeMips(layers[l], Bits(tf.dword[4], 6, 4) + (replaced ? t.extra : 0));
         }
         if (!Upload(t, kind, layers)) { Warn("texture upload failed"); return &dummy[kTex2D]; }
         if (replaced) { t.width = tf.width(); t.height = tf.height(); }   // the guest size: the shaders' texel units
@@ -1536,7 +1748,7 @@ struct NativeRenderer::Impl
         return &t;
     }
 
-    VkSampler Sampler(const xenos::TextureFetch& tf, uint8_t override, uint32_t levels, uint32_t kind)
+    VkSampler Sampler(const xenos::TextureFetch& tf, uint8_t override, uint32_t levels, uint32_t kind, uint32_t extra = 0)
     {
         uint32_t magF = (override & 3) == 3 ? Bits(tf.dword[3], 19, 2) : (override & 3);
         uint32_t minF = ((override >> 2) & 3) == 3 ? Bits(tf.dword[3], 21, 2) : ((override >> 2) & 3);
@@ -1545,6 +1757,13 @@ struct NativeRenderer::Impl
         uint32_t minLevel = std::min(Bits(tf.dword[4], 2, 4), levels - 1), maxLevel = std::min(Bits(tf.dword[4], 6, 4), levels - 1);
         if (maxLevel < minLevel) maxLevel = minLevel;
         if (mipF == 2) maxLevel = minLevel;
+        // hc09: a larger replacement's levels above the game's (Texture::extra) may be used, the game's base level
+        // among them, even when the game samples only its base level.
+        if (extra && kind == kTex2D)
+        {
+            maxLevel = std::min(maxLevel + extra, levels - 1);
+            if (mipF == 2) mipF = 1;
+        }
         int32_t bias = SBits(tf.dword[4], 12, 10);
         if (kind == kTex3D) { minF = magF; mipF = 2; minLevel = maxLevel = 0; bias = 0; }
         else cz = 2;
@@ -1855,7 +2074,23 @@ struct NativeRenderer::Impl
                 i = j;
             }
         };
-        window(vsBase, vsSize, &vs->meta);
+        if (motionOn && vsBase < 512)
+        {
+            // The VS window blended between simulation ticks (vk_motion.h), then the constants the shader reads.
+            const uint32_t size = std::min(vsSize, 512 - vsBase);
+            float* w = motionScratch.data();
+            xenos::RegRange(reg::ALU_CONSTANTS + vsBase * 4, size * 4, reinterpret_cast<uint32_t*>(w));
+            // The draw's kind (its shaders and index range); draws of a kind are told apart by their constants.
+            const uint64_t key = vsHash ^ (psHash * 0x100000001B3ull) ^ (uint64_t(d.dmaBase) << 20) ^ (uint64_t(d.numIndices) << 44);
+            motion.Process(key, w, size, d.numIndices);
+            if (!trimConsts || vs->meta.constRelative)
+                std::memcpy(C.c[vsBase], w, size_t(size) * 16);
+            else
+                for (uint32_t i = 0; i < size; ++i)
+                    if ((vs->meta.constUsed[i >> 6] >> (i & 63)) & 1) std::memcpy(C.c[vsBase + i], w + i * 4, 16);
+        }
+        else
+            window(vsBase, vsSize, &vs->meta);
         if (ps) window(psBase, psSize, &ps->meta);
         xenos::RegRange(reg::BOOL_CONSTANTS, 8, C.bools);
         xenos::RegRange(reg::LOOP_CONSTANTS, 32, C.loops);
@@ -1966,13 +2201,31 @@ struct NativeRenderer::Impl
                 else if (memoHit[s] && slotMemo[s].smp) slotSmp[s][k] = slotMemo[s].smp;
                 else
                 {
-                    slotSmp[s][k] = Sampler(tfOf[s], filt == 0xFF ? 0x3F : filt, u->img.mipLevels, k);
+                    slotSmp[s][k] = Sampler(tfOf[s], filt == 0xFF ? 0x3F : filt, u->img.mipLevels, k, u->extra);
                     if (slotMemo[s].tex == t) { slotMemo[s].smp = slotSmp[s][k]; slotMemo[s].filt = filt; }
                 }
             }
             uint32_t k = t->kind < kTexKinds ? t->kind : 0;
             descKey.insert(descKey.end(), { uint64_t(s) | (uint64_t(k) << 8), uint64_t(slotTex[s][k]->img.view), uint64_t(slotSmp[s][k]) });
         }
+        // hc09: the crowd's cards: the atlas's history in the slot's array binding, and which layer is newest, how
+        // many are filled, and the draw's key (CrowdPatch) in pad0.
+        uint32_t crowdInfo = 0;
+        if (crowdOn && psHash == kCrowdPs && (slots & 2u))
+        {
+            crowdAtlas = texOf[1]->pa;
+            if (crowdFilled && crowdHistory.img.image)
+            {
+                slotTex[1][kTexCube] = &crowdHistory;
+                slotSmp[1][kTexCube] = slotSmp[1][kTex2D];
+                descKey.insert(descKey.end(), { 1u | (uint64_t(kTexCube) << 8) | (1ull << 32), uint64_t(crowdHistory.img.view),
+                                                uint64_t(slotSmp[1][kTexCube]) });
+                uint32_t key = d.dmaBase * 0x9E3779B1u;
+                key ^= key >> 16;
+                crowdInfo = crowdNewest | (crowdFilled << 8) | (key << 16);
+            }
+        }
+        memcpy(&C.pad0, &crowdInfo, sizeof(crowdInfo));
         VkDescriptorSet set = VK_NULL_HANDLE;
         if (lastSet && descKey == lastDescKey) set = lastSet;
         else if (auto dit = descSets.find(descKey); dit != descSets.end()) set = dit->second;
@@ -2064,7 +2317,11 @@ struct NativeRenderer::Impl
             std::string tex;
             for (uint32_t s = 0; s < 32; ++s)
                 if ((slots & (1u << s)) && texOf[s])
-                    tex += " " + std::to_string(texOf[s]->width) + "x" + std::to_string(texOf[s]->height) + (SamplesWide(tfOf[s]) ? "w" : "");
+                {
+                    char at[16];
+                    snprintf(at, sizeof(at), "@%08X", texOf[s]->pa);
+                    tex += " " + std::to_string(texOf[s]->width) + "x" + std::to_string(texOf[s]->height) + (SamplesWide(tfOf[s]) ? "w" : "") + at;
+                }
             fprintf(stderr, "[draw] %ux%u ms%u ps %016llx sq %d 3d %d colour %d stencil %d z %d%d scissor %d,%d-%d,%d n %u tex%s\n", bound[0].width,
                     bound[0].height, bound[0].msaa, (unsigned long long)psHash, squeezed, C.wideClip != 0.0f, colorOn, stencilOn, zEnable, zWrite,
                     scx0, scy0, scx1, scy1, d.numIndices, tex.c_str());
@@ -2152,12 +2409,13 @@ struct NativeRenderer::Impl
         if (!sceneView.camera.valid || effectsFrame == frame || src != sceneColor || bd != sceneDepth || !bd || !bd->depthView) return;
         effectsFrame = frame;
         EndRendering();
-        // The passes' descriptor sets (five) must not make ComputeSet submit in the middle of them.
-        if (computeSetsUsed + 8 > kComputeSets) SubmitAndWait(NativeProfile::kWaitCompute);
+        // The passes' descriptor sets (up to 17) must not make ComputeSet submit in the middle of them.
+        if (computeSetsUsed + 24 > kComputeSets) SubmitAndWait(NativeProfile::kWaitCompute);
         Begin();
         Mark(NativeProfile::kGpuOther);
         effects.Apply(cb, src->img, src->samples, bd->depthView, sceneView,
                       [this](VkDescriptorSetLayout layout) { return ComputeSet(layout); }, garbage);
+        if (float rect[4]; effects.HdrGain(rect)) gainFrame = frame;
         sceneView = {};
     }
 
@@ -2174,6 +2432,7 @@ struct NativeRenderer::Impl
                     src == sceneColor && sceneView.camera.valid ? " [scene]" : "");
         }
         if (effects.Enabled() && r.src < 4) ApplySceneEffects(src);
+        if (crowdOn && crowdAtlas && r.src < 4 && r.copy && r.destBase == crowdAtlas && r.x0 == 0 && r.y0 == 0) CaptureCrowd(src, r);
         // The rectangle in guest pixels (the source image is `scale` times the surface).
         int32_t x1 = std::min<int32_t>(r.x1, int32_t(src->img.width / scale)), y1 = std::min<int32_t>(r.y1, int32_t(src->img.height / scale));
         if (r.copy && x1 > r.x0 && y1 > r.y0)
@@ -2354,7 +2613,7 @@ bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* e
     // Compute: one pool for resolves, texture decodes and mips.
     VkDescriptorPoolSize cps[3] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, Impl::kComputeSets * 2 },
                                     { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, Impl::kComputeSets * 2 },
-                                    { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, Impl::kComputeSets * 2 } };
+                                    { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, Impl::kComputeSets * 3 } };
     VkDescriptorPoolCreateInfo cpi{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     cpi.maxSets = Impl::kComputeSets;
     cpi.poolSizeCount = 3;
@@ -2486,6 +2745,8 @@ bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* e
     VkSamplerCreateInfo nci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
     vkCreateSampler(d, &nci, nullptr, &I.nearest);
     I.effects.Init(dev);
+    if (const char* e = Hc09Env("HC09_CROWD"); (!e || atoi(e) != 0) && dev.geometryShader) I.crowdOn = true;
+    if (const char* e = Hc09Env("HC09_CROWD_MIRROR")) I.crowdMirror = atoi(e) != 0;
     std::vector<std::vector<xenos::Image>> one(1, std::vector<xenos::Image>(1));
     one[0][0].width = one[0][0].height = 1;
     one[0][0].rgba.assign(1, 0u);
@@ -2540,6 +2801,7 @@ void NativeRenderer::EndFrame()
     I.Submit(false, NativeProfile::kWaitFrame);
     lap.To(NativeProfile::kSubmit);
     I.sceneView = {};
+    if (I.motionOn) I.motion.Report();
     if (I.squeeze != 1.0f)
         for (auto& [k, t] : I.targets) t.wide = false;
     if (++I.frame % 60 == 0)
@@ -2598,10 +2860,30 @@ const Image* NativeRenderer::DecodeFrontBuffer(uint32_t frontBuffer, uint32_t wi
     if (!impl_) return nullptr;
     Impl::Lap lap(*impl_);
     bool ok = impl_->FrontBuffer(frontBuffer, width, height);
+    impl_->frontGain = ok && impl_->gainFrame == impl_->frame;
     lap.To(NativeProfile::kFront);
     return ok ? &impl_->front : nullptr;
 }
+HdrGain NativeRenderer::SceneHdrGain() const
+{
+    HdrGain gain;
+    float rect[4];
+    if (!impl_ || !impl_->frontGain) return gain;
+    gain.image = impl_->effects.HdrGain(rect);
+    gain.x = rect[0];
+    gain.y = rect[1];
+    gain.width = rect[2];
+    gain.height = rect[3];
+    if (!gain.image) gain = {};
+    return gain;
+}
 uint32_t NativeRenderer::Scale() const { return impl_ ? impl_->scale : 1; }
+void NativeRenderer::SetMotionFrame(uint64_t tick, float fraction)
+{
+    if (!impl_) return;
+    impl_->motionOn = true;
+    impl_->motion.BeginFrame(impl_->frame, tick, fraction);
+}
 bool NativeRenderer::ReadFront(std::vector<uint32_t>& rgba, uint32_t& width, uint32_t& height)
 {
     return impl_ && impl_->ReadFront(rgba, width, height);
@@ -2641,6 +2923,7 @@ void NativeRenderer::Shutdown()
     VkDevice d = I.dev->device;
     vkDeviceWaitIdle(d);
     I.effects.Shutdown();
+    if (I.crowdHistory.img.image) I.dev->DestroyImage(I.crowdHistory.img);
     I.Park(I.slots[I.cur]);
     for (Impl::Slot& sl : I.slots)
     {

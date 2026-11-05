@@ -30,6 +30,35 @@
 // is then free again). The renderer itself keeps two frames in flight (vk_native).
 #include "dev_env.h"
 #include "widescreen.h"
+
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <string>
+#include <windows.h>
+
+namespace {
+// hc09: HDTextures=on (HC09_HD_TEXTURES): when the game closes, HC09HDPack.exe (beside it) upscales what it collected
+// (tools/hdpack), in the background, after this process has ended.
+void StartHdPack()
+{
+    const char* e = std::getenv("HC09_HD_TEXTURES");
+    if (!e || !*e || !strcmp(e, "0")) return;
+    wchar_t self[MAX_PATH];
+    if (!GetModuleFileNameW(nullptr, self, MAX_PATH)) return;
+    std::wstring line = L"\"" + (std::filesystem::path(self).parent_path() / L"HC09HDPack.exe").wstring() + L"\" --wait " +
+                        std::to_wstring(GetCurrentProcessId());
+    STARTUPINFOW si{ sizeof(si) };
+    PROCESS_INFORMATION pi{};
+    if (CreateProcessW(nullptr, line.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | DETACHED_PROCESS | BELOW_NORMAL_PRIORITY_CLASS,
+                       nullptr, nullptr, &si, &pi))
+    {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        fprintf(stderr, "[hdpack] started HC09HDPack.exe for the textures collected\n");
+    }
+}
+}  // namespace
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -487,6 +516,7 @@ struct Live : xenos::DrawObserver
         exiting = true;
         fprintf(stderr, "[gpu-live] window closed: exiting\n");
         renderer.Shutdown();   // waits for the GPU, saves the pipeline cache
+        StartHdPack();
         fflush(stderr);
         _exit(0);
     }
@@ -676,7 +706,7 @@ struct NativeLive : d3dn::Backend
     uint8_t* phys = nullptr;
     struct Cmd
     {
-        enum Kind { kTargets, kClear, kDraw, kResolve, kPresent, kFence } kind = kDraw;
+        enum Kind { kTargets, kClear, kDraw, kResolve, kPresent, kFence, kMotion } kind = kDraw;
         // Targets, clears, resolves and presents (a few per frame): kept apart, so a draw's
         // Cmd (thousands per frame, built and moved at every kick) stays small.
         struct Other
@@ -687,6 +717,8 @@ struct NativeLive : d3dn::Backend
             float color[4] = {}, z = 0;
             d3dn::ResolveOp r;
             uint32_t front = 0, width = 0, height = 0;
+            uint64_t tick = 0;      // kMotion (hc09: smooth motion): the frame's simulation tick and fraction past it
+            float fraction = 1.0f;
         };
         std::unique_ptr<Other> o;
         std::shared_ptr<const d3dn::DrawOp> src;   // the front end's op (not copied: command buffers replay it)
@@ -1162,7 +1194,22 @@ struct NativeLive : d3dn::Backend
         lastSlots = &it->second;   // unordered_map nodes stay put
         return *lastSlots;
     }
-    void Push(Cmd&& c) { pending.push_back(std::move(c)); }
+    // hc09: smooth motion: the first command of each frame is preceded by its state (interp.h MotionFrameState), taken
+    // when the render loop's update began (on this thread, before its D3D calls).
+    bool motionFrameStart = true;
+    void Push(Cmd&& c)
+    {
+        if (motionFrameStart && MotionOn())
+        {
+            motionFrameStart = false;
+            Cmd m;
+            m.kind = Cmd::kMotion;
+            m.o = std::make_unique<Cmd::Other>();
+            MotionFrameState(&m.o->tick, &m.o->fraction);
+            pending.push_back(std::move(m));
+        }
+        pending.push_back(std::move(c));
+    }
     void Flush() override
     {
         ++kickSeq;
@@ -1404,6 +1451,7 @@ struct NativeLive : d3dn::Backend
         c.o->width = width;
         c.o->height = height;
         pending.push_back(std::move(c));
+        motionFrameStart = true;
         Flush();
         uint64_t frame = ++framesQueued;
         // The next frame's snapshots reuse the half the frame before this one used:
@@ -1510,6 +1558,7 @@ struct NativeLive : d3dn::Backend
                 break;
             }
             case Cmd::kPresent: FrameEnd(c.o->front, c.o->width, c.o->height); break;
+            case Cmd::kMotion: renderer.SetMotionFrame(c.o->tick, c.o->fraction); break;
             case Cmd::kFence:
             {
                 bool more = renderer.Unsubmitted();
@@ -1546,6 +1595,7 @@ struct NativeLive : d3dn::Backend
             live->exiting = true;
             fprintf(stderr, "[native] window closed: exiting\n");
             renderer.Shutdown();
+            StartHdPack();
             fflush(stderr);
             _exit(0);
         }
@@ -1590,6 +1640,7 @@ struct NativeLive : d3dn::Backend
         if (img)
         {
             auto tp = std::chrono::steady_clock::now();
+            live->swapchain.gain = renderer.SceneHdrGain();   // hc09: HDR output's highlights (vk_hdr.h)
             live->Present(*img, dump ? &dumped : nullptr, swap);
             const auto shown = std::chrono::steady_clock::now();
             present += std::chrono::duration<double>(shown - tp).count();
@@ -1725,6 +1776,7 @@ void WindowThread(Live* l, bool show, std::promise<hc09vk::Window*> created)
     for (int i = 0; i < 30 && !l->exiting; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
     if (l->exiting) return;   // the CP thread exits the process
     fprintf(stderr, "[gpu-live] window closed and no frame for 3 s: exiting\n");
+    StartHdPack();
     fflush(stderr);
     _exit(0);
 }
@@ -1814,6 +1866,13 @@ void GpuLiveInit(uint8_t* physicalMemory)
     if (const char* e = Hc09Env("HC09_UPSCALE"); e && (!strcmp(e, "0") || !strcmp(e, "bilinear"))) l->swapchain.upscaler.enabled = false;
     if (const char* e = Hc09Env("HC09_SHARPEN"); e && *e) l->swapchain.upscaler.sharpening = std::clamp(float(atof(e)), 0.0f, 100.0f) / 100.0f;
     l->swapchain.stretch = hc09vk::WidescreenStretch();
+    // hc09: HC09_HDR=1: HDR10 output when the display offers it; HC09_HDR_PEAK / HC09_HDR_PAPER_WHITE in nits;
+    // HC09_HDR_DEBUG=1 (dev): the HDR pass's highlights shown red in SDR (vk_hdr.h).
+    if (const char* e = Hc09Env("HC09_HDR"); e && *e && strcmp(e, "0")) l->swapchain.hdrRequested = true;
+    if (const char* e = Hc09Env("HC09_HDR_DEBUG")) l->swapchain.hdr.debug = atoi(e);
+    if (const char* e = Hc09Env("HC09_HDR_PAPER_WHITE"); e && atof(e) > 0) l->swapchain.hdr.paperWhite = std::max(float(atof(e)), 80.0f);
+    if (const char* e = Hc09Env("HC09_HDR_PEAK"); e && atof(e) > 0) l->swapchain.hdr.peak = float(atof(e));
+    l->swapchain.hdr.peak = std::max(l->swapchain.hdr.peak, l->swapchain.hdr.paperWhite);
     l->phys = physicalMemory;
     l->hazard = EnvOn("HC09_GPU_HAZARD", false);
     if (ok && l->window) l->swapchainOk = l->swapchain.Create(l->dev, l->surface, 1280, 720, &err);

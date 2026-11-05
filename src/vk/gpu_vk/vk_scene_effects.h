@@ -9,6 +9,12 @@
 //
 // Settings: hc09.ini [Graphics] AmbientOcclusion and Reflections (strength, 0 turns it off), as the switches
 // HC09_SSAO and HC09_SSR.
+//
+// Post-processing, last, on scenes in 8-bit targets (the menus and HUD are drawn later, into other targets, so it
+// never touches them): bloom (a soft-threshold bright pass blurred over five halvings, added in linear light),
+// colour grading (a filmic shoulder that rolls the bloom off into white, a mild S-curve, saturation, a faint
+// vignette), and depth of field (what lies past the middle of the picture blurs; focus eased over frames). hc09.ini Bloom,
+// ColorGrading and DepthOfField (strength, 0 off; DepthOfField off by default), as HC09_BLOOM, HC09_GRADE, HC09_DOF.
 #include <cstdint>
 #include <functional>
 #include <vector>
@@ -30,7 +36,7 @@ class SceneEffects
 public:
     bool Init(Device& dev);
     void Shutdown();
-    bool Enabled() const { return occlusion_ > 0 || reflections_ > 0; }
+    bool Enabled() const { return occlusion_ > 0 || reflections_ > 0 || Post(); }
 
     // Records the effects into `cb` (outside a render pass). `color`: the scene's colour target, `depthView` its
     // depth buffer's depth aspect; both GENERAL, `samples` per pixel, and left GENERAL. `allocate` gives a
@@ -39,22 +45,35 @@ public:
     void Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFlagBits samples, VkImageView depthView, const SceneView& view,
                const std::function<VkDescriptorSet(VkDescriptorSetLayout)>& allocate, std::vector<Image>& retired);
 
+    // HDR output (HC09_HDR): the gain image the last Apply made (R16G16: gain, the brightness shown; GENERAL) and
+    // the rectangle of the scene's target it covers (x, y, width, height), or nullptr.
+    const Image* HdrGain(float rect[4]) const;
+
 private:
+    static constexpr int kBloomLevels = 5;
     struct Pipelines
     {
         VkFormat format = VK_FORMAT_UNDEFINED;
         VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
         bool failed = false;
         VkPipeline occlusion = VK_NULL_HANDLE, blur = VK_NULL_HANDLE, composite = VK_NULL_HANDLE, reflections = VK_NULL_HANDLE,
-                   reflectionComposite = VK_NULL_HANDLE;
+                   reflectionComposite = VK_NULL_HANDLE, bloomPrefilter = VK_NULL_HANDLE, bloomDown = VK_NULL_HANDLE,
+                   bloomUp = VK_NULL_HANDLE, focus = VK_NULL_HANDLE, depthOfField = VK_NULL_HANDLE, post = VK_NULL_HANDLE,
+                   hdrGain = VK_NULL_HANDLE;
     };
+    bool Post() const { return bloom_ > 0 || grade_ > 0 || dof_ > 0 || hdr_; }
     Pipelines* GetPipelines(VkFormat format, VkSampleCountFlagBits samples);
     VkPipeline CreatePipeline(VkShaderModule fs, VkFormat target, VkSampleCountFlagBits samples, int blend);
     bool Prepare(Image& image, VkFormat format, uint32_t width, uint32_t height, VkImageUsageFlags usage, std::vector<Image>& retired);
 
     Device* dev_ = nullptr;
-    float occlusion_ = 0, reflections_ = 0;
+    float occlusion_ = 0, reflections_ = 0, bloom_ = 0, grade_ = 0, dof_ = 0;
     int debug_ = 0;
+    uint32_t focusIndex_ = 0;
+    bool hdr_ = false;            // HDR output: the gain image (vk_hdr.h)
+    float peakRatio_ = 5.0f;      // its peak / paper white
+    bool gainMade_ = false;       // the last Apply made the gain image
+    float gainRect_[4] = {};
     bool loggedCamera_ = false;
     VkDescriptorSetLayout setLayout_ = VK_NULL_HANDLE;
     VkPipelineLayout pipeLayout_ = VK_NULL_HANDLE;
@@ -62,6 +81,7 @@ private:
     VkShaderModule vs_ = VK_NULL_HANDLE;
     std::vector<Pipelines> pipelines_;
     Image occlusionRaw_, occlusionBlurred_, sceneCopy_, reflectionTarget_;
+    Image bloomLevels_[kBloomLevels], focus_[2], depthOfFieldTarget_, hdrGain_;
 };
 
 }  // namespace hc09vk
