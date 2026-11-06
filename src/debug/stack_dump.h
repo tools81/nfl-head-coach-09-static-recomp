@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 namespace hc09::debug
 {
@@ -13,6 +14,16 @@ namespace hc09::debug
 
     // Prints the call stack captured in `context` (for exception handlers).
     void PrintStackFromContext(const void* context);
+
+    // Prints the calling thread's own call stack.
+    void PrintCurrentStack();
+
+    // The call stack captured in `context`, one frame per line, as PrintStackFromContext prints it.
+    std::string StackText(const void* context);
+
+    // HC09_TABLE_WRITES=DCHT,PLRM (table_writes.cpp): write-protects those tables' records in every
+    // database in guest memory and logs each distinct writer stack. `reason` names the trigger.
+    void ArmTableWrites(const char* reason);
 
     // If HC09_DUMP_STACKS=<seconds> is set, dumps all stacks after that delay.
     // If HC09_WATCH=<guest address>[,...] is set (up to 4), every guest thread gets a

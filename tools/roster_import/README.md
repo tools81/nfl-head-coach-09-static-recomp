@@ -155,7 +155,17 @@ the game's default: everything it needs goes in the `hc27` folder of the install
    second replaces each team's description with a 2026 one. Both are at the top of the scripts
    (descriptions at most 255 characters, and all 32 must fit in the space the game's own took).
    They write their tables to `hc27/disc` too; each tool replaces only its own files there.
-9. Run `build/hc09/HC27.exe`. Its saves are kept in `build/userdata-hc27`, apart from HC09's.
+9. AI quarterback evaluation:
+
+   ```sh
+   python tools/roster_import/ai_evaluation.py --iso "iso/NFL Head Coach 09.iso"
+   ```
+
+   AI teams order their depth charts by the game's own overall, which for QBs gives size (height and
+   weight) 8/49 of the weight and accuracy plus awareness 3/49, so they start tall, strong-armed
+   backups over accurate starters. This moves the weight onto accuracy, awareness and learning
+   (table `PEOW`, weights at the top of the script). The QBs' displayed overalls change with it.
+10. Run `build/hc09/HC27.exe`. Its saves are kept in `build/userdata-hc27`, apart from HC09's.
 
 ## Keeping up with the season
 

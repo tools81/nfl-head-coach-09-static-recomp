@@ -233,6 +233,21 @@ namespace hc09::debug
         std::fflush(stderr);
     }
 
+    std::string StackText(const void* context)
+    {
+        EnsureSymbols();
+        std::string text;
+        PrintStack(GetCurrentProcess(), GetCurrentThread(), *static_cast<const CONTEXT*>(context), &text);
+        return text;
+    }
+
+    void PrintCurrentStack()
+    {
+        CONTEXT context{};
+        RtlCaptureContext(&context);
+        PrintStackFromContext(&context);
+    }
+
     void DumpAllStacks()
     {
         const HANDLE process = GetCurrentProcess();
