@@ -14,6 +14,7 @@
 #include <set>
 #include <string>
 
+#include "debug/stack_dump.h"
 #include "gpu/command_processor.h"
 #include "kernel/format.h"
 #include "kernel/guest.h"
@@ -168,7 +169,8 @@ extern "C" PPC_FUNC(__imp__sub_82C66928);
 PPC_FUNC(sub_82C66928)
 {
     static const char* const filter = std::getenv("HC09_TRACE_SQL");
-    if (!filter)
+    static const bool tableWrites = std::getenv("HC09_TABLE_WRITES") != nullptr;
+    if (!filter && !tableWrites)
     {
         __imp__sub_82C66928(ctx, base);
         return;
@@ -199,7 +201,7 @@ PPC_FUNC(sub_82C66928)
         }
     }
     bool wanted = false;
-    for (const char* token = filter; *token && !wanted;)
+    for (const char* token = filter ? filter : ""; *token && !wanted;)
     {
         const char* end = std::strchr(token, ',');
         const size_t length = end ? size_t(end - token) : std::strlen(token);
@@ -207,6 +209,26 @@ PPC_FUNC(sub_82C66928)
         token = end ? end + 1 : token + length;
     }
     __imp__sub_82C66928(ctx, base);
+    // HC09_TABLE_WRITES (table_writes.cpp): watch the tables again when a career loads and when an
+    // AI depth-chart pass starts (team 1).
+    if (tableWrites)
+    {
+        // A new career fills PLRM without deleting it first: the first insert after a quiet spell arms too.
+        static auto lastArmed = std::chrono::steady_clock::time_point{};
+        const auto now = std::chrono::steady_clock::now();
+        const char* reason = nullptr;
+        if (text == "delete from PLRM")
+            reason = "career loaded";
+        else if (args[0] == 1 && text == "create ? index on DCHT where (TGID = ?) order by PGID")
+            reason = "depth-chart pass";
+        else if (text.rfind("insert into PLRM", 0) == 0 && now - lastArmed > std::chrono::seconds(30))
+            reason = "PLRM filled";
+        if (reason)
+        {
+            lastArmed = now;
+            debug::ArmTableWrites(reason);
+        }
+    }
     if (!wanted)
         return;
     std::string values;
@@ -221,4 +243,15 @@ PPC_FUNC(sub_82C66928)
         values += item;
     }
     std::fprintf(stderr, "[sql] %s |%s -> %d (thread 0x%X)\n", text.c_str(), values.c_str(), ctx.r3.s32, CurrentThreadId());
+    // HC09_TRACE_SQL_STACKS=1 also prints the caller stack the first time each query text is seen,
+    // which names the sub_<address> functions behind it.
+    static const bool stacks = std::getenv("HC09_TRACE_SQL_STACKS") != nullptr;
+    if (stacks)
+    {
+        static std::mutex mutex;
+        static std::set<std::string> seen;
+        std::lock_guard<std::mutex> lock(mutex);
+        if (seen.insert(text).second)
+            debug::PrintCurrentStack();
+    }
 }

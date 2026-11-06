@@ -47,6 +47,8 @@ set(HC09_HOST_SOURCES
     src/debug/hooks.cpp
     src/game_fixes.cpp
     src/debug/stack_dump.cpp
+    src/debug/table_writes.cpp
+    src/debug/depth_chart_probe.cpp
     src/gpu/command_processor.cpp
     src/gpu/d3d12_context.cpp
     src/gpu/hlsl_translator.cpp
