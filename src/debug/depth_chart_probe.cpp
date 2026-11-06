@@ -64,6 +64,20 @@ namespace
     thread_local bool t_slotChart = false;
     thread_local std::vector<uint32_t> t_slotRecords;
 
+    // The host stack the first time `what` is called from each guest return address.
+    void NoteCaller(const char* what, uint32_t returnAddress)
+    {
+        static std::mutex mutex;
+        static std::map<std::string, int> seen;
+        std::lock_guard<std::mutex> lock(mutex);
+        char key[96];
+        std::snprintf(key, sizeof(key), "%s@%08X", what, returnAddress);
+        if (seen[key]++)
+            return;
+        std::fprintf(stderr, "[sl] new caller of %s (returns to %08X):\n", what, returnAddress);
+        debug::PrintCurrentStack();
+    }
+
     bool Readable(uint32_t address)
     {
         return (address >= 0x40000000 && address < 0x70000000) || (address >= 0xA0000000 && address < 0xC0000000);
@@ -113,7 +127,6 @@ HC09_PROBE(82D07060)
 HC09_PROBE(82CFDD30)
 HC09_PROBE(82CFBFD0)
 HC09_PROBE(82667E48)
-HC09_PROBE(82658998)
 HC09_PROBE(826406C8)
 HC09_PROBE(8263A748)
 HC09_PROBE(82632CB8)
@@ -125,7 +138,6 @@ HC09_PROBE(8260B220)
 HC09_PROBE(82606060)
 HC09_PROBE(825EFA08)
 HC09_PROBE(825EBE20)
-HC09_PROBE(825D9B98)
 HC09_PROBE(825D5D78)
 // Called by sub_825EFA08 (places one player).
 HC09_PROBE(826C7158)
@@ -214,6 +226,45 @@ PPC_FUNC(sub_82CE53E8)
         Words(out, outCount).c_str());
 }
 
+extern "C" PPC_FUNC(__imp__sub_82658998);
+extern "C" PPC_FUNC(__imp__sub_82D00EE0);
+extern "C" PPC_FUNC(__imp__sub_82D00FB0);
+
+// sub_82658998(team, sub-chart, candidates, result): sorts the candidates (32-byte entries: +8 pgid,
+// +12 status, +16 score w4, +20, +24 penalty w6, +28 order, 127 = left out) by w4 - w6 and picks
+// the result. Inside a logged chart: every entry after the sort, and the sub-chart's row of the
+// table at 0x830C4AE0 (3 words per row; sub_826536A8 leaves out candidates found in it) before and
+// after.
+PPC_FUNC(sub_82658998)
+{
+    if (!t_logging)
+    {
+        __imp__sub_82658998(ctx, base);
+        return;
+    }
+    const uint32_t team = ctx.r3.u32, sub = ctx.r4.u32, candidates = ctx.r5.u32, result = ctx.r6.u32;
+    PPCContext call = ctx;
+    call.r3.u64 = sub;
+    __imp__sub_82D00EE0(call, base);
+    const uint32_t row = call.r3.u32;
+    call = ctx;
+    call.r3.u64 = sub;
+    __imp__sub_82D00FB0(call, base);
+    const uint32_t count = call.r3.u32;
+    const uint32_t table = 0x830C4AE0 + row * 12;
+    const std::string before = Words(table, std::min<uint32_t>(count, 3));
+    __imp__sub_82658998(ctx, base);
+    std::fprintf(stderr, "[dc]   sort team %u sub %08X (row %u, %u slots): table [%s] -> [%s]\n", team, sub, row, count, before.c_str(),
+        Words(table, std::min<uint32_t>(count, 3)).c_str());
+    for (uint32_t at = Load<uint32_t>(candidates), end = Load<uint32_t>(candidates + 4); at < end && at < Load<uint32_t>(candidates) + 32 * 40; at += 32)
+        std::fprintf(stderr, "[dc]     entry pgid %u status %d w4 %d +20 %d w6 %d order %d\n", Load<uint32_t>(at + 8), int32_t(Load<uint32_t>(at + 12)),
+            int32_t(Load<uint32_t>(at + 16)), int32_t(Load<uint32_t>(at + 20)), int32_t(Load<uint32_t>(at + 24)), int32_t(Load<uint32_t>(at + 28)));
+    std::string picked;
+    for (uint32_t at = Load<uint32_t>(result), end = Load<uint32_t>(result + 4); at < end && at < Load<uint32_t>(result) + 32 * 16; at += 32)
+        picked += " " + std::to_string(Load<uint32_t>(at + 8)) + "(" + std::to_string(int32_t(Load<uint32_t>(at + 28))) + ")";
+    std::fprintf(stderr, "[dc]     result:%s\n", picked.c_str());
+}
+
 extern "C" PPC_FUNC(__imp__sub_82644BE0);
 
 // sub_82644BE0(evaluator, pgid, slot, out): reads a player's eight cached scores for one evaluation
@@ -239,6 +290,19 @@ PPC_FUNC(sub_82644BE0)
         seen = scores;
         std::fprintf(stderr, "[sl] eval pgid %u slot %u scores %s\n", pgid, slot, scores.c_str());
     }
+}
+
+extern "C" PPC_FUNC(__imp__sub_825FB3D0);
+
+// sub_825FB3D0(team, flag): writes one team's in-memory depth chart to DCHT (flag 0) or DCGA.
+PPC_FUNC(sub_825FB3D0)
+{
+    if (g_slots)
+    {
+        NoteCaller("chart write sub_825FB3D0", uint32_t(ctx.lr));
+        std::fprintf(stderr, "[sl] write team %u flag %u caller %08X\n", ctx.r3.u32, ctx.r4.u32 & 0xFF, uint32_t(ctx.lr));
+    }
+    __imp__sub_825FB3D0(ctx, base);
 }
 
 extern "C" PPC_FUNC(__imp__sub_825E3A88);
@@ -316,6 +380,8 @@ PPC_FUNC(sub_8265ABE0)
     if (g_slots && !t_slotChart && !t_logging)
     {
         const uint32_t team = ctx.r3.u32, position = ctx.r4.u32;
+        NoteCaller("ranking pass sub_8265ABE0", uint32_t(ctx.lr));
+        std::fprintf(stderr, "[sl] pass team %u position %u caller %08X\n", team, position, uint32_t(ctx.lr));
         t_slotChart = true;
         t_slotRecords.clear();
         __imp__sub_8265ABE0(ctx, base);

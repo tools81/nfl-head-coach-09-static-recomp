@@ -39,6 +39,7 @@ set(HC09_HOST_SOURCES
     src/common/draft_picks.cpp
     src/common/edition.cpp
     src/common/fifth_year_option.cpp
+    src/common/rookie_grades.cpp
     src/common/rookie_scale.cpp
     src/common/settings.cpp
     src/common/updates.cpp
