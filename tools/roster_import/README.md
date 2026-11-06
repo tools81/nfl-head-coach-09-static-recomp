@@ -19,6 +19,11 @@ the game's default: everything it needs goes in the `hc27` folder of the install
    python tools/roster_import/import_roster.py --csv "tools/roster_import/Madden 27 Ratings.csv"        --roster tools/roster_import/ROSTER-DEFAULT --out tools/roster_import/data/ROSTER-M27        --report tools/roster_import/data/players.csv --contracts tools/roster_import/data/contracts.csv
    ```
 
+   The 2008 players the import doesn't reuse are lowered to camp level and teams with nobody at
+   LOLB or FB get a backup moved there (`roster_fixes.py`; `--keep-2008-players` leaves the 2008
+   players as they were). `python tools/roster_import/roster_fixes.py --roster hc27/ROSTER --out hc27/ROSTER`
+   applies both to a roster built without them.
+
    `--contracts` (optional) gives the players their real contracts. Make the CSV from Over The
    Cap's pages: save https://overthecap.com/contracts as `data/otc/contracts.html` and each team's
    https://overthecap.com/salary-cap/<team> page (e.g. `chicago-bears.html`), then

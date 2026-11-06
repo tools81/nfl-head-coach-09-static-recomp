@@ -15,6 +15,10 @@ agents. Record counts and table layouts never change, so only the save container
 are recomputed. The output's player ids (PGID) are those of the reused records; --report writes
 the mapping, including each player's portrait id (PSXP, inherited from the reused record), which
 fetch_portraits.py uses to name the replacement images.
+
+The 2008 players left in free agency are lowered to camp level, and teams with nobody at LOLB or
+FB get a backup moved there (roster_fixes.py has the details); --keep-2008-players leaves the
+2008 players as they were.
 """
 
 import argparse
@@ -27,6 +31,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tdb import SaveFile  # noqa: E402
 import draft_rounds  # noqa: E402
+import roster_fixes  # noqa: E402
 
 FREE_AGENTS = 1009
 NO_PLAYER = 32767
@@ -408,7 +413,7 @@ def assign_portrait_ids(play, imported, without_image=()):
             play.set(i, "PSXP", generic)
 
 
-def import_roster(csv_path, roster_path, out_path, report_path=None, contracts_path=None):
+def import_roster(csv_path, roster_path, out_path, report_path=None, contracts_path=None, keep_2008_players=False):
     save = SaveFile(roster_path)
     db = save.db
     play, team_table, dcht = db.tables["PLAY"], db.tables["TEAM"], db.tables["DCHT"]
@@ -519,9 +524,14 @@ def import_roster(csv_path, roster_path, out_path, report_path=None, contracts_p
     assign_portrait_ids(play, [i for i, p, _ in assignments if p["avatar"]],
                         [i for i, p, _ in assignments if not p["avatar"]])
 
+    # The 2008 players nobody took over: the team records left over and the unused free agents.
+    # A new career fills AI rosters to 75 from free agency, so at 2008 strength dozens would start.
+    lowered = 0 if keep_2008_players else roster_fixes.camp_level(play, leftovers + free)
+
     roster = {}
     for i, _, t in assignments:
         roster.setdefault(t, []).append(i)
+    moves = roster_fixes.fill_empty_positions(play, roster)
     build_depth_charts(play, dcht, roster)
 
     clear_draft_class(db)
@@ -540,6 +550,7 @@ def import_roster(csv_path, roster_path, out_path, report_path=None, contracts_p
     save.save(out_path)
     print(f"{len(assignments)} players imported into {len(roster)} teams; "
           f"{len(leftovers)} original players moved to free agency; wrote {out_path}")
+    print(f"{lowered} 2008 players lowered to camp level; {len(moves)} backups moved to an empty LOLB or FB")
 
     if report_path:
         with open(report_path, "w", encoding="utf-8", newline="") as f:
@@ -557,5 +568,7 @@ if __name__ == "__main__":
     parser.add_argument("--out", required=True)
     parser.add_argument("--report", help="write the imported players with their HC09 player ids")
     parser.add_argument("--contracts", help="real contracts: the CSV otc_contracts.py writes")
+    parser.add_argument("--keep-2008-players", action="store_true",
+                        help="leave the 2008 players in free agency at their 2008 ratings")
     args = parser.parse_args()
-    import_roster(args.csv, args.roster, args.out, args.report, args.contracts)
+    import_roster(args.csv, args.roster, args.out, args.report, args.contracts, args.keep_2008_players)
