@@ -1,6 +1,6 @@
 """Installs player portraits for an imported roster.
 
-    python tools/roster_import/fetch_portraits.py --report tools/roster_import/data/players.csv
+    python tools/roster_import/fetch_portraits.py --report tools/roster_import/data/players.csv         --report tools/roster_import/data/free_agents.csv
 
 Each player's image (the CSV's avatarUrl) is downloaded once into the cache folder, named by the
 ratings site's player id, then copied into the game's replacement folder as <portrait id>.png,
@@ -31,6 +31,7 @@ import os
 import shutil
 import time
 import sys
+import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -139,9 +140,16 @@ def match_heads(play, images, looks):
 
 
 def download(url, path):
+    """Saves the image at url as path. The site has no Madden 27 image of some players (it answers
+    403); their Madden 26 one is used instead."""
     request = urllib.request.Request(url, headers={"User-Agent": "hc09-roster-import"})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        data = response.read()
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            data = response.read()
+    except urllib.error.HTTPError:
+        if "/madden-nfl-27/" not in url:
+            raise
+        return download(url.replace("/madden-nfl-27/", "/madden-nfl-26/"), path)
     if not data.startswith(b"\x89PNG"):
         raise ValueError("not a PNG")
     with open(path + ".part", "wb") as out:
@@ -151,7 +159,8 @@ def download(url, path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--report", required=True, help="import_roster.py --report output")
+    parser.add_argument("--report", required=True, action="append",
+                        help="import_roster.py --report output; repeat it for free_agents.py's report")
     parser.add_argument("--cache", default=os.path.join(HERE, "data", "portraits"))
     parser.add_argument("--out", default=os.path.join(ROOT, "hc27", "textures", "swappables", "PlayerPortraits"))
     parser.add_argument("--roster", help="the imported roster save: players without an image get the silhouette")
@@ -162,8 +171,21 @@ def main():
 
     os.makedirs(args.cache, exist_ok=True)
     os.makedirs(args.out, exist_ok=True)
-    with open(args.report, encoding="utf-8", newline="") as f:
-        rows = [r for r in csv.DictReader(f) if r["avatarUrl"]]
+    rows = []
+    for report in args.report:
+        with open(report, encoding="utf-8", newline="") as f:
+            rows += [r for r in csv.DictReader(f) if r["avatarUrl"]]
+
+    save = play = None
+    if args.roster:
+        from tdb import SaveFile
+        save = SaveFile(args.roster)
+        play = save.db.tables["PLAY"]
+        counts = {}
+        for i in range(play.count):
+            counts[play.get(i, "PSXP")] = counts.get(play.get(i, "PSXP"), 0) + 1
+        generic = max((k for k in counts if k), key=lambda k: counts[k])
+        portrait_ids = {play.get(i, "PGID"): play.get(i, "PSXP") for i in range(play.count)}
 
     fetched = failed = 0
     wanted = set()
@@ -182,7 +204,12 @@ def main():
                 missing.append(int(row["pgid"]))
                 continue
         images[int(row["pgid"])] = (int(row["madden_id"]), cached)
-        name = f"{row['portrait_id']}.png"
+        # The roster's portrait id (the report's can be out of date); a player who shows the
+        # silhouette (no portrait id of his own left, see free_agents.py) only gets his head from it.
+        portrait_id = portrait_ids.get(int(row["pgid"])) if play else int(row["portrait_id"])
+        if play and portrait_id == generic:
+            continue
+        name = f"{portrait_id}.png"
         wanted.add(name)
         shutil.copyfile(cached, os.path.join(args.out, name))
 
@@ -192,14 +219,7 @@ def main():
             os.remove(os.path.join(args.out, name))
             removed += 1
     if args.roster:
-        from tdb import SaveFile
-        save = SaveFile(args.roster)
-        play = save.db.tables["PLAY"]
         if missing:
-            counts = {}
-            for i in range(play.count):
-                counts[play.get(i, "PSXP")] = counts.get(play.get(i, "PSXP"), 0) + 1
-            generic = max((k for k in counts if k), key=lambda k: counts[k])
             wanted_pgids = set(missing)
             for i in range(play.count):
                 if play.get(i, "PGID") in wanted_pgids:

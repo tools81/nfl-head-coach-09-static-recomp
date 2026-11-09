@@ -105,6 +105,8 @@ RATINGS = {
     "PLPR": ("PPRX", stat("playRecognition")),
     "PLPU": ("PPUX", stat("pursuit")),
 }
+# Body part condition, current and full: left and right arm, head, left and right leg, torso.
+BODY_PARTS = ["PLAC", "PRAC", "PHDC", "PLLC", "PRLc", "PTRC", "PLAX", "PRAX", "PHDX", "PLLX", "PRLx", "PTRX"]
 # A contract: cap hit, total and signing bonus (in $10,000s), length, years left, and the per-year
 # salary (PSA) and bonus (PSB) schedule.
 CONTRACT_FIELDS = ["PCSA", "PTSA", "PVTS", "PVSB", "PSBO", "PCON", "PCYL"] + \
@@ -193,33 +195,46 @@ def clamp(value, low, high):
     return max(low, min(high, value))
 
 
+def birth_date(text):
+    """2000-03-01, or 6/27/90 as some of the site's players have it."""
+    if not text:
+        return None
+    if "/" in text:
+        month, day, year = (int(n) for n in text.split("/"))
+        return datetime.date(year + (1900 if year > 30 else 2000) if year < 100 else year, month, day)
+    return datetime.date.fromisoformat(text[:10])
+
+
+def player_from_row(row):
+    """One player from a row of the ratings CSV (column names as the export flattens them:
+    team/label, position/id, stats/<rating>/value), or None for a position HC09 does not have."""
+    position = POSITIONS.get(row["position/id"], "unknown")
+    if position is None:
+        return None
+    if position == "unknown":
+        print(f"skipping {row['firstName']} {row['lastName']}: unknown position {row['position/id']}")
+        return None
+    stats = {}
+    for key, value in row.items():
+        if key.startswith("stats/") and key.endswith("/value"):
+            try:
+                stats[key[6:-6]] = int(value)
+            except (TypeError, ValueError):
+                pass
+    return {
+        "id": row["id"], "first": row["firstName"], "last": row["lastName"],
+        "team": row["team/label"], "position": position,
+        "birth": birth_date(row["birthdate"]),
+        "height": int(row["height"]), "weight": int(row["weight"]), "age": int(row["age"]),
+        "jersey": int(row["jerseyNum"] or 0), "years": int(row["yearsPro"] or 0),
+        "right_handed": str(row["handedness"]) != "0", "college": row["college"],
+        "avatar": row.get("avatarUrl") or "", "stats": stats,
+    }
+
+
 def load_players(path):
-    players = []
     with open(path, encoding="utf-8-sig", newline="") as f:
-        for row in csv.DictReader(f):
-            position = POSITIONS.get(row["position/id"], "unknown")
-            if position is None:
-                continue
-            if position == "unknown":
-                print(f"skipping {row['firstName']} {row['lastName']}: unknown position {row['position/id']}")
-                continue
-            stats = {}
-            for key, value in row.items():
-                if key.startswith("stats/") and key.endswith("/value"):
-                    try:
-                        stats[key[6:-6]] = int(value)
-                    except ValueError:
-                        pass
-            players.append({
-                "id": row["id"], "first": row["firstName"], "last": row["lastName"],
-                "team": row["team/label"], "position": position,
-                "birth": datetime.date.fromisoformat(row["birthdate"][:10]) if row["birthdate"] else None,
-                "height": int(row["height"]), "weight": int(row["weight"]), "age": int(row["age"]),
-                "jersey": int(row["jerseyNum"] or 0), "years": int(row["yearsPro"] or 0),
-                "right_handed": row["handedness"] != "0", "college": row["college"],
-                "avatar": row.get("avatarUrl", ""), "stats": stats,
-            })
-    return players
+        return [p for p in map(player_from_row, csv.DictReader(f)) if p]
 
 
 def write_player(play, index, p, team):
@@ -256,6 +271,11 @@ def write_player(play, index, p, team):
     play.set(index, "PLRX", ceiling("PAWR", learning, p["age"]))
     for field, value in (("PMOR", 91), ("HDAp", 85), ("PCEL", 77), ("PCAF", 100), ("PSEF", 100), ("PCUF", 100)):
         play.set(index, field, value)
+    # The condition of each body part (out of 1000), worn down by the 2008 player's injuries. A
+    # career's player evaluation counts it (Brock Purdy, carrying a 2008 player's 797 to 976,
+    # rated below Mac Jones's fresh record).
+    for field in BODY_PARTS:
+        play.set(index, field, 1000)
 
 
 def clear_draft_class(db):

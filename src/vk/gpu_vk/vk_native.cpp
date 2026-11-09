@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "../widescreen.h"
+#include "vk_materials.h"
 #include "vk_motion.h"
 #include "vk_scene_effects.h"
 #include "vk_shader_compile.h"
@@ -1332,6 +1333,7 @@ struct NativeRenderer::Impl
         ShaderEntry& e = shaders[key];
         e.meta = TranslateShader(code, translate);
         if (!vs && hash == kCrowdPs && crowdOn && e.meta.error.empty()) CrowdPatch(e.meta.glsl);
+        if (!vs && e.meta.error.empty()) MaterialPatch(hash, e.meta.glsl);
         char name[64];
         snprintf(name, sizeof(name), "native_%s_%016llx", vs ? "vs" : "ps", (unsigned long long)hash);
         if (!e.meta.error.empty()) { Warn(std::string("shader ") + name + " failed: " + e.meta.error); return nullptr; }
@@ -2226,6 +2228,13 @@ struct NativeRenderer::Impl
             }
         }
         memcpy(&C.pad0, &crowdInfo, sizeof(crowdInfo));
+        // hc09: our shading's value for the draw (vk_materials.cpp: the turf's wear).
+        if (psHash == kTurfPs)
+        {
+            uint32_t fetch[32][6];
+            for (uint32_t s = 0; s < 32; ++s) memcpy(fetch[s], tfOf[s].dword, sizeof(fetch[s]));
+            if (float value; MaterialDrawValue(psHash, fetch, slots, value)) memcpy(&C.pad0, &value, sizeof(value));
+        }
         VkDescriptorSet set = VK_NULL_HANDLE;
         if (lastSet && descKey == lastDescKey) set = lastSet;
         else if (auto dit = descSets.find(descKey); dit != descSets.end()) set = dit->second;
@@ -2322,8 +2331,8 @@ struct NativeRenderer::Impl
                     snprintf(at, sizeof(at), "@%08X", texOf[s]->pa);
                     tex += " " + std::to_string(texOf[s]->width) + "x" + std::to_string(texOf[s]->height) + (SamplesWide(tfOf[s]) ? "w" : "") + at;
                 }
-            fprintf(stderr, "[draw] %ux%u ms%u ps %016llx sq %d 3d %d colour %d stencil %d z %d%d scissor %d,%d-%d,%d n %u tex%s\n", bound[0].width,
-                    bound[0].height, bound[0].msaa, (unsigned long long)psHash, squeezed, C.wideClip != 0.0f, colorOn, stencilOn, zEnable, zWrite,
+            fprintf(stderr, "[draw] %ux%u ms%u vs %016llx ps %016llx sq %d 3d %d colour %d stencil %d z %d%d scissor %d,%d-%d,%d n %u tex%s\n", bound[0].width,
+                    bound[0].height, bound[0].msaa, (unsigned long long)vsHash, (unsigned long long)psHash, squeezed, C.wideClip != 0.0f, colorOn, stencilOn, zEnable, zWrite,
                     scx0, scy0, scx1, scy1, d.numIndices, tex.c_str());
         }
 

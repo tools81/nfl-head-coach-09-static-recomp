@@ -186,6 +186,77 @@ the game's default: everything it needs goes in the `hc27` folder of the install
   pick's). When a career's draft ends, HC27 signs every pick to his slot instead of leaving the
   teams to negotiate with their picks' agents (`src/common/rookie_scale.cpp`). Rerun it after
   rebuilding the roster with new contracts.
+- `team_philosophies.py` sets each team's position philosophies (Workhorse HB, Pass Block Specialist
+  Tackle, ...) to fit its depth chart. A team rates its players by its philosophy at each position,
+  and the 2026 coaches kept the 2008 coaches' philosophies, so a backup could rate above the starter
+  (the Bears' Workhorse HB put Kyle Monangai above D'Andre Swift). The script reads the game's
+  player evaluation weights from the disc (tables PEIW and PEAW, one weight per rating for each of
+  the 81 philosophies), scores each team's players under every philosophy for the position, and
+  picks the one under which the starters rate highest against the rest of the position. Of those, it
+  takes the one under which the players rate closest to their Madden overalls (`--players`, default
+  `data/players.csv` and `data/free_agents.csv`), then the one that best keeps the depth chart's
+  order, then the current one. The philosophies differ by a lot: Mobile/Speed QB rates backups 10 to
+  15 points above their Madden overall, while Field General QB keeps them within a few points.
+  The head coach (COCH) and the
+  general manager (GMVW) both get it. A career takes its head coaches from the roster but its
+  general managers from the career database on the disc, and in a career a team rates its players by
+  the GM's philosophy, so the GMs' choices also go to `hc27/disc`. `--report` (default
+  `data/philosophies.csv`) lists each choice, the starters' ranks and the distance from Madden. Run
+  it after rebuilding depth charts (`roster_moves.py`):
+
+  ```sh
+  python tools/roster_import/team_philosophies.py --iso "iso/NFL Head Coach 09.iso"
+  ```
+
+  The weights only approximate the game's evaluation, which also counts height and the condition of
+  each body part, among other things. A career saves the game's own scores (the overall its roster
+  screens show) for every player under all 81 philosophies when it begins. For an exact choice, start
+  a career from the roster (any team), save it, and pass the save with `--career`, e.g.
+  `--career build/userdata-hc27/content/00000001/CAREER-QUICKSAVE/CAREER-QUICKSAVE`. A career keeps
+  the philosophies it began with. Its roster screen's ratings also count each player's past production
+  (below), so they need `player_stats.py` too.
+- `player_stats.py` gives the players their real NFL statistics. A new career takes its players' past
+  statistics (season lines and career totals: offense, defense, kicking and punting, returns, games)
+  from the career database on the disc, by player id, and HC27's players took over the 2008 players'
+  ids, so each started a career with the 2008 player's statistics; the game's player evaluation counts
+  production, so the 49ers' Kurtis Rourke (a 2008 starter's 4,679 passing yards) rated 81 and Brock
+  Purdy (a backup's 501) 73 on the roster screen. The script fills those tables with the players'
+  regular-season statistics from [nflverse](https://github.com/nflverse/nflverse-data) (release
+  `stats_player`, CC-BY 4.0, see THIRD_PARTY_NOTICES.md), matching players by name, position and team,
+  and writes them to `hc27/disc`. The tables cannot grow, so their rows go to the players newest season
+  first and, where a table is full (defensive career totals), to the players with the most recent playing
+  time. Download the season files (`stats_player_reg_1999.csv` to `stats_player_reg_2025.csv`) into
+  `data/nflverse`, then
+
+  ```sh
+  python tools/roster_import/player_stats.py --iso "iso/NFL Head Coach 09.iso"
+  ```
+
+  `--report` (default `data/player_stats.csv`) lists each team player and free agent and the nflverse player he was
+  matched to (most of those without one are 2026 rookies).
+- `free_agents.py` replaces the 2008 free agents (the roster's free-agent pool, which a career's free
+  agency offers) with the league's real ones. EA's ratings site keeps a list for each week's ratings:
+  the launch list has every player with Madden ratings, free agents included, and each week's list the
+  players on a team that week. A player is a free agent when no team has him in the latest week's list
+  nor in the roster, and the transactions (`roster_moves.py`'s CSV) do not put him on a team: released
+  players and practice squad players (HC09 has none) are free agents, players waived injured or with a
+  contract in `data/contracts.csv` but no transaction (on a reserve list) are not. Each takes his
+  ratings from the latest list that has him. The roster has a fixed number of player records, so the
+  best 512 (each position keeping its share of the pool) take over the 2008 free agents' records,
+  unsigned. Portraits can only replace ids the game's portrait library has, and only those the 2008
+  free agents had to themselves are left: they go first to imported players who had no image (the
+  site has no Madden 27 image of some; `fetch_portraits.py` now takes their Madden 26 one), then to
+  the best free agents; the rest show the silhouette, with a head of their skin tone. The week 8 pool
+  was made with
+
+  ```sh
+  python tools/roster_import/free_agents.py --fetch
+  python tools/roster_import/fetch_portraits.py --report tools/roster_import/data/players.csv --report tools/roster_import/data/free_agents.csv --roster hc27/ROSTER --looks tools/roster_import/data/looks.csv
+  python tools/roster_import/player_stats.py --iso "iso/NFL Head Coach 09.iso"
+  ```
+
+  (`--fetch` downloads the lists into `data/ea_ratings`; without it the ones there are used). Run
+  `fetch_portraits.py` with both reports from then on, or the free agents' portraits are removed.
 - `draft_rounds.py` sets the draft round and pick (PDRO, PDPI) of the players still on their rookie
   contracts, which the imported players otherwise take from the 2008 records: ranking each class's
   four-year rookie deals by their value as signed (from `data/contracts.csv`) gives back the draft

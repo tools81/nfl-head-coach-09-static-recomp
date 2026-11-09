@@ -73,6 +73,14 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
+## nflverse player statistics
+
+HC27's players' career and season statistics (the `player_stats` patches in `hc27/disc`, written by
+`tools/roster_import/player_stats.py`) are derived from the regular-season player statistics of
+[nflverse-data](https://github.com/nflverse/nflverse-data) (release `stats_player`), licensed
+[CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/). They were reduced to the fields the game
+keeps and arranged in its career database's tables.
+
 ## Fetched separately (not included in this repository)
 
 - With `HDTextures=on`, `HC09HDPack.exe` downloads

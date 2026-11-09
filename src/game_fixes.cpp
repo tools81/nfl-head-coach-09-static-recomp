@@ -10,6 +10,7 @@
 
 #include <ppc_recomp_shared.h>
 
+#include "common/field_surface.h"
 #include "common/guest_db.h"
 
 extern "C" PPC_FUNC(__imp__sub_82691378);  // the game mode: select GMOD into ? from GINF
@@ -97,6 +98,38 @@ namespace
                 depth + 1);
         }
     }
+
+    // Whether the field of the game just set up is artificial turf, for the renderer's turf (common/field_surface.h).
+    // The game's stadiums (STAD, by SGID) are 2008's, and so is their surface (SFTY: 6 artificial turf, 0 grass); a
+    // team's stadium takes its surface in 2026. Others (Pro Bowl, Super Bowls, the practice field) keep the game's.
+    constexpr int8_t kTurf2026[32] = {
+        0, 1, 1, 0, 0, 0, 0, 1,  // Bears, Bengals, Bills, Broncos, Browns, Buccaneers, Cardinals, Chargers (SoFi)
+        0, 1, 1, 0, 0, 1, 0, 1,  // Chiefs, Colts, Cowboys, Dolphins, Eagles, Falcons, 49ers, Giants
+        0, 1, 1, 0, 1, 1, 0, 1,  // Jaguars, Jets, Lions, Packers, Panthers, Patriots, Raiders (Allegiant), Rams (SoFi)
+        0, 0, 1, 1, 0, 1, 1, 1,  // Ravens, Commanders, Saints, Seahawks, Steelers, Texans, Titans, Vikings
+    };
+
+    void NoteFieldSurface(PPCContext& ctx, uint8_t* base)
+    {
+        hc09::guest::Database db(ctx, base);
+        if (!db.Ready() || !db.Query("select 'DIGS' into \x85 from 'FNIG'", { db.Out(0) }))
+            return;
+        const uint32_t stadium = db.Get(0);
+        int turf = -1;
+        if (stadium < std::size(kTurf2026))
+            turf = kTurf2026[stadium];
+        else if (stadium == 35)  // Texans, roof open
+            turf = 1;
+        else if (stadium == 46)  // Cardinals, roof open
+            turf = 0;
+        else if (stadium == 49)  // Colts, roof open
+            turf = 1;
+        else if (db.Query("select 'YTFS' into \x85 from 'DATS' where ('DIGS' = \x85)", { db.Out(1), stadium }))
+            turf = db.Get(1) == 6 ? 1 : 0;
+        hc09::g_fieldTurf = turf;
+        hc09::g_gamesStarted++;
+        std::fprintf(stderr, "[turf] game at stadium %u: %s\n", stadium, turf == 1 ? "artificial turf" : turf == 0 ? "grass" : "surface unknown");
+    }
 }
 
 PPC_FUNC(sub_82D1BAA8)
@@ -114,4 +147,5 @@ PPC_FUNC(sub_82D1BAA8)
                 TrimDepthChart(db, team);
     }
     __imp__sub_82D1BAA8(ctx, base);
+    NoteFieldSurface(ctx, base);
 }

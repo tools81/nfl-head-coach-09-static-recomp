@@ -186,6 +186,16 @@ Scale=2
   moves in step with the others. This gives each seat its own moment of the fans' last second of movement, and
   mirrors and shades some of them, so the stands look less like a repeating pattern. `off` draws the crowd as
   the game does.
+- `Turf`: our own shading for the field, a strength where `0` is off and `1` the default. Up close the grass
+  gets tufts of blades lit by the stadium's light and a layer of blades you look through at low camera
+  angles. Across the field, gentle patches of colour hide the grass texture's repeats. On grass, the field
+  also wears in through the game, in patches between the hash marks and toward midfield: none at kickoff,
+  most of it after about 40 minutes of play. Fields of artificial turf (the Vikings', the Lions', the
+  Cowboys' and others in 2026) never wear.
+- `Players`: our own shading for the players and coaches, a strength where `0` is off and `1` the default.
+  Jerseys, pants and the coaches' clothes get the soft sheen of knit cloth where they turn away from you. Helmets get a small, sharp
+  highlight from the sun on top of the game's own gloss. On skin, light wraps softly
+  past the shadow line with a warm, reddened edge, as light does when it passes through skin.
 - `AspectRatio`: for ultrawide screens, `21:9`, `32:9`, any `<width>:<height>`, or `auto` for your
   screen's shape; `16:9` (the game's own) by default. The 3D scenes fill the wider screen and show more at
   the sides, while the menus and on-field graphics keep their shape in the middle. Things just past
