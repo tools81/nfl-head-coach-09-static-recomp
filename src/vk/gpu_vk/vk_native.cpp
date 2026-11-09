@@ -15,7 +15,9 @@
 #include <vector>
 
 #include "../widescreen.h"
+#include "common/font_hd.h"
 #include "vk_materials.h"
+#include "vk_tessellation.h"
 #include "vk_motion.h"
 #include "vk_scene_effects.h"
 #include "vk_shader_compile.h"
@@ -81,6 +83,8 @@ struct ShaderEntry
     VkShaderModule module = VK_NULL_HANDLE;
     TranslatedShader meta;
     bool ok = false;
+    // hc09: a vertex shader whose draws are tessellated (vk_tessellation.h): its cut-short copy and the two stages.
+    VkShaderModule tessVs = VK_NULL_HANDLE, tessControl = VK_NULL_HANDLE, tessEval = VK_NULL_HANDLE;
 };
 
 struct Texture
@@ -92,6 +96,7 @@ struct Texture
     uint64_t epoch = 0;
     uint64_t lastUsed = 0;
     uint32_t extra = 0;   // hc09: mip levels above the game's (a replacement 2^extra times its size)
+    uint64_t glyphs = 0;  // hc09: a glyph page's: its sharper copy's version (common/font_hd.h)
 };
 
 void MakeMips(std::vector<xenos::Image>& levels, uint32_t maxLevel)
@@ -205,6 +210,7 @@ struct NativeRenderer::Impl
     RendererStats* stats = nullptr;
     VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
     VkPipelineLayout pipeLayout = VK_NULL_HANDLE;
+    VkShaderStageFlags drawPushStages = 0;   // the stages the draw index is pushed to
     VkDescriptorPool pool = VK_NULL_HANDLE;
     // Compute: resolves (colour, depth), texture decode and mips (as vk_edram).
     // Resolves: [depth][multisampled].
@@ -1346,6 +1352,25 @@ struct NativeRenderer::Impl
             }
         e.module = Module(e.meta.glsl, vs ? Stage::kVertex : Stage::kFragment, name);
         if (!e.module) return nullptr;
+        if (vs && dev->tessellation && TessellatedVertexShader(hash))
+        {
+            std::string tvs, tcs, tes;
+            if (TessellationShaders(hash, e.meta.glsl, tvs, tcs, tes))
+            {
+                if (const char* dir = Hc09Env("HC09_NATIVE_SHADER_DIR"))
+                    for (auto [suffix, text] : { std::pair<const char*, const std::string*>{ "_tvs", &tvs }, { "_tcs", &tcs }, { "_tes", &tes } })
+                        if (FILE* f = fopen((std::string(dir) + "/" + name + suffix + ".glsl").c_str(), "wb"))
+                        {
+                            fwrite(text->data(), 1, text->size(), f);
+                            fclose(f);
+                        }
+                const std::string base = name;
+                e.tessVs = Module(tvs, Stage::kVertex, (base + "_tvs").c_str());
+                e.tessControl = Module(tcs, Stage::kTessControl, (base + "_tcs").c_str());
+                e.tessEval = Module(tes, Stage::kTessEval, (base + "_tes").c_str());
+                if (!e.tessVs || !e.tessControl || !e.tessEval) e.tessVs = e.tessControl = e.tessEval = VK_NULL_HANDLE;
+            }
+        }
         if (e.meta.unsupported) Warn(std::string("shader ") + name + " uses an untranslated vertex format");
         e.ok = true;
         ++stats->shaders;
@@ -1355,21 +1380,28 @@ struct NativeRenderer::Impl
     // Pipeline state: everything that is not dynamic, as one key.
     VkPipeline Pipeline(const std::array<uint64_t, 9>& key, VkShaderModule vsMod, VkShaderModule psMod, bool rect, uint32_t cull,
                         uint32_t frontFace, uint64_t texKinds, const VkFormat colorFmt[4], const uint32_t writeMask[4],
-                        const uint32_t blend[4], bool hasDepth, uint32_t dc, bool zEnable, bool stencilOn)
+                        const uint32_t blend[4], bool hasDepth, uint32_t dc, bool zEnable, bool stencilOn, const ShaderEntry* tess = nullptr)
     {
         auto it = pipelines.find(key);
         if (it != pipelines.end()) return it->second;
         uint32_t kinds[2] = { uint32_t(texKinds), uint32_t(texKinds >> 32) };
         VkSpecializationMapEntry me[2] = { { 0, 0, 4 }, { 1, 4, 4 } };
         VkSpecializationInfo spec{ 2, me, sizeof(kinds), kinds };
-        VkPipelineShaderStageCreateInfo st[3]{};
+        VkPipelineShaderStageCreateInfo st[4]{};
         uint32_t n = 0;
-        st[n++] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vsMod, "main", &spec };
+        st[n++] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, tess ? tess->tessVs : vsMod, "main", &spec };
+        if (tess)
+        {
+            st[n++] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, tess->tessControl, "main", &spec };
+            st[n++] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, tess->tessEval, "main", &spec };
+        }
         if (rect) st[n++] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_GEOMETRY_BIT, rectGs, "main" };
         st[n++] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, psMod, "main", &spec };
         VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
         VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
-        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        ia.topology = tess ? VK_PRIMITIVE_TOPOLOGY_PATCH_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineTessellationStateCreateInfo ts{ VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO };
+        ts.patchControlPoints = 3;   // the draws' triangles (all are lists by now)
         VkPipelineViewportStateCreateInfo vp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
         vp.viewportCount = 1;
         vp.scissorCount = 1;
@@ -1432,6 +1464,7 @@ struct NativeRenderer::Impl
         ci.pStages = st;
         ci.pVertexInputState = &vi;
         ci.pInputAssemblyState = &ia;
+        if (tess) ci.pTessellationState = &ts;
         ci.pViewportState = &vp;
         ci.pRasterizationState = &rs;
         ci.pMultisampleState = &ms;
@@ -1704,7 +1737,11 @@ struct NativeRenderer::Impl
         if (it != textures.end())
         {
             Texture& c = it->second;
-            if (!xenos::HostWrittenSince(c.pa, c.bytes, c.epoch)) { c.lastUsed = frame; return c.img.image ? &c : &dummy[kTex2D]; }
+            if (!xenos::HostWrittenSince(c.pa, c.bytes, c.epoch) && (!c.glyphs || hc09::font_hd::Version(c.pa) == c.glyphs))
+            {
+                c.lastUsed = frame;
+                return c.img.image ? &c : &dummy[kTex2D];
+            }
             garbage.push_back(c.img);
             textures.erase(it);
             ++texGen;
@@ -1718,9 +1755,11 @@ struct NativeRenderer::Impl
         ScopeTimer timer{ stats->textureSeconds };
         uint32_t kind = tf.is3D() ? kTex3D : tf.dimension() == 3 || tf.stacked() ? kTexCube : kTex2D;
         t.stacked = tf.stacked();
+        // hc09: a page of the game's text's glyphs: its sharper copy in its place (common/font_hd.h).
+        const bool glyphPage = kind == kTex2D && tf.dimension() == 1 && tf.layers() == 1 && hc09::font_hd::Version(t.pa) != 0;
         if (kind == kTex2D && tf.dimension() == 1 && (tf.format() == 6 || tf.format() == 22) &&
             !(g_texOverride.dump && g_texOverride.dumping(tf) && !Resolved(t.pa, t.bytes)) &&
-            !(g_texOverride.has && g_texOverride.has(tf, key[6])) && DecodeOnGpu(t, tf))
+            !(g_texOverride.has && g_texOverride.has(tf, key[6])) && !glyphPage && DecodeOnGpu(t, tf))
             return &t;
         if (resolveGpu) ReleaseOverlapping(t.pa, t.bytes);
         WaitForWrites(t.pa, t.bytes);
@@ -1731,9 +1770,18 @@ struct NativeRenderer::Impl
         {
             std::string why;
             if (!xenos::DecodeTextureLayer(tf, l, layers[l][0], &why)) { Warn("texture not decoded: " + why); return &dummy[kTex2D]; }
-            if (n == 1 && kind == kTex2D && g_texOverride.dump && !Resolved(t.pa, t.bytes)) g_texOverride.dump(tf, layers[l][0]);
+            xenos::Image sharp;
+            if (glyphPage && hc09::font_hd::Image(t.pa, tf.width(), tf.height(), sharp.rgba, sharp.width, sharp.height, t.glyphs))
+            {
+                layers[l][0] = std::move(sharp);
+                replaced = true;
+                t.extra = 0;
+                while (t.extra < 4 && (layers[l][0].width >> (t.extra + 1)) >= tf.width() && (layers[l][0].height >> (t.extra + 1)) >= tf.height())
+                    ++t.extra;
+            }
+            else if (n == 1 && kind == kTex2D && g_texOverride.dump && !Resolved(t.pa, t.bytes)) g_texOverride.dump(tf, layers[l][0]);
             // hc09: replace is asked for every single-layer texture (replacements by content hash have no set).
-            if (n == 1 && g_texOverride.replace && g_texOverride.replace(tf, key[6], layers[l][0]))
+            if (!replaced && n == 1 && g_texOverride.replace && g_texOverride.replace(tf, key[6], layers[l][0]))
             {
                 replaced = true;
                 // A larger replacement gets a level per doubling more, down to the game's own sizes: shrunk on the
@@ -2282,14 +2330,17 @@ struct NativeRenderer::Impl
         uint32_t frontFace = ((su >> 2) & 1) ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
         bool zOn = hasDepth && zEnable, sOn = hasDepth && stencilOn;
         uint32_t dsKey = hasDepth ? (dc & ~(zOn ? 0u : 0x76u)) : 0;   // z bits irrelevant when z is off
-        PipeKey key = { vsHash, ps ? psHash : 0, uint64_t(rect) | (uint64_t(cull) << 8) | (uint64_t(frontFace) << 16) |
+        // hc09: smoother player models. HC09_TESS_AB=1 (dev): on odd frames only (two screenshots in a row compare).
+        static const bool tessAb = Hc09Env("HC09_TESS_AB") != nullptr;
+        const ShaderEntry* tess = vs->tessEval && !rect && !(tessAb && frame % 2 == 0) ? vs : nullptr;
+        PipeKey key = { vsHash, ps ? psHash : 0, uint64_t(rect) | (uint64_t(cull) << 8) | (uint64_t(frontFace) << 16) | (uint64_t(tess != nullptr) << 40) |
                                                      (uint64_t(hasDepth) << 24) | (uint64_t(zOn) << 25) | (uint64_t(sOn) << 26) |
                                                      (uint64_t(boundSamples) << 32),
                         texKinds, dsKey };
         for (int i = 0; i < 4; ++i) key[5 + i] = uint64_t(colorFmt[i]) | (uint64_t(writeMask[i]) << 32) | (uint64_t(writeMask[i] ? blend[i] : 0) << 36);
         VkPipeline pipe = lastPipe && key == lastPipeKey ? lastPipe
                         : Pipeline(key, vs->module, ps ? ps->module : nullPs, rect, cull, frontFace, texKinds, colorFmt, writeMask, blend,
-                                   hasDepth, dc, zOn, sOn);
+                                   hasDepth, dc, zOn, sOn, tess);
         if (pipe && pipe != lastPipe) { lastPipe = pipe; lastPipeKey = key; }
         if (!pipe) { Skip("pipeline creation failed"); return; }
         lap.To(NativeProfile::kDrawPipeline);
@@ -2347,7 +2398,7 @@ struct NativeRenderer::Impl
         }
         const uint32_t drawIndex = uint32_t((constBase + constUsed * constStride) / constStride);   // DrawIndexedConsts
         if (set != boundSet) { vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout, 0, 1, &set, 0, nullptr); boundSet = set; }
-        vkCmdPushConstants(cb, pipeLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_GEOMETRY_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4, &drawIndex);
+        vkCmdPushConstants(cb, pipeLayout, drawPushStages, 0, 4, &drawIndex);
         VkRect2D scissor{ { scx0, scy0 }, { uint32_t(scx1 - scx0), uint32_t(scy1 - scy0) } };
         if (fresh || memcmp(&scissor, &rec.scissor, sizeof(scissor))) { vkCmdSetScissor(cb, 0, 1, &scissor); rec.scissor = scissor; }
         float bc[4];
@@ -2586,8 +2637,10 @@ bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* e
 
     // Draw descriptors: as vk_edram without binding 3 (EDRAM).
     VkDescriptorSetLayoutBinding b[8]{};
-    b[0] = { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
-    b[1] = { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_GEOMETRY_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
+    // hc09: guest memory and the draw constants are read by the tessellation stages too (vk_tessellation.h).
+    const VkShaderStageFlags tessStages = dev.tessellation ? VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT : 0;
+    b[0] = { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | tessStages, nullptr };
+    b[1] = { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_GEOMETRY_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | tessStages, nullptr };
     b[2] = { 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
     b[3] = { 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
     b[4] = { 5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
@@ -2600,7 +2653,8 @@ bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* e
     // samplers per stage otherwise). Descriptors are still all written before the set is bound.
     const bool uab = flag(Hc09Env("HC09_NATIVE_UAB"), true);   // dev A/B switch
     if (uab) lci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-    VkPushConstantRange pcr{ VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_GEOMETRY_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4 };
+    VkPushConstantRange pcr{ VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_GEOMETRY_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | tessStages, 0, 4 };
+    I.drawPushStages = pcr.stageFlags;
     VkPipelineLayoutCreateInfo pci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
     pci.setLayoutCount = 1;
     pci.pSetLayouts = &I.setLayout;

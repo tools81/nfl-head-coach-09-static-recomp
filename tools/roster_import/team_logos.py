@@ -31,9 +31,55 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 #   field     the stadium's field: midfield logo, and the end zones (--end-zone, else the name)
 #   midfield  the stadium's field: the midfield logo only
 #   decal     the logo alone, mirrored (the helmet's decal)
+#   side decal  a helmet from the side: its decal, wherever it is, covered and the logo put there
 #   boxes     logos at the given boxes, see replace_boxes (written ("boxes", box, ...))
 #   ribbon    a ribbon board with the logo repeated along it
 TEAMS = {
+    # Teams with a new logo since 2008 (team_uniforms.py --export writes these originals from the
+    # disc: --dump its folder).
+    "dolphins": {
+        "D1DA611C23E9EE0D": "logo",      # large logo
+        "FC1881A7129AA603": "logo",      # small logo
+        "E424803D7189F411": "flat",      # the logo icon
+        "1E4F7C5060619E24": "side decal",    # the score bug's helmets
+        "7D6D7A6129C3F961": "side decal",
+        "E41A97891C456E34": "midfield",  # the stadium's field
+        "EF371B4C6D420EFC": "decal",     # the players' helmets
+    },
+    "chargers": {
+        "9EF3F3026E965245": "logo",
+        "5695BF9684F8886E": "logo",
+        "B23457CCD6B03EC2": "flat",
+        "F3FF604EEEEB837E": "side decal",
+        "1AC4FCC4C499B678": "side decal",
+        "B73A500772A1D6AE": "midfield",
+        "FAA71CEB1C88D56B": "decal",
+    },
+    "jaguars": {
+        "E9B5F584D2E8828F": "logo",
+        "D818446A0440AA2A": "logo",
+        "511B589CF7E7EF46": "flat",
+        "3909F9C1F016B6B8": "side decal",
+        "D7B9644298F1FB37": "side decal",
+        "B851C053ADAD99E6": "midfield",
+        "327C66BA521F177A": "decal",
+    },
+    "falcons": {
+        "5116494A23719290": "logo",
+        "BB973DC788C0476C": "logo",
+        "7C44B63D045A970E": "flat",
+        "DD4AA3481127E5DA": "side decal",
+        "9D90738A0BA084C1": "side decal",
+        "2C2B5F6B2257581A": "midfield",
+        "E64E9F724634FBC1": "decal",
+    },
+    # The Browns' logo is their helmet, which has no logo on it (their helmets and the score bug's are
+    # team_uniforms.py's).
+    "browns": {
+        "1E170335E9B75E8F": "logo",
+        "4D0C2360B3F896FA": "logo",
+        "1BFADA57EDF4A5F6": "flat",
+    },
     "commanders": {
         "043CD6AD867A5001": "logo",      # large logo: New Career's Team Select
         "181C216DFB917D7C": "logo",      # small logo: Coach Now's Team Select, lists
@@ -82,6 +128,111 @@ TEAMS = {
         "75EFA5EEFE3B9D04": ("boxes", (136, 373, 194, 414)),                      # career campus building wall
     },
 }
+
+# Every loading-screen backdrop of the teams with a new logo (the game shows one of a team's at random): the offset
+# of its zlib stream in qkl_boot.ast, by content hash (team_uniforms.py --export reads the originals from the disc).
+BACKDROPS = {
+    "bears": {
+        "CC75441A35AB985E": 0x162EA0E8,
+        "D3A499000AE29355": 0x16342C98,
+        "6EF9BFB910D6B456": 0x16399BB0,
+        "7FE3F76D016C2065": 0x163F1D08,
+        "8A443A4F95D77DD0": 0x1644A950,
+        "659FD936514327F6": 0x1649F798,
+        "BC2511FB02F30058": 0x164F3420,
+        "C8FED930AE22BBF3": 0x16546A78,
+    },
+    "browns": {
+        "4C1DAF6BECC91A03": 0x16D908F8,
+        "2CE3803926833FAE": 0x16DEC1A0,
+        "80F46755B3A8FC75": 0x16E42FB8,
+        "6C23DC0280C60C21": 0x16E9D7C8,
+        "6D9CCEB7FE5ED62A": 0x16EFC438,
+        "A53DCA88D5C41B6B": 0x16F4F050,
+        "16099468C1DB87A8": 0x16F9FE98,
+        "C27BF90D0491484C": 0x16FF3688,
+    },
+    "chargers": {
+        "788D33078F2B48F4": 0x175BC7D8,
+        "1BDEB76CBB0B1B1E": 0x17614020,
+        "32CB765B4C462A69": 0x17668488,
+        "9781FEC637B8BE98": 0x176BE968,
+        "9E1BA7D10DBB4429": 0x177144C8,
+        "73EDBFC8A3C664E9": 0x177655E8,
+        "0890331FA33F0D9F": 0x177B4818,
+        "4F56281C062ECE62": 0x178050B0,
+    },
+    "dolphins": {
+        "D8D76F80061AEA38": 0x1807B880,
+        "ADEF80AFB6AA8946": 0x180D8680,
+        "4699B64BE555A508": 0x18133FB8,
+        "3BA5352CF5BCDE35": 0x18191F48,
+        "F5EC3DC16F147B71": 0x181EE058,
+        "C23F8F5591214FB0": 0x18246FE8,
+        "4690452BC46957D3": 0x1829EE20,
+        "EA94F8A9275ED412": 0x182F7C10,
+    },
+    "falcons": {
+        "CC6B6188356485F9": 0x185F18D8,
+        "1EAF231C6A4A07BE": 0x1864CF50,
+        "E05BCB1AEA571389": 0x186A4D78,
+        "20CF794957353991": 0x186FFCF8,
+    },
+    "jaguars": {
+        "7550CEAEB83BA947": 0x18E3E800,
+        "FCCBA54012B861AF": 0x18E98ED0,
+        "40E511A37AF86125": 0x18EF0780,
+        "3D5E917E84B6AE97": 0x18F4BF60,
+        "707977AD52566780": 0x18FA7A28,
+        "1718662EA2AEB7B8": 0x18FFB728,
+        "564AC09E02F74D21": 0x1904D578,
+        "C070C6C519944F62": 0x190A2C08,
+    },
+    "jets": {
+        "E6169827811A7515": 0x190F8480,
+        "CC255B87F55F5860": 0x19152538,
+        "AC56EA95C68B7513": 0x191A8080,
+        "5C014374B16E2BA7": 0x19201D18,
+        "77F7C8632C495893": 0x1925BDC0,
+        "F70DC20C27FDF609": 0x192B15E8,
+        "691CEC7DB45BF478": 0x19302048,
+        "A791D8CEBBB70CA6": 0x193568A8,
+    },
+    "rams": {
+        "74BB46505A39DEE7": 0x1A1270F8,
+        "CCE9EC8F63F58A3C": 0x1A179B48,
+        "5F484998843A4C58": 0x1A1CBFF0,
+        "F0BD24A9756DBDC7": 0x1A21DA78,
+    },
+    "commanders": {
+        "EA62130CC9A1831D": 0x1A666600,
+        "11D7C23181919E03": 0x1A6C82C0,
+        "2AACE0E9B838AA89": 0x1A7277F0,
+        "3D1F2000998125F4": 0x1A789FF0,
+        "253C08B560956845": 0x1A7ECF60,
+        "54BAADBB5E0A88B4": 0x1A846120,
+        "EE02C55766B75056": 0x1A89F800,
+        "7B2FB725F195C987": 0x1A8F9E70,
+    },
+    "seahawks": {
+        "F93354CAA3978AC6": 0x1ABE5D48,
+        "CCC1CBD49BDFE899": 0x1AC37FD8,
+        "A5EC2A4889A9D894": 0x1AC87CA0,
+        "0011BF11865BA5E6": 0x1ACDA4F0,
+        "6989B55051942C1B": 0x1AD30108,
+        "716F6BD5B54E84C8": 0x1AD7E170,
+        "A1ED2401C080E699": 0x1ADCADF0,
+        "C42F9247084C4C6F": 0x1AE18D08,
+    },
+}
+
+# The Seahawks and Jets keep their logos, recoloured (team_uniforms.py): their backdrops take the recoloured large
+# logo (hc27/textures/hashed/38424377B24AE938.png, 3C9DCE9A65C5C976.png).
+TEAMS.setdefault("seahawks", {})
+TEAMS.setdefault("jets", {})
+for _team, _backdrops in BACKDROPS.items():
+    for _hash in _backdrops:
+        TEAMS[_team].setdefault(_hash, "backdrop")
 
 
 def fitted(logo, width, height):
@@ -163,6 +314,63 @@ def replace_helmet(original, logo):
     picture.paste(shell, (0, 0) + original.size, patch)
     margin = (right - left) // 12
     paste_centred(picture, logo, (left + margin, top + margin, right - margin, bottom - margin))
+    return picture
+
+
+def replace_side_decal(original, logo):
+    """A helmet seen from the side: its decal (the largest patch of the helmet not its shell's colour,
+    on the half away from the facemask) covered in the shell's colour, the new logo in its place,
+    mirrored when the helmet faces left."""
+    from collections import Counter, deque
+    from PIL import Image, ImageDraw, ImageOps
+    width, height = original.size
+    px = original.load()
+    opaque = [(x, y) for y in range(height) for x in range(width) if px[x, y][3] > 200]
+    if not opaque:
+        return original
+    shell = Counter(px[x, y][:3] for x, y in opaque).most_common(1)[0][0]
+    far = lambda c: sum((a - b) ** 2 for a, b in zip(c[:3], shell)) > 60 ** 2
+    x0, x1 = min(x for x, _ in opaque), max(x for x, _ in opaque)
+    y0, y1 = min(y for _, y in opaque), max(y for _, y in opaque)
+    mid_x, low_y = (x0 + x1) // 2, y0 + (y1 - y0) * 3 // 5
+    # The facemask: the side whose lower half has more of what is not the shell.
+    left_mask = sum(1 for x, y in opaque if x < mid_x and y > low_y and far(px[x, y]))
+    right_mask = sum(1 for x, y in opaque if x >= mid_x and y > low_y and far(px[x, y]))
+    faces_left = left_mask > right_mask
+    back = (mid_x, x1) if faces_left else (x0, mid_x)
+    candidate = {(x, y) for x, y in opaque if back[0] <= x <= back[1] and y0 + 4 < y < y1 - (y1 - y0) // 6 and far(px[x, y])}
+    # Its largest connected patch (8-neighbours, gaps of a pixel bridged).
+    best, seen = [], set()
+    for start in candidate:
+        if start in seen:
+            continue
+        patch, queue = [], deque([start])
+        seen.add(start)
+        while queue:
+            x, y = queue.popleft()
+            patch.append((x, y))
+            for dx in (-2, -1, 0, 1, 2):
+                for dy in (-2, -1, 0, 1, 2):
+                    n = (x + dx, y + dy)
+                    if n in candidate and n not in seen:
+                        seen.add(n)
+                        queue.append(n)
+        if len(patch) > len(best):
+            best = patch
+    if not best:
+        return original
+    left, top = min(x for x, _ in best), min(y for _, y in best)
+    right, bottom = max(x for x, _ in best) + 1, max(y for _, y in best) + 1
+    cover = Image.new("L", original.size, 0)
+    draw = ImageDraw.Draw(cover)
+    for x, y in best:
+        draw.rectangle((x - 2, y - 2, x + 2, y + 2), fill=255)
+    on_shell = original.getchannel("A").point(lambda v: 255 if v > 200 else 0)
+    from PIL import ImageChops
+    cover = ImageChops.multiply(cover, on_shell)
+    picture = original.copy()
+    picture.paste(shell + (255,), (0, 0) + original.size, cover)
+    paste_centred(picture, ImageOps.mirror(logo) if faces_left else logo, (left, top, right, bottom))
     return picture
 
 
@@ -347,6 +555,41 @@ def field_white(p):
     return min(p[:3]) > 150
 
 
+def field_marks(here, grass, thick, skip_lines=True):
+    """(what is far from the grass's colour, the same less what is thinner than `thick`: the lines
+    and hash marks) of a piece of the field, as masks."""
+    from PIL import Image, ImageFilter
+    px = here.load()
+    out = Image.new("L", here.size, 0)
+    o = out.load()
+    for y in range(here.height):
+        row = [x for x in range(here.width)
+               if sum((c - g) ** 2 for c, g in zip(px[x, y], grass)) > 55 ** 2]
+        if skip_lines and len(row) > here.width * 8 // 10:
+            continue   # a painted yard line (the Dolphins' 50) across the whole area
+        for x in row:
+            o[x, y] = 255
+    return out, out.filter(ImageFilter.MinFilter(thick)).filter(ImageFilter.MaxFilter(thick))
+
+
+def midfield_logo_box(original, area):
+    """The midfield logo's box within `area`: what is far from the grass's colour, whatever its own
+    colours, and thicker than the lines and hash marks."""
+    from PIL import ImageFilter, ImageStat
+    here = original.crop(area).convert("RGB")
+    grass = [int(v) for v in ImageStat.Stat(here).median]
+    thick = max(5, original.width // 200) | 1
+    out, mask = field_marks(here, grass, thick)
+    # The logo's thin parts (a facemask's bars, a beak's tip) back: what is far from the grass
+    # near its thick ones.
+    from PIL import ImageChops
+    mask = ImageChops.multiply(out, mask.filter(ImageFilter.MaxFilter(thick * 4 + 1)))
+    box = mask.getbbox()
+    if not box:
+        return matching_box(original, area, lambda p: p[0] > p[1] + 20)
+    return (area[0] + box[0], area[1] + box[1], area[0] + box[2], area[1] + box[3])
+
+
 def replace_midfield(original, logo):
     """The stadium's field, end zones at the top and bottom: the midfield logo covered with the
     field a few yard lines away (same lines and hash marks) and the new logo put on it, turned as
@@ -360,10 +603,14 @@ def replace_midfield(original, logo):
     # grass (its burgundy, gold and brown) around the centre.
     line_column = centre - width * 8 // 100
     lines = [start for start, _ in runs_of([field_white(pixels[line_column, y]) for y in range(height)])]
-    spacing = min(b - a for a, b in zip(lines, lines[1:]) if b - a > height // 100)
+    gaps = sorted(b - a for a, b in zip(lines, lines[1:]) if b - a > height // 100)
+    spacing = gaps[len(gaps) // 2]   # the usual gap (marks by the end zones come closer)
     reach = width // 10
-    logo_box = matching_box(original, (centre - reach, height // 2 - reach, centre + reach, height // 2 + reach),
-                            lambda p: p[0] > p[1] + 20)
+    across = width * 6 // 100   # short of the yard numbers
+    area = (centre - across, height // 2 - reach, centre + across, height // 2 + reach)
+    logo_box = midfield_logo_box(original, area)
+    grass = [int(v) for v in ImageStat.Stat(original.crop(area).convert("RGB")).median]
+    thick = max(5, width // 200) | 1
     margin = width // 100
     box = (logo_box[0] - margin, logo_box[1] - margin, logo_box[2] + margin, logo_box[3] + margin)
     # From whole yard-line gaps away, clear of the logo, up or down the field: the patch whose
@@ -376,11 +623,13 @@ def replace_midfield(original, logo):
     def mismatch(shift):
         patch = original.crop((box[0], box[1] + shift, box[2], box[3] + shift))
         around = original.crop(box)  # the box's own edge is still field (the logo is inside)
-        return sum(ImageStat.Stat(ImageChops.difference(patch, around).convert("L"), ring).mean)
+        # A patch with more than lines on it (numbers, other paint) is a poor cover.
+        painted = field_marks(patch.convert("RGB"), grass, thick, skip_lines=False)[1].getbbox() is not None
+        return sum(ImageStat.Stat(ImageChops.difference(patch, around).convert("L"), ring).mean) + (1000 if painted else 0)
 
     # Measured from line to line (the gaps vary by a pixel or two).
     through = min(range(len(lines)), key=lambda i: abs(lines[i] - (box[1] + box[3]) // 2))
-    shifts = [lines[through + k] - lines[through] for k in range(-first - 2, first + 3)
+    shifts = [lines[through + k] - lines[through] for k in range(-first - 6, first + 7)
               if abs(k) >= first and 0 <= through + k < len(lines)]
     shifts = [shift for shift in shifts if 0 <= box[1] + shift and box[3] + shift <= height]
     shift = min(shifts, key=mismatch)
@@ -494,7 +743,7 @@ def runs_of(values):
 RECIPES = {"logo": replace_logo, "flat": replace_flat_logo, "panel": replace_panel, "helmet": replace_helmet,
            "backdrop": replace_backdrop, "wordmark": replace_wordmark, "sign": replace_sign, "banner": replace_banner,
            "end zone": replace_end_zone, "field": replace_field, "midfield": replace_midfield, "decal": replace_decal,
-           "boxes": replace_boxes, "ribbon": replace_ribbon}
+           "boxes": replace_boxes, "ribbon": replace_ribbon, "side decal": replace_side_decal}
 LETTERED = {"wordmark", "sign", "banner", "end zone", "field"}  # recipes that also letter the team's name
 
 
@@ -506,6 +755,7 @@ def main():
                                            "without it the team's name is lettered there")
     parser.add_argument("--dump", default=os.path.join(ROOT, "build", "hashed"), help="HC09_DUMP_HASHED's folder")
     parser.add_argument("--out", default=os.path.join(ROOT, "hc27", "textures", "hashed"))
+    parser.add_argument("--only", help="this kind of image only (e.g. backdrop)")
     args = parser.parse_args()
     try:
         from PIL import Image
@@ -524,6 +774,8 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     missing = []
     for content_hash, kind in TEAMS[args.team].items():
+        if args.only and (kind if isinstance(kind, str) else kind[0]) != args.only:
+            continue
         original_path = os.path.join(args.dump, f"{content_hash}.png")
         if not os.path.exists(original_path):
             missing.append(content_hash)

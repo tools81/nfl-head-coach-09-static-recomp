@@ -38,7 +38,9 @@ is built as it is instead. The setup log is `%TEMP%\HC09Setup.log`.
 
 Setup builds a second game next to the original: **HC27.exe**, NFL Head Coach 09 with today's
 league. It has the current players with their ratings and contracts, the current head coaches,
-real player and coach portraits, updated team names and logos, and seasons that start in 2026.
+real player and coach portraits, updated team names and logos, the uniform and helmet colours
+teams wear today (the Seahawks' college navy, the Rams' royal and sol, the Bills' white helmets,
+the Broncos' orange jerseys and more), and seasons that start in 2026.
 Everything it needs comes with the download (the `hc27` folder in the install folder), so there
 is nothing to import or set up.
 
@@ -196,6 +198,9 @@ Scale=2
   Jerseys, pants and the coaches' clothes get the soft sheen of knit cloth where they turn away from you. Helmets get a small, sharp
   highlight from the sun on top of the game's own gloss. On skin, light wraps softly
   past the shadow line with a warm, reddened edge, as light does when it passes through skin.
+- `SharpText`: `on` by default. The game draws its text from outline fonts into small textures at 720p sizes;
+  at `Scale=2` or above, each letter is also drawn at that many times the size, so the menus' and on-field
+  graphics' text is as sharp as the rest of the picture. `off` enlarges the game's own letters.
 - `AspectRatio`: for ultrawide screens, `21:9`, `32:9`, any `<width>:<height>`, or `auto` for your
   screen's shape; `16:9` (the game's own) by default. The 3D scenes fill the wider screen and show more at
   the sides, while the menus and on-field graphics keep their shape in the middle. Things just past

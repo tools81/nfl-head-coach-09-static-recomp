@@ -6,7 +6,7 @@
 
 namespace hc09vk {
 
-enum class Stage { kVertex, kGeometry, kFragment, kCompute };
+enum class Stage { kVertex, kGeometry, kFragment, kCompute, kTessControl, kTessEval };
 
 // Returns false with the compiler log in `log` on failure.
 bool CompileGlsl(const std::string& source, Stage stage, const char* name, std::vector<uint32_t>& spirv, std::string* log);

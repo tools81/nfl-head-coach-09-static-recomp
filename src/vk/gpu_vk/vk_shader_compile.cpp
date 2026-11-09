@@ -26,7 +26,9 @@ bool CompileGlsl(const std::string& source, Stage stage, const char* name, std::
     static const bool optimize = [] { const char* e = Hc09Env("HC09_SHADER_OPT"); return e && strcmp(e, "0"); }();
     const glslang_stage_t kind = stage == Stage::kVertex ? GLSLANG_STAGE_VERTEX
                                : stage == Stage::kGeometry ? GLSLANG_STAGE_GEOMETRY
-                               : stage == Stage::kFragment ? GLSLANG_STAGE_FRAGMENT : GLSLANG_STAGE_COMPUTE;
+                               : stage == Stage::kFragment ? GLSLANG_STAGE_FRAGMENT
+                               : stage == Stage::kTessControl ? GLSLANG_STAGE_TESSCONTROL
+                               : stage == Stage::kTessEval ? GLSLANG_STAGE_TESSEVALUATION : GLSLANG_STAGE_COMPUTE;
     glslang_input_t input{};
     input.language = GLSLANG_SOURCE_GLSL;
     input.stage = kind;

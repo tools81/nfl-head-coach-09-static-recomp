@@ -99,7 +99,7 @@ the game's default: everything it needs goes in the `hc27` folder of the install
    made for his head, a coach with a preset head wears the generic polo the game gives presets
    when creating a coach. Without coaches,
    copy `data/ROSTER-M27` to `hc27/ROSTER` instead.
-5. Team logos (optional; so far the Commanders, Bears and Rams): the game's images of a team's logo and name
+5. Team logos (optional; the Commanders, Bears, Rams, Dolphins, Chargers, Jaguars, Falcons and Browns): the game's images of a team's logo and name
    are textures inside the disc's archives, so they are replaced by their contents. Run HC27 once
    with `set HC09_DUMP_HASHED=1` and go through the screens that show the team: Coach Now's Team
    Select and a game with the team (loading screen, Coach Agenda, play calling, score bug), and
@@ -122,7 +122,39 @@ the game's default: everything it needs goes in the `hc27` folder of the install
    `hc27/textures/hashed`.
    It names any it did not find in the dump. The team's name itself comes from the roster
    (`TEAM_RENAMES` in `import_roster.py`).
-6. Title screen (optional): with the title screen in `build/hashed` (HC27 run to Press Start with
+
+   The Dolphins, Chargers, Jaguars, Falcons and Browns need no dump: their originals (menus' logos,
+   the score bug's helmets, midfield, the players' helmet decal) are read from the disc by
+   `team_uniforms.py --export` (step 6):
+
+   ```sh
+   python tools/roster_import/team_uniforms.py --export build/logo_originals --team dolphins chargers jaguars falcons browns
+   python tools/roster_import/team_logos.py --team dolphins --logo tools/roster_import/data/logos/dolphins.png --dump build/logo_originals
+   ```
+
+   (and the same for `chargers`, `jaguars`, `falcons` and `browns`, with their logos).
+
+   Every loading-screen backdrop of these teams (the game picks one of a team's at random; `BACKDROPS`
+   in the script) is exported too; `--only backdrop` redoes just those, e.g. for the Bears, Rams and
+   Commanders, whose other images are already done, and for the Seahawks and Jets, whose backdrops take
+   their recoloured large logo (`--logo hc27/textures/hashed/38424377B24AE938.png`, `3C9DCE9A65C5C976.png`).
+6. Uniforms (optional): the colours teams wear now, where they changed since 2008 (the Seahawks,
+   Rams, Bills, Dolphins, Chargers, Jets, 49ers, Broncos, Jaguars and Browns; `RECOLOURS` and
+   `SHELLS` in the script). Needs `pip install numpy xxhash pillow`.
+
+   ```sh
+   python tools/roster_import/team_uniforms.py
+   ```
+
+   reads each team's uniforms (every kit: jerseys, pants, socks, numbers, the sideline uniforms)
+   and helmet decals from the disc, recolours them and writes them to `hc27/textures/hashed`; the
+   helmets' shell and facemask colours are colours of their material, which it writes to
+   `hc27/disc`. Some menu images (the Seahawks' and Jets' logos, the Rams' and Browns' score-bug
+   helmets) are recoloured too. Run it before step 5's teams (it leaves their logos to
+   `team_logos.py`). The menus' team colours come from the roster (`team_colours.py`, set by
+   `import_roster.py`, or in an existing roster with `team_uniforms.py --roster hc27/ROSTER`).
+   `--inspect <team>` lists the main colours of a team's kit textures, to write a new recipe.
+7. Title screen (optional): with the title screen in `build/hashed` (HC27 run to Press Start with
    `HC09_DUMP_HASHED=1`),
 
    ```sh
@@ -132,7 +164,7 @@ the game's default: everything it needs goes in the `hc27` folder of the install
 
    replaces the coach on it and the game's title (shown on a white banner), and removes the
    copyright line.
-7. League finances: with the contracts at today's prices, the league's own amounts must be too:
+8. League finances: with the contracts at today's prices, the league's own amounts must be too:
 
    ```sh
    python tools/roster_import/league_salaries.py --iso "iso/NFL Head Coach 09.iso"
@@ -143,7 +175,7 @@ the game's default: everything it needs goes in the `hc27` folder of the install
    draft picks, re-signing players and hired coaches ask for) with the cap. They are tables in the
    disc's databases (listed in the script); it writes them, changed, to `hc27/disc`, which HC27
    lays over the disc's files at startup. The values are at the top of the script.
-8. Last season and team descriptions (New Career's Team Select):
+9. Last season and team descriptions (New Career's Team Select):
 
    ```sh
    python tools/roster_import/last_season.py --iso "iso/NFL Head Coach 09.iso"
@@ -155,7 +187,7 @@ the game's default: everything it needs goes in the `hc27` folder of the install
    second replaces each team's description with a 2026 one. Both are at the top of the scripts
    (descriptions at most 255 characters, and all 32 must fit in the space the game's own took).
    They write their tables to `hc27/disc` too; each tool replaces only its own files there.
-9. Run `build/hc09/HC27.exe`. Its saves are kept in `build/userdata-hc27`, apart from HC09's.
+10. Run `build/hc09/HC27.exe`. Its saves are kept in `build/userdata-hc27`, apart from HC09's.
 
 ## Keeping up with the season
 
@@ -287,8 +319,8 @@ does not show the portraits, which are HC27's).
 Not imported: colleges (HC09 stores an id into a list we have not mapped yet, so a player shows
 the college of the record he took over), most of the appearance (equipment and build come from
 that record; skin tone and head are set from the player's image, see step 3), and long snappers
-(HC09 has no such position). Team names, logos and uniforms stay 2008's, except the Redskins,
-renamed the Commanders (with their logo, step 5).
+(HC09 has no such position). Team names stay 2008's, except the Redskins, renamed the
+Commanders; logos and uniforms are updated by steps 5 and 6 for the teams that changed theirs.
 
 ## File format
 

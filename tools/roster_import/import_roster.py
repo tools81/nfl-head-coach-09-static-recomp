@@ -27,6 +27,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tdb import SaveFile  # noqa: E402
 import draft_rounds  # noqa: E402
+from team_colours import set_team_colours  # noqa: E402
 
 FREE_AGENTS = 1009
 NO_PLAYER = 32767
@@ -549,6 +550,7 @@ def import_roster(csv_path, roster_path, out_path, report_path=None, contracts_p
         draft_rounds.set_draft_rounds(play, draft_rounds.contract_totals(contracts_path, play))
     rate_teams(play, team_table)
     set_last_season(team_table)
+    set_team_colours(team_table)
 
     for i in range(team_table.count):
         new_name = TEAM_RENAMES.get(team_table.get(i, "TDNA"))

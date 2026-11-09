@@ -227,6 +227,8 @@ bool Device::CreateDevice(VkSurfaceKHR surface, std::string* err)
     f2.features.shaderFloat64 = supported.shaderFloat64;   // exact divisions in the EDRAM arithmetic
     f2.features.geometryShader = supported.geometryShader;
     geometryShader = supported.geometryShader != VK_FALSE;
+    f2.features.tessellationShader = supported.tessellationShader;
+    tessellation = supported.tessellationShader != VK_FALSE;
     f2.features.depthClamp = supported.depthClamp;
     f2.features.independentBlend = supported.independentBlend;   // MRT targets blend differently
     f2.features.shaderSampledImageArrayDynamicIndexing = supported.shaderSampledImageArrayDynamicIndexing;
