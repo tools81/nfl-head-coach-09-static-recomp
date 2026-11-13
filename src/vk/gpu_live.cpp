@@ -97,6 +97,7 @@ void StartHdPack()
 #include "native_live.h"
 #include "interp.h"
 #include "overlay.h"
+#include "score_bar.h"
 #include "profiler.h"
 #include "small_vec.h"
 void HostSetThreadName(void* thread, const char* name);   // runtime.cpp
@@ -538,6 +539,7 @@ struct Live : xenos::DrawObserver
         // The live tweaker's in-game overlay (runtime/hooks_gameplay.cpp), placed on the image as the
         // swapchain fits it into the window. HC09_OVERLAY_SHOT=N: every N-th swap, the window image with
         // the overlay is written to <dir>/overlay_<swap>.png. Not in the release build (HC09_DEV_TOOLS=0).
+        swapchain.overlay.clear();
 #if HC09_DEV_TOOLS
         {
             const uint32_t ew = swapchain.extent.width, eh = swapchain.extent.height;
@@ -551,6 +553,14 @@ struct Live : xenos::DrawObserver
             if (!ov.empty()) memcpy(swapchain.overlay.data(), ov.data(), ov.size() * sizeof(OvVtx));
         }
 #endif
+        // The score bar (roadmap 12), on the picture as the swapchain fits it into the window (`stretch` times wider).
+        {
+            const double shown = double(img.width) * swapchain.stretch / double(img.height);
+            const double ew = swapchain.extent.width, eh = swapchain.extent.height;
+            double w = ew, h = std::floor(ew / shown + 0.5);
+            if (h > eh) { h = eh; w = std::min(ew, std::floor(eh * shown + 0.5)); }
+            ScoreBarBuild(swapchain, float(std::floor((ew - w) / 2)), float(std::floor((eh - h) / 2)), float(w), float(h));
+        }
         static const uint64_t shotEvery = Hc09Env("HC09_OVERLAY_SHOT") ? strtoull(Hc09Env("HC09_OVERLAY_SHOT"), nullptr, 10) : 0;
         const bool shot = shotEvery && swap % shotEvery == 0 && !swapchain.overlay.empty();
         // HC09_SCREENSHOT: the first present at or after each frame asked for (the game's frame counter can

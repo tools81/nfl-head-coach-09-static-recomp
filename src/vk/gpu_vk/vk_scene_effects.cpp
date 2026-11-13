@@ -2,6 +2,7 @@
 #include "vk_scene_effects.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -57,6 +58,9 @@ layout(push_constant) uniform Effects { vec4 r0, r1, r2, r3, r4, r5, r6, r7; } E
 #define targetInvSize E.r6.xy
 #define outputInvSize E.r5.xy
 #define inputInvSize E.r6.zw
+// The occlusion and reflection passes at a lower resolution than the scene: scene pixels per pass pixel (0: 1).
+// It shares inputInvSize's slot, which only the bloom passes use.
+#define depthScale (E.r6.z > 0.0 ? E.r6.z : 1.0)
 #define bloomStrength E.r7.x
 #define gradeStrength E.r7.y
 #define depthOfFieldStrength E.r7.z
@@ -69,9 +73,21 @@ layout(set = 0, binding = 0) uniform sampler2D depthTexture;
 #endif
 layout(set = 0, binding = 1) uniform sampler2D input0;
 layout(set = 0, binding = 2) uniform sampler2D input1;
+layout(set = 0, binding = 3) uniform sampler2D input2;   // the merged post pass: the occlusion
+layout(set = 0, binding = 4) uniform sampler2D input3;   // and the reflections
 layout(location = 0) out vec4 outColor;
 
-float RawDepth(ivec2 p) { return texelFetch(depthTexture, p + ivec2(origin), 0).r; }
+// The depth at a pixel of the pass (scaled to the scene's pixels when the pass is smaller: the one at its centre).
+float RawDepth(ivec2 p)
+{
+#if MSAA
+    ivec2 limit = textureSize(depthTexture) - 1;
+#else
+    ivec2 limit = textureSize(depthTexture, 0) - 1;
+#endif
+    ivec2 q = depthScale == 1.0 ? p : ivec2((vec2(p) + 0.5) * depthScale);
+    return texelFetch(depthTexture, min(q + ivec2(origin), limit), 0).r;
+}
 
 #if IN_TARGET
 vec2 FragPixel() { return gl_FragCoord.xy - origin; }
@@ -189,11 +205,60 @@ void main()
 }
 #endif
 
+#if PASS_COMPOSITE || MERGED
+// The occlusion (blurred both ways, `occlusion` maybe smaller than the scene) at a scene pixel: enlarged, each of
+// the four nearest of its pixels counted by how near it is and by how near its view distance is to this pixel's,
+// so the shading stays on its own side of an outline (a joint bilateral upsample).
+float OcclusionAt(sampler2D occlusion, ivec2 p)
+{
+    vec2 lowSize = vec2(textureSize(occlusion, 0));
+    if (lowSize.x >= size.x - 0.5)
+        return texelFetch(occlusion, p, 0).r;
+    float w = ViewDepth(p);
+    vec2 at = (vec2(p) + 0.5) * lowSize / size - 0.5;
+    ivec2 b = ivec2(floor(at));
+    vec2 f = at - vec2(b);
+    float sum = 0.0, weights = 0.0;
+    for (int i = 0; i < 4; i++)
+    {
+        ivec2 o = ivec2(i & 1, i >> 1);
+        vec2 s = texelFetch(occlusion, clamp(b + o, ivec2(0), ivec2(lowSize) - 1), 0).rg;
+        float near = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
+        float weight = near * (exp(-abs(s.g - w) / (w * 0.02 + 1e-3)) + 1e-3);
+        sum += s.r * weight;
+        weights += weight;
+    }
+    return sum / max(weights, 1e-6);
+}
+#endif
+
+#if PASS_REFLECTION_COMPOSITE || MERGED
+// The reflections at a scene pixel (its centre), softened: a 5x5 tent over every other scene pixel, filtered from
+// the reflection image (which covers the rectangle, whatever its size). Premultiplied colour, opacity.
+vec4 ReflectionAt(sampler2D reflections, vec2 pixel)
+{
+    vec4 sum = vec4(0.0);
+    float weights = 0.0;
+    for (int y = -2; y <= 2; y++)
+    {
+        for (int x = -2; x <= 2; x++)
+        {
+            float weight = (3.0 - abs(float(x))) * (3.0 - abs(float(y)));
+            sum += textureLod(reflections, (pixel + vec2(x, y) * 2.0) * invSize, 0.0) * weight;
+            weights += weight;
+        }
+    }
+    return sum / weights;
+}
+#endif
+
 #if PASS_COMPOSITE
-// The second blur direction, multiplied into the scene (blend: destination * source).
+// The occlusion multiplied into the scene (blend: destination * source). At the scene's resolution its second blur
+// direction is here; smaller, it was blurred both ways already and is enlarged.
 void main()
 {
-    float blurred = Blur(ivec2(FragPixel())).r;
+    ivec2 p = ivec2(FragPixel());
+    float blurred = vec2(textureSize(input0, 0)).x >= size.x - 0.5 ? Blur(p).r : OcclusionAt(input0, p);
     float occlusion = debugView == 1.0 ? blurred : mix(1.0, blurred, occlusionStrength);
     outColor = vec4(occlusion, occlusion, occlusion, 1.0);
 }
@@ -263,7 +328,7 @@ void main()
     vec2 edges = min(pixel, size - pixel) / (size * 0.08);
     float fade = clamp(min(edges.x, edges.y), 0.0, 1.0) * clamp(1.0 - length(hit - origin3) / (radius * 5.0), 0.0, 1.0);
     // The reflected colour's luminance, its contrast deepened and brought down to a dark tone.
-    vec3 color = textureLod(input0, (pixel + origin) * targetInvSize, 0.0).rgb;
+    vec3 color = textureLod(input0, (pixel * depthScale + origin) * targetInvSize, 0.0).rgb;
     float luminance = dot(color, vec3(0.299, 0.587, 0.114));
     float tone = clamp((luminance - 0.5) * 2.0 + 0.5, 0.0, 1.0) * 0.12;
     float alpha = clamp(0.45 * reflectionStrength * grazing, 0.0, 1.0) * facing * fade;
@@ -272,23 +337,11 @@ void main()
 #endif
 
 #if PASS_REFLECTION_COMPOSITE
-// The reflections, softened (a 5x5 tent over every other pixel), over the scene (blend: source premultiplied).
+// The reflections over the scene (blend: source premultiplied).
 void main()
 {
-    ivec2 p = ivec2(FragPixel());
-    vec4 sum = vec4(0.0);
-    float weights = 0.0;
-    for (int y = -2; y <= 2; y++)
-    {
-        for (int x = -2; x <= 2; x++)
-        {
-            float weight = (3.0 - abs(float(x))) * (3.0 - abs(float(y)));
-            sum += texelFetch(input0, clamp(p + ivec2(x, y) * 2, ivec2(0), ivec2(size) - 1), 0) * weight;
-            weights += weight;
-        }
-    }
-    sum /= weights;
-    outColor = debugView == 2.0 ? vec4(sum.rgb, 1.0) : sum;
+    vec4 reflection = ReflectionAt(input0, FragPixel() + 0.5);
+    outColor = debugView == 2.0 ? vec4(reflection.rgb, 1.0) : reflection;
 }
 #endif
 
@@ -439,11 +492,22 @@ void main()
 
 #if PASS_POST
 // The scene (input0: the copy, or the depth of field's output when sourceInRect) with the bloom (input1) added
-// in linear light, then graded, written over the scene's target.
+// in linear light, then graded, written over the scene's target. MERGED: the occlusion (input2) and reflections
+// (input3) put on the scene's copy here first, as their own composites would have (one pass over the scene
+// instead of three, one copy of it instead of two).
 void main()
 {
     ivec2 p = ivec2(FragPixel());
     vec4 scene = sourceInRect > 0.0 ? texelFetch(input0, p, 0) : texelFetch(input0, p + ivec2(origin), 0);
+#if MERGED
+    if (occlusionStrength > 0.0)
+        scene.rgb *= mix(1.0, OcclusionAt(input2, p), occlusionStrength);
+    if (reflectionStrength > 0.0)
+    {
+        vec4 reflection = ReflectionAt(input3, vec2(p) + 0.5);
+        scene.rgb = scene.rgb * (1.0 - reflection.a) + reflection.rgb;
+    }
+#endif
     vec3 c = Linear(scene.rgb);
     if (bloomStrength > 0.0)
         c += textureLod(input1, (vec2(p) + 0.5) * invSize, 0.0).rgb * (bloomStrength * 0.35);
@@ -482,6 +546,7 @@ void main()
 #endif
 )GLSL";
 
+constexpr uint32_t kBindings = 5;   // depth, input0, input1, input2, input3
 constexpr VkFormat kOcclusionFormat = VK_FORMAT_R16G16_SFLOAT;          // occlusion, view distance
 constexpr VkFormat kReflectionFormat = VK_FORMAT_R16G16B16A16_SFLOAT;   // premultiplied colour, opacity
 constexpr VkFormat kBloomFormat = VK_FORMAT_R16G16B16A16_SFLOAT;        // linear colour (bloom, depth of field)
@@ -526,6 +591,12 @@ bool SceneEffects::Init(Device& dev)
     // HC09_EFFECTS_DEBUG=1 shows the occlusion alone, 2 the reflections alone (as the D3D12 renderer), 3 the
     // post-processing on the right half of the picture only.
     if (const char* e = Hc09Env("HC09_EFFECTS_DEBUG")) debug_ = std::atoi(e);
+    if (const char* e = Hc09Env("HC09_EFFECTS_RES"); e && *e)
+    {
+        std::string v = e;
+        for (char& ch : v) ch = char(std::tolower((unsigned char)ch));
+        divisor_ = v == "full" || v == "1" ? 1u : v == "half" || v == "2" ? 2u : 0u;
+    }
     bloom_ = Strength(Hc09Env("HC09_BLOOM"), 1.0f);
     grade_ = Strength(Hc09Env("HC09_GRADE"), 1.0f);
     dof_ = Strength(Hc09Env("HC09_DOF"), 0.0f);
@@ -540,8 +611,8 @@ bool SceneEffects::Init(Device& dev)
     if (!Enabled()) return true;
 
     VkDevice d = dev.device;
-    VkDescriptorSetLayoutBinding b[3]{};
-    for (uint32_t i = 0; i < 3; ++i)
+    VkDescriptorSetLayoutBinding b[kBindings]{};
+    for (uint32_t i = 0; i < kBindings; ++i)
     {
         b[i].binding = i;
         b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -549,7 +620,7 @@ bool SceneEffects::Init(Device& dev)
         b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     }
     VkDescriptorSetLayoutCreateInfo lci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    lci.bindingCount = 3;
+    lci.bindingCount = kBindings;
     lci.pBindings = b;
     VkPushConstantRange pcr{ VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Constants) };
     VkPipelineLayoutCreateInfo pci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
@@ -583,7 +654,7 @@ void SceneEffects::Shutdown()
     VkDevice d = dev_->device;
     for (Pipelines& p : pipelines_)
         for (VkPipeline pipe : { p.occlusion, p.blur, p.composite, p.reflections, p.reflectionComposite, p.bloomPrefilter, p.bloomDown,
-                                 p.bloomUp, p.focus, p.depthOfField, p.post, p.hdrGain })
+                                 p.bloomUp, p.focus, p.depthOfField, p.post, p.hdrGain, p.postMerged })
             if (pipe) vkDestroyPipeline(d, pipe, nullptr);
     pipelines_.clear();
     for (Image* img : { &occlusionRaw_, &occlusionBlurred_, &sceneCopy_, &reflectionTarget_, &focus_[0], &focus_[1], &depthOfFieldTarget_,
@@ -693,6 +764,7 @@ SceneEffects::Pipelines* SceneEffects::GetPipelines(VkFormat format, VkSampleCou
         { "PASS_DEPTH_OF_FIELD", false, kBloomFormat, VK_SAMPLE_COUNT_1_BIT, 0, &p.depthOfField },
         { "PASS_POST", true, format, samples, 0, &p.post },
         { "HDR_GAIN 1\n#define PASS_POST", false, kOcclusionFormat, VK_SAMPLE_COUNT_1_BIT, 0, &p.hdrGain },
+        { "MERGED 1\n#define PASS_POST", true, format, samples, 0, &p.postMerged },
     };
     for (const Entry& e : entries)
     {
@@ -749,12 +821,19 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
         bloomWidth[i] = std::max(1u, ((i ? bloomWidth[i - 1] : width) + 1) / 2);
         bloomHeight[i] = std::max(1u, ((i ? bloomHeight[i - 1] : height) + 1) / 2);
     }
+    // The occlusion and reflections' own resolution.
+    uint32_t divisor = divisor_ ? divisor_ : height > 1100 ? 2u : 1u;
+    // HC09_EFFECTS_RES_AB=1 (dev): full and half resolution in turn, scene by scene (consecutive frames compare).
+    static const bool ab = Hc09Env("HC09_EFFECTS_RES_AB") != nullptr;
+    static uint32_t abTurn = 0;
+    if (ab) divisor = (abTurn++ & 1) ? 2u : 1u;
+    const uint32_t lowWidth = (width + divisor - 1) / divisor, lowHeight = (height + divisor - 1) / divisor;
     const VkImageUsageFlags attachment = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    bool ready = pipelines && prepare(occlusionBlurred_, kOcclusionFormat, width, height, attachment);
+    bool ready = pipelines && prepare(occlusionBlurred_, kOcclusionFormat, lowWidth, lowHeight, attachment);
     // The blurred occlusion target is also the (unread) input of the occlusion pass.
-    if (ready && occlusion_ > 0) ready = prepare(occlusionRaw_, kOcclusionFormat, width, height, attachment);
+    if (ready && occlusion_ > 0) ready = prepare(occlusionRaw_, kOcclusionFormat, lowWidth, lowHeight, attachment);
     if (ready && (reflections_ > 0 || post)) ready = prepare(sceneCopy_, color.format, color.width, color.height, VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-    if (ready && reflections_ > 0) ready = prepare(reflectionTarget_, kReflectionFormat, width, height, attachment);
+    if (ready && reflections_ > 0) ready = prepare(reflectionTarget_, kReflectionFormat, lowWidth, lowHeight, attachment);
     if (post && bloom_ > 0)
         for (int i = 0; ready && i < kBloomLevels; ++i) ready = prepare(bloomLevels_[i], kBloomFormat, bloomWidth[i], bloomHeight[i], attachment);
     if (ready && post && dof_ > 0)
@@ -811,14 +890,16 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
     // One full-screen pass: `target` (the scene's own colour target is drawn at the rectangle, others whole), reading
     // the depth buffer, `input` and `input1` (`input` if none). `load` keeps the target's contents (for blending).
     auto pass = [&](VkPipeline pipe, const Image& target, bool inTarget, const Image& input, VkSampler inputSampler,
-                    const Image* input1 = nullptr, bool load = false) {
+                    const Image* input1 = nullptr, bool load = false, const Image* input2 = nullptr, const Image* input3 = nullptr) {
         VkDescriptorSet set = allocate(setLayout_);
         if (!set) return;
-        VkDescriptorImageInfo images[3] = { { nearest_, depthView, VK_IMAGE_LAYOUT_GENERAL },
-                                            { inputSampler, input.view, VK_IMAGE_LAYOUT_GENERAL },
-                                            { linear_, (input1 ? *input1 : input).view, VK_IMAGE_LAYOUT_GENERAL } };
-        VkWriteDescriptorSet w[3]{};
-        for (uint32_t i = 0; i < 3; ++i)
+        VkDescriptorImageInfo images[kBindings] = { { nearest_, depthView, VK_IMAGE_LAYOUT_GENERAL },
+                                                    { inputSampler, input.view, VK_IMAGE_LAYOUT_GENERAL },
+                                                    { linear_, (input1 ? *input1 : input).view, VK_IMAGE_LAYOUT_GENERAL },
+                                                    { nearest_, (input2 ? *input2 : input).view, VK_IMAGE_LAYOUT_GENERAL },
+                                                    { linear_, (input3 ? *input3 : input).view, VK_IMAGE_LAYOUT_GENERAL } };
+        VkWriteDescriptorSet w[kBindings]{};
+        for (uint32_t i = 0; i < kBindings; ++i)
         {
             w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             w[i].dstSet = set;
@@ -827,7 +908,7 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             w[i].pImageInfo = &images[i];
         }
-        vkUpdateDescriptorSets(dev_->device, 3, w, 0, nullptr);
+        vkUpdateDescriptorSets(dev_->device, kBindings, w, 0, nullptr);
         VkRenderingAttachmentInfo ca{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
         ca.imageView = target.view;
         ca.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -851,14 +932,41 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
         Barrier(cb);
     };
 
+    // The passes at the effects' own resolution see it as their whole picture, the depth buffer read `divisor`
+    // times further apart (depthScale, in inputInvSize's slot); the composites into the scene are at its own.
+    auto atLow = [&](bool low) {
+        c.size[0] = float(low ? lowWidth : width);
+        c.size[1] = float(low ? lowHeight : height);
+        c.invSize[0] = 1.0f / c.size[0];
+        c.invSize[1] = 1.0f / c.size[1];
+        c.inputInvSize[0] = low ? float(divisor) : 0.0f;
+        c.inputInvSize[1] = 0.0f;
+    };
+    // Merged: one copy of the scene first; the occlusion, reflections and bloom from it; then one pass puts them all
+    // on the copy and grades it into the scene's target. Otherwise each effect is composited into the target in
+    // turn (depth of field and the HDR gain read the scene with them already on it).
+    // HC09_EFFECTS_MERGE_AB=1 (dev): merged and not in turn, scene by scene (consecutive frames compare).
+    static const bool mergeAb = Hc09Env("HC09_EFFECTS_MERGE_AB") != nullptr;
+    static uint32_t mergeTurn = 0;
+    const bool merged = post && dof_ <= 0 && !hdr_ && debug_ == 0 && !(mergeAb && (mergeTurn++ & 1));
+    const Image* occlusionImage = nullptr;
     if (occlusion_ > 0)
     {
+        atLow(true);
         pass(pipelines->occlusion, occlusionRaw_, false, occlusionBlurred_, nearest_);
         c.blurDirection[0] = 1;
         pass(pipelines->blur, occlusionBlurred_, false, occlusionRaw_, nearest_);
         c.blurDirection[0] = 0;
         c.blurDirection[1] = 1;
-        pass(pipelines->composite, color, true, occlusionBlurred_, nearest_);
+        occlusionImage = &occlusionBlurred_;
+        if (divisor > 1 || merged)
+        {
+            // Both directions here, then enlarged by the composite.
+            pass(pipelines->blur, occlusionRaw_, false, occlusionBlurred_, nearest_);
+            occlusionImage = &occlusionRaw_;
+        }
+        atLow(false);
+        if (!merged) pass(pipelines->composite, color, true, *occlusionImage, nearest_);
     }
     // A single-sampled copy of the scene as it is so far.
     auto copyScene = [&] {
@@ -878,15 +986,18 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
         }
         Barrier(cb);
     };
+    if (merged) copyScene();   // the one copy (without the occlusion: the reflections and bloom hardly see it)
     if (reflections_ > 0)
     {
-        copyScene();   // with its occlusion, to reflect
+        if (!merged) copyScene();   // with its occlusion, to reflect
+        atLow(true);
         pass(pipelines->reflections, reflectionTarget_, false, sceneCopy_, linear_);
-        pass(pipelines->reflectionComposite, color, true, reflectionTarget_, nearest_);
+        atLow(false);
+        if (!merged) pass(pipelines->reflectionComposite, color, true, reflectionTarget_, linear_);
     }
     if (!post) return;
 
-    copyScene();
+    if (!merged) copyScene();
     c.bloom = bloom_;
     c.grade = grade_;
     c.depthOfField = dof_;
@@ -909,6 +1020,7 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
             sizes(i, i + 1);
             pass(pipelines->bloomUp, bloomLevels_[i], false, bloomLevels_[i + 1], linear_, nullptr, true);
         }
+        atLow(false);   // inputInvSize is depthScale again for the depth of field's depth reads
     }
     const Image* source = &sceneCopy_;
     if (dof_ > 0)
@@ -929,6 +1041,15 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
         gainRect_[1] = float(y0);
         gainRect_[2] = float(width);
         gainRect_[3] = float(height);
+    }
+    if (merged)
+    {
+        // The strengths say which of the occlusion and reflections there are.
+        c.occlusion = occlusionImage ? std::min(occlusion_, 1.0f) : 0.0f;
+        c.reflections = reflections_ > 0 ? reflections_ : 0.0f;
+        pass(pipelines->postMerged, color, true, *source, nearest_, bloom_ > 0 ? &bloomLevels_[0] : nullptr, false, occlusionImage,
+             reflections_ > 0 ? &reflectionTarget_ : nullptr);
+        return;
     }
     pass(pipelines->post, color, true, *source, nearest_, bloom_ > 0 ? &bloomLevels_[0] : nullptr);
 }

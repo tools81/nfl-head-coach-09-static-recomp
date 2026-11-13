@@ -16,6 +16,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "score_bar.h"
 #include "vk_native.h"
 #include "xenos_texture.h"
 #include "gpu/swappable_images.h"
@@ -118,13 +119,36 @@ namespace
         if (!std::filesystem::exists(path)) xenos::WritePng(path, img);
     }
 
+    // A team's logo the score bar draws (score_bar.h): decoded on the CPU, and given to it as drawn.
+    bool LogoFor(const xenos::TextureFetch& tf)
+    {
+        uint64_t hash = 0;
+        return IsSingle2D(tf) && hc09::gpu::TextureContentHash(tf.dword, hash) && ScoreBarWantsTexture(hash);
+    }
+
+    void OfferLogo(const xenos::TextureFetch& tf, const xenos::Image& img)
+    {
+        uint64_t hash = 0;
+        if (IsSingle2D(tf) && hc09::gpu::TextureContentHash(tf.dword, hash) && ScoreBarWantsTexture(hash))
+            ScoreBarOfferTexture(hash, img);
+    }
+
     bool Has(const xenos::TextureFetch& tf, uint32_t set)
     {
         uint64_t hash = 0;
-        return !FileFor(tf, set, hash).empty();
+        return !FileFor(tf, set, hash).empty() || LogoFor(tf);
     }
 
+    bool ReplaceFile(const xenos::TextureFetch& tf, uint32_t set, xenos::Image& img);
+
     bool Replace(const xenos::TextureFetch& tf, uint32_t set, xenos::Image& img)
+    {
+        const bool replaced = ReplaceFile(tf, set, img);
+        OfferLogo(tf, img);
+        return replaced;
+    }
+
+    bool ReplaceFile(const xenos::TextureFetch& tf, uint32_t set, xenos::Image& img)
     {
         uint64_t hash = 0;
         const std::wstring path = FileFor(tf, set, hash);

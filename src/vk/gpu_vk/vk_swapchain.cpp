@@ -1,5 +1,6 @@
 #include "vk_swapchain.h"
 #include "vk_shader_compile.h"
+#include "vk_replay.h"
 #include "../dev_env.h"
 
 #include <algorithm>
@@ -232,9 +233,8 @@ VkResult Swapchain::Present(const Image& src, std::vector<uint32_t>* presented)
         vkCmdBlitImage(cb, src.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
                        (w == src.width && h == src.height) ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
     }
-    // The overlay: alpha-blended triangles over the scaled image (the live tweaker's; the release build,
-    // HC09_DEV_TOOLS=0, has none and leaves the overlay pipeline out).
-    if (HC09_DEV_TOOLS && !overlay.empty() && dstView && EnsureOverlayPipeline(dstFormat))
+    // The overlay: alpha-blended triangles over the scaled image (the score bar's, and the live tweaker's).
+    if (!overlay.empty() && dstView && EnsureOverlayPipeline(dstFormat) && UpdateOverlayAtlas() && UpdateOverlayReplay())
     {
         const VkDeviceSize vbytes = overlay.size() * sizeof(OverlayVtx);
         if (ovVerts.size < vbytes)
@@ -246,6 +246,11 @@ VkResult Swapchain::Present(const Image& src, std::vector<uint32_t>* presented)
         if (ovVerts.mapped)
         {
             memcpy(ovVerts.mapped, overlay.data(), size_t(vbytes));
+            // The replay's layers (written by the native renderer's earlier work on this queue) read by the overlay.
+            VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+            mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+            mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
             ImageBarrier(cb, dst, layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, stage, access,
                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                          VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
@@ -265,8 +270,9 @@ VkResult Swapchain::Present(const Image& src, std::vector<uint32_t>* presented)
             vkCmdSetViewport(cb, 0, 1, &vp);
             vkCmdSetScissor(cb, 0, 1, &sc);
             vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, ovPipeline);
-            const float size[2] = { float(extent.width), float(extent.height) };
-            vkCmdPushConstants(cb, ovLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof size, size);
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, ovLayout, 0, 1, &ovSet_, 0, nullptr);
+            const float pc[4] = { float(extent.width), float(extent.height), std::max(0.0f, overlayReplayLayer), 0 };
+            vkCmdPushConstants(cb, ovLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, pc);
             VkDeviceSize off = 0;
             vkCmdBindVertexBuffers(cb, 0, 1, &ovVerts.buffer, &off);
             vkCmdDraw(cb, uint32_t(overlay.size()), 1, 0, 0);
@@ -373,8 +379,9 @@ VkResult Swapchain::Present(const Image& src, std::vector<uint32_t>* presented)
     return r;
 }
 
-// The overlay pipeline: 2-D triangles in pixels, vertex colour, alpha blending, dynamic rendering into the
-// swapchain image. Made on first use (and again if the swapchain format changes).
+// The overlay pipeline: 2-D triangles in pixels, vertex colour (times the atlas's texel where the vertices have
+// atlas coordinates), premultiplied alpha blending, dynamic rendering into the swapchain image. Made on first use (and again if the
+// swapchain format changes).
 bool Swapchain::EnsureOverlayPipeline(VkFormat target)
 {
     if (ovPipeline && ovFormat == target) return true;
@@ -384,14 +391,24 @@ bool Swapchain::EnsureOverlayPipeline(VkFormat target)
         "#version 450\n"
         "layout(location = 0) in vec2 pos;\n"
         "layout(location = 1) in vec4 col;\n"
-        "layout(push_constant) uniform PC { vec2 size; } pc;\n"
+        "layout(location = 2) in vec2 uv;\n"
+        "layout(push_constant) uniform PC { vec2 size; float layer; } pc;\n"
         "layout(location = 0) out vec4 vcol;\n"
-        "void main() { gl_Position = vec4(pos / pc.size * 2.0 - 1.0, 0.0, 1.0); vcol = col; }\n";
+        "layout(location = 1) out vec2 vuv;\n"
+        "void main() { gl_Position = vec4(pos / pc.size * 2.0 - 1.0, 0.0, 1.0); vcol = col; vuv = uv; }\n";
     static const char* kFs =
         "#version 450\n"
+        "layout(set = 0, binding = 0) uniform sampler2D atlas;\n"
+        "layout(set = 0, binding = 1) uniform sampler2DArray replay;\n"
+        "layout(push_constant) uniform PC { vec2 size; float layer; } pc;\n"
         "layout(location = 0) in vec4 vcol;\n"
+        "layout(location = 1) in vec2 vuv;\n"
         "layout(location = 0) out vec4 o;\n"
-        "void main() { o = vcol; }\n";
+        "void main() {\n"
+        "    vec4 t = vuv.x < 0.0 ? vec4(1.0) : vuv.x >= 2.0 ? vec4(texture(replay, vec3(vuv.x - 2.0, vuv.y, pc.layer)).rgb, 1.0)\n"
+        "                                  : texture(atlas, vuv);\n"   // premultiplied; u from 2: the replay's layer
+        "    o = vec4(vcol.rgb * t.rgb * vcol.a, vcol.a * t.a);\n"          // premultiplied out
+        "}\n";
     std::vector<uint32_t> vs, fs;
     std::string log;
     if (!CompileGlsl(kVs, Stage::kVertex, "overlay.vert", vs, &log) ||
@@ -410,8 +427,43 @@ bool Swapchain::EnsureOverlayPipeline(VkFormat target)
     mi.codeSize = fs.size() * 4;
     mi.pCode = fs.data();
     vkCreateShaderModule(d, &mi, nullptr, &mf);
-    VkPushConstantRange pcr{ VK_SHADER_STAGE_VERTEX_BIT, 0, 8 };
+    // The atlas: one combined image sampler (bilinear, clamped).
+    VkSamplerCreateInfo si{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.maxLod = 0.0f;
+    vkCreateSampler(d, &si, nullptr, &ovSampler_);
+    VkDescriptorSetLayoutBinding binding[2] = { { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+                                                { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr } };
+    VkDescriptorSetLayoutCreateInfo sli{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    sli.bindingCount = 2;
+    sli.pBindings = binding;
+    vkCreateDescriptorSetLayout(d, &sli, nullptr, &ovSetLayout_);
+    VkDescriptorPoolSize poolSize{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 };
+    VkDescriptorPoolCreateInfo pli{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    pli.maxSets = 1;
+    pli.poolSizeCount = 1;
+    pli.pPoolSizes = &poolSize;
+    vkCreateDescriptorPool(d, &pli, nullptr, &ovPool_);
+    VkDescriptorSetAllocateInfo ai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+    ai.descriptorPool = ovPool_;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &ovSetLayout_;
+    if (!ovSampler_ || !ovSetLayout_ || !ovPool_ || vkAllocateDescriptorSets(d, &ai, &ovSet_) != VK_SUCCESS)
+    {
+        fprintf(stderr, "[overlay] the atlas's descriptor set could not be made\n");
+        vkDestroyShaderModule(d, mv, nullptr);
+        vkDestroyShaderModule(d, mf, nullptr);
+        ovFailed = true;
+        return false;
+    }
+    ovAtlasVersion_ = ~0ull;   // a new set: the atlas and the replay are bound again
+    ovReplayVersion_ = ~0ull;
+    VkPushConstantRange pcr{ VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16 };
     VkPipelineLayoutCreateInfo li{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    li.setLayoutCount = 1;
+    li.pSetLayouts = &ovSetLayout_;
     li.pushConstantRangeCount = 1;
     li.pPushConstantRanges = &pcr;
     vkCreatePipelineLayout(d, &li, nullptr, &ovLayout);
@@ -424,14 +476,15 @@ bool Swapchain::EnsureOverlayPipeline(VkFormat target)
     st[1].module = mf;
     st[1].pName = "main";
     VkVertexInputBindingDescription bind{ 0, sizeof(OverlayVtx), VK_VERTEX_INPUT_RATE_VERTEX };
-    VkVertexInputAttributeDescription attr[2] = {
+    VkVertexInputAttributeDescription attr[3] = {
         { 0, 0, VK_FORMAT_R32G32_SFLOAT, 0 },
         { 1, 0, VK_FORMAT_R8G8B8A8_UNORM, 8 },
+        { 2, 0, VK_FORMAT_R32G32_SFLOAT, 12 },
     };
     VkPipelineVertexInputStateCreateInfo vin{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
     vin.vertexBindingDescriptionCount = 1;
     vin.pVertexBindingDescriptions = &bind;
-    vin.vertexAttributeDescriptionCount = 2;
+    vin.vertexAttributeDescriptionCount = 3;
     vin.pVertexAttributeDescriptions = attr;
     VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -446,7 +499,7 @@ bool Swapchain::EnsureOverlayPipeline(VkFormat target)
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
     VkPipelineColorBlendAttachmentState cba{};
     cba.blendEnable = VK_TRUE;
-    cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    cba.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;   // premultiplied
     cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
     cba.colorBlendOp = VK_BLEND_OP_ADD;
     cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
@@ -488,13 +541,106 @@ bool Swapchain::EnsureOverlayPipeline(VkFormat target)
     return true;
 }
 
+// The atlas to the GPU when overlayAtlasVersion has changed (Present has waited for the last frame, so the old one is
+// free); a 1x1 of full coverage until there is one.
+bool Swapchain::UpdateOverlayAtlas()
+{
+    if (ovAtlasVersion_ == overlayAtlasVersion && ovAtlas_.image) return true;
+    const bool given = overlayAtlasW && overlayAtlasH && overlayAtlas.size() >= size_t(overlayAtlasW) * overlayAtlasH;
+    const uint32_t full = 0xFFFFFFFFu;
+    const uint32_t* pixels = given ? overlayAtlas.data() : &full;
+    const uint32_t w = given ? overlayAtlasW : 1, h = given ? overlayAtlasH : 1;
+    if (ovAtlas_.image) dev->DestroyImage(ovAtlas_);
+    Buffer staging;
+    if (!dev->CreateBuffer(VkDeviceSize(w) * h * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, staging))
+        return false;
+    memcpy(staging.mapped, pixels, size_t(w) * h * 4);
+    if (!dev->CreateImage2D(w, h, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, ovAtlas_))
+    {
+        dev->DestroyBuffer(staging);
+        return false;
+    }
+    VkCommandBuffer ocb = dev->BeginOneShot();
+    ImageBarrier(ocb, ovAtlas_.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    copy.imageExtent = { w, h, 1 };
+    vkCmdCopyBufferToImage(ocb, staging.buffer, ovAtlas_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    ImageBarrier(ocb, ovAtlas_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    const bool ok = dev->EndOneShot(ocb);
+    dev->DestroyBuffer(staging);
+    if (!ok) return false;
+    VkDescriptorImageInfo ii{ ovSampler_, ovAtlas_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkWriteDescriptorSet wr{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    wr.dstSet = ovSet_;
+    wr.dstBinding = 0;
+    wr.descriptorCount = 1;
+    wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wr.pImageInfo = &ii;
+    vkUpdateDescriptorSets(dev->device, 1, &wr, 0, nullptr);
+    ovAtlasVersion_ = overlayAtlasVersion;
+    return true;
+}
+
+// The replay's layers (vk_replay.h) bound to the overlay's set when they change; a black one-layer stand-in until
+// there are any.
+bool Swapchain::UpdateOverlayReplay()
+{
+    const ReplayFrames frames = ReplayView();
+    if (ovReplayVersion_ == frames.version && (frames.view || ovReplayDummy_.image)) return true;
+    VkImageView view = frames.view;
+    if (!view)
+    {
+        if (!ovReplayDummy_.image)
+        {
+            if (!dev->CreateImage(VK_IMAGE_VIEW_TYPE_2D_ARRAY, 1, 1, 1, VK_FORMAT_R8G8B8A8_UNORM,
+                                  VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, ovReplayDummy_))
+                return false;
+            VkCommandBuffer ocb = dev->BeginOneShot();
+            ImageBarrier(ocb, ovReplayDummy_.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+            VkClearColorValue black{};
+            VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            vkCmdClearColorImage(ocb, ovReplayDummy_.image, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &range);
+            ImageBarrier(ocb, ovReplayDummy_.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+            if (!dev->EndOneShot(ocb)) return false;
+        }
+        view = ovReplayDummy_.view;
+    }
+    VkDescriptorImageInfo ii{ ovSampler_, view, VK_IMAGE_LAYOUT_GENERAL };
+    VkWriteDescriptorSet wr{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    wr.dstSet = ovSet_;
+    wr.dstBinding = 1;
+    wr.descriptorCount = 1;
+    wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wr.pImageInfo = &ii;
+    vkUpdateDescriptorSets(dev->device, 1, &wr, 0, nullptr);
+    ovReplayVersion_ = frames.version;
+    return true;
+}
+
 void Swapchain::DestroyOverlay()
 {
     if (!dev || !dev->device) return;
     if (ovPipeline) vkDestroyPipeline(dev->device, ovPipeline, nullptr);
     if (ovLayout) vkDestroyPipelineLayout(dev->device, ovLayout, nullptr);
+    if (ovPool_) vkDestroyDescriptorPool(dev->device, ovPool_, nullptr);
+    if (ovSetLayout_) vkDestroyDescriptorSetLayout(dev->device, ovSetLayout_, nullptr);
+    if (ovSampler_) vkDestroySampler(dev->device, ovSampler_, nullptr);
+    if (ovAtlas_.image) dev->DestroyImage(ovAtlas_);
+    if (ovReplayDummy_.image) dev->DestroyImage(ovReplayDummy_);
+    ovReplayVersion_ = ~0ull;
     ovPipeline = VK_NULL_HANDLE;
     ovLayout = VK_NULL_HANDLE;
+    ovPool_ = VK_NULL_HANDLE;
+    ovSet_ = VK_NULL_HANDLE;
+    ovSetLayout_ = VK_NULL_HANDLE;
+    ovSampler_ = VK_NULL_HANDLE;
+    ovAtlasVersion_ = ~0ull;
     dev->DestroyBuffer(ovVerts);
 }
 

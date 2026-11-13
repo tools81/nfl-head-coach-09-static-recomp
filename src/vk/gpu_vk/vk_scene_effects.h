@@ -8,7 +8,12 @@
 // field). The camera comes from the scene's draws (gpu/scene_camera.h).
 //
 // Settings: hc09.ini [Graphics] AmbientOcclusion and Reflections (strength, 0 turns it off), as the switches
-// HC09_SSAO and HC09_SSR.
+// HC09_SSAO and HC09_SSR; EffectsResolution (auto, half or full), as HC09_EFFECTS_RES: both are worked out at half
+// the scene's resolution above about 1080p (a quarter of the cost; the occlusion enlarged along the depth's edges).
+//
+// With post-processing and neither depth of field nor HDR, the passes are merged: one copy of the scene, the
+// occlusion, reflections and bloom worked out from it, and one pass that puts them on it and grades it into the
+// target (instead of two composites into the multisampled target and two copies).
 //
 // Post-processing, last, on scenes in 8-bit targets (the menus and HUD are drawn later, into other targets, so it
 // never touches them): bloom (a soft-threshold bright pass blurred over five halvings, added in linear light),
@@ -59,7 +64,7 @@ private:
         VkPipeline occlusion = VK_NULL_HANDLE, blur = VK_NULL_HANDLE, composite = VK_NULL_HANDLE, reflections = VK_NULL_HANDLE,
                    reflectionComposite = VK_NULL_HANDLE, bloomPrefilter = VK_NULL_HANDLE, bloomDown = VK_NULL_HANDLE,
                    bloomUp = VK_NULL_HANDLE, focus = VK_NULL_HANDLE, depthOfField = VK_NULL_HANDLE, post = VK_NULL_HANDLE,
-                   hdrGain = VK_NULL_HANDLE;
+                   hdrGain = VK_NULL_HANDLE, postMerged = VK_NULL_HANDLE;
     };
     bool Post() const { return bloom_ > 0 || grade_ > 0 || dof_ > 0 || hdr_; }
     Pipelines* GetPipelines(VkFormat format, VkSampleCountFlagBits samples);
@@ -69,6 +74,9 @@ private:
     Device* dev_ = nullptr;
     float occlusion_ = 0, reflections_ = 0, bloom_ = 0, grade_ = 0, dof_ = 0;
     int debug_ = 0;
+    // Scene pixels per pixel of the occlusion and reflection passes (HC09_EFFECTS_RES): 0 auto (2 for scenes over
+    // 1100 pixels tall, i.e. Scale 2 and up), 1 full, 2 half.
+    uint32_t divisor_ = 0;
     uint32_t focusIndex_ = 0;
     bool hdr_ = false;            // HDR output: the gain image (vk_hdr.h)
     float peakRatio_ = 5.0f;      // its peak / paper white

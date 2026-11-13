@@ -131,21 +131,22 @@ namespace hc09::vk
         // already set wins): FrameRate 35 (the game's own, the default) .. 240; Scale 1 (720p) .. 4, 2 = 1440p;
         // VSync on/off; Fullscreen on/off (Alt+Enter or F11 toggles it); MSAA 1 (as the game asks), 2 (at most
         // 2x) or 0; GPU discrete, integrated or part of the card's name; Anisotropy 16 (the default) .. 2, or off;
-        // AmbientOcclusion and Reflections: strength (1 the default, 0 off); Upscaling fsr (the default) or bilinear;
+        // AmbientOcclusion and Reflections: strength (1 the default, 0 off); EffectsResolution auto (the default), half or full;
+        // Upscaling fsr (the default) or bilinear;
         // Sharpening 0 (off) .. 100 (75 the default); SmoothMotion on (the default) or off; HDTextures on or off (the
         // default; on: collect the game's textures, HC09_DUMP_HASHED, for tools/hdpack); Bloom, ColorGrading and
         // DepthOfField: strength (1 the default, DepthOfField 0; 0 off); HDR on or off (the default), HDRPeak and
         // HDRPaperWhite in nits (1000, 200); Crowd on (the default) or off; Turf and Players: strength (1 the default, 0 off);
-        // SharpText on (the default) or off; AspectRatio (below).
+        // SharpText on (the default) or off; ScoreBar on (the default) or off; AspectRatio (below).
         static const std::pair<const wchar_t*, const char*> kSettings[] = {
             { L"FrameRate", "HC09_FRAMERATE" }, { L"Scale", "HC09_SCALE" },       { L"VSync", "HC09_VSYNC" },
             { L"Fullscreen", "HC09_FULLSCREEN" }, { L"MSAA", "HC09_NATIVE_MSAA" }, { L"GPU", "HC09_GPU" },
-            { L"Anisotropy", "HC09_ANISOTROPY" }, { L"AmbientOcclusion", "HC09_SSAO" }, { L"Reflections", "HC09_SSR" },
+            { L"Anisotropy", "HC09_ANISOTROPY" }, { L"AmbientOcclusion", "HC09_SSAO" }, { L"Reflections", "HC09_SSR" }, { L"EffectsResolution", "HC09_EFFECTS_RES" },
             { L"Upscaling", "HC09_UPSCALE" }, { L"Sharpening", "HC09_SHARPEN" }, { L"SmoothMotion", "HC09_SMOOTH_MOTION" },
             { L"HDTextures", "HC09_HD_TEXTURES" }, { L"Bloom", "HC09_BLOOM" }, { L"ColorGrading", "HC09_GRADE" },
             { L"DepthOfField", "HC09_DOF" }, { L"HDR", "HC09_HDR" }, { L"HDRPeak", "HC09_HDR_PEAK" },
             { L"HDRPaperWhite", "HC09_HDR_PAPER_WHITE" }, { L"Crowd", "HC09_CROWD" }, { L"Turf", "HC09_TURF" },
-            { L"Players", "HC09_PLAYERS" }, { L"SharpText", "HC09_SHARP_TEXT" },
+            { L"Players", "HC09_PLAYERS" }, { L"SharpText", "HC09_SHARP_TEXT" }, { L"ScoreBar", "HC09_SCORE_BAR" },
         };
         const std::wstring file = (std::filesystem::current_path() / L"hc09.ini").wstring();
         for (const auto& [key, variable] : kSettings)

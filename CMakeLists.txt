@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(HC09Recomp VERSION 1.1.0 LANGUAGES C CXX)
+project(HC09Recomp VERSION 1.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -37,6 +37,7 @@ target_compile_options(HC09RecompLib PRIVATE
 set(HC09_HOST_SOURCES
     src/main.cpp
     src/common/font_hd.cpp
+    src/common/broadcast_state.cpp
     src/common/draft_picks.cpp
     src/common/edition.cpp
     src/common/fifth_year_option.cpp
@@ -184,7 +185,7 @@ foreach(game HC09 HC27)
     if(HC09_VULKAN)
         target_sources(${game} PRIVATE ${HC09_VK_SOURCES})
         target_include_directories(${game} PRIVATE ${CMAKE_SOURCE_DIR}/src/vk ${CMAKE_SOURCE_DIR}/src/vk/xenos
-            ${CMAKE_SOURCE_DIR}/src/vk/gpu_vk ${HC09_VULKAN_DIR}/glslang/include)
+            ${CMAKE_SOURCE_DIR}/src/vk/gpu_vk ${HC09_VULKAN_DIR}/glslang/include ${CMAKE_SOURCE_DIR}/thirdparty/stb)
         target_compile_definitions(${game} PRIVATE HC09_HAVE_VULKAN)
         target_link_libraries(${game} PRIVATE HC09Volk ${HC09_GLSLANG_LIBS})
     endif()

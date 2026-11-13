@@ -19,6 +19,7 @@
 #include "vk_materials.h"
 #include "vk_tessellation.h"
 #include "vk_motion.h"
+#include "vk_replay.h"
 #include "vk_scene_effects.h"
 #include "vk_shader_compile.h"
 #include "xe_glsl.h"
@@ -502,6 +503,9 @@ struct NativeRenderer::Impl
     const Target* sceneColor = nullptr;
     const Target* sceneDepth = nullptr;
     uint64_t effectsFrame = ~0ull;
+    // hc09: the score bar's replay (vk_replay.h): the scene kept at its first resolve of a frame.
+    ReplayRecorder replay;
+    uint64_t replayFrame = ~0ull;
     uint64_t gainFrame = ~0ull;   // the frame whose scene made the HDR gain image
     bool frontGain = false;       // the front buffer DecodeFrontBuffer made last is that frame's
 
@@ -2491,7 +2495,17 @@ struct NativeRenderer::Impl
                     r.src & 3, r.x0, r.y0, r.x1, r.y1, r.destBase, r.destPitch, r.destFmt, r.texWidth, r.texHeight, r.copy ? "" : " (no copy)",
                     src == sceneColor && sceneView.camera.valid ? " [scene]" : "");
         }
+        const bool sceneResolve = r.src < 4 && sceneView.camera.valid && src == sceneColor && replayFrame != frame;
+        const SceneView view = sceneView;
         if (effects.Enabled() && r.src < 4) ApplySceneEffects(src);
+        if (sceneResolve)
+        {
+            replayFrame = frame;
+            EndRendering();
+            Begin();
+            const float vx = std::min(view.x, view.x + view.width), vy = std::min(view.y, view.y + view.height);
+            replay.Capture(*dev, cb, src->img, src->samples, vx, vy, std::fabs(view.width), std::fabs(view.height), garbage);
+        }
         if (crowdOn && crowdAtlas && r.src < 4 && r.copy && r.destBase == crowdAtlas && r.x0 == 0 && r.y0 == 0) CaptureCrowd(src, r);
         // The rectangle in guest pixels (the source image is `scale` times the surface).
         int32_t x1 = std::min<int32_t>(r.x1, int32_t(src->img.width / scale)), y1 = std::min<int32_t>(r.y1, int32_t(src->img.height / scale));
@@ -2594,6 +2608,7 @@ bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* e
     I.translate.fastMath = flag(Hc09Env("HC09_GPU_FASTMATH"), !exact);
     { const char* e = Hc09Env("HC09_NATIVE_RELAXED"); I.translate.relaxed = exact ? 0u : e ? uint32_t(atoi(e)) : 0u; }
     I.translate.hostRt = true;
+    if (const char* e = Hc09Env("HC09_SCALE"); e && *e) I.scale = uint32_t(std::clamp(atoi(e), 1, 4));
     I.msaa = flag(Hc09Env("HC09_NATIVE_MSAA"), true);
     if (const char* e = Hc09Env("HC09_NATIVE_MSAA"); e && *e)
     {
@@ -2602,7 +2617,12 @@ bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* e
         if (v == "off" || v == "no" || v == "false") I.msaa = false;
         I.msaaCap2 = v == "2";
     }
-    if (const char* e = Hc09Env("HC09_SCALE"); e && *e) I.scale = uint32_t(std::clamp(atoi(e), 1, 4));
+    else
+    {
+        // Unset: at Scale 3 and up the scene is already drawn at 3x the game's pixels, which smooths its edges
+        // as much as 4x MSAA would; at most 2x then (as much quality, ~1 ms less at 4K). MSAA=1 asks for 4x.
+        I.msaaCap2 = I.scale >= 3;
+    }
     if (const char* e = Hc09Env("HC09_ANISOTROPY"); e && *e) I.anisotropy = float(std::clamp(atoi(e), 1, 16));
     I.anisotropy = std::min(I.anisotropy, dev.anisotropy);
     I.scaledFetch = flag(Hc09Env("HC09_NATIVE_SCALED_FETCH"), true);
@@ -2986,6 +3006,7 @@ void NativeRenderer::Shutdown()
     VkDevice d = I.dev->device;
     vkDeviceWaitIdle(d);
     I.effects.Shutdown();
+    I.replay.Destroy(*I.dev);
     if (I.crowdHistory.img.image) I.dev->DestroyImage(I.crowdHistory.img);
     I.Park(I.slots[I.cur]);
     for (Impl::Slot& sl : I.slots)

@@ -129,8 +129,11 @@ AmbientOcclusion=1
 Reflections=1
 ```
 
-`set HC09_SSAO=<strength>` and `set HC09_SSR=<strength>` override the file for one run. The Vulkan renderer
-also has post-processing (bloom, colour grading and depth of field; see its settings below).
+`set HC09_SSAO=<strength>` and `set HC09_SSR=<strength>` override the file for one run. With the Vulkan
+renderer at `Scale=2` or above, both effects are worked out at half the picture's resolution, which costs about
+a quarter as much and looks the same once they are softened and fitted to the picture's edges.
+`EffectsResolution=full` works them out at the full resolution; `half` at half even at `Scale=1`. The Vulkan
+renderer also has post-processing (bloom, colour grading and depth of field; see its settings below).
 
 ### Renderers: Vulkan (60 fps, 1440p) and D3D12
 
@@ -153,8 +156,9 @@ Scale=2
   3 = 4K. Higher looks sharper in fullscreen and needs a faster graphics card.
 - `VSync=off` presents without waiting for the display (may tear); on by default.
 - `Fullscreen=on` starts in borderless fullscreen (F11 or Alt+Enter still toggles it).
-- `MSAA`: anti-aliasing, `1` as the game asks (4x in 3D scenes, the default), `2` at most 2x, `0`
-  off. Lower settings help slower cards at `Scale=3`.
+- `MSAA`: anti-aliasing, `1` as the game asks (4x in 3D scenes), `2` at most 2x, `0` off. Left out, it is
+  as the game asks up to `Scale=2` and at most 2x from `Scale=3`, where the picture's extra pixels already
+  smooth the edges.
 - `GPU`: on a PC with two graphics chips, `discrete`, `integrated`, or part of the card's name.
 - `Anisotropy`: texture filtering that keeps field lines and yard numbers sharp at the broadcast
   camera's low angles, `16` (the default) down to `2`, or `off` as the original game draws them.
@@ -201,6 +205,16 @@ Scale=2
 - `SharpText`: `on` by default. The game draws its text from outline fonts into small textures at 720p sizes;
   at `Scale=2` or above, each letter is also drawn at that many times the size, so the menus' and on-field
   graphics' text is as sharp as the rest of the picture. `off` enlarges the game's own letters.
+- `ScoreBar`: `on` by default. The game's score bug, the banner across the top of the screen, becomes a
+  TV-style ribbon at the foot of the screen, drawn at your screen's resolution: a panel per team in its
+  colours with its logo, its score and its timeouts left (three pips), a red arrow on the side of the team
+  with the ball, then the quarter, the game clock and the play clock, then the down and distance. It shows
+  and hides when the game's banner would and stays up while the clipboard is open. The clipboard's own score box
+  shows the Coaching Advantage instead (its title, rows and team-coloured bars, shrunk to fit), and the game's
+  Coaching Advantage panel along the foot of the screen is no longer shown. When there is no Coaching Advantage to
+  show, the box loops a replay of the last play, from the snap to the next down, as you saw it (it keeps the last
+  ten seconds of the 3D scene, small, in about 70 MB of video memory).
+  Its typeface is Barlow Condensed (SIL Open Font License, `fonts/OFL.txt`). `off` keeps the game's banner.
 - `AspectRatio`: for ultrawide screens, `21:9`, `32:9`, any `<width>:<height>`, or `auto` for your
   screen's shape; `16:9` (the game's own) by default. The 3D scenes fill the wider screen and show more at
   the sides, while the menus and on-field graphics keep their shape in the middle. Things just past
@@ -357,6 +371,8 @@ tag, re-patches XenonRecomp if the pin changed, and recompiles and rebuilds the 
 | `src/gpu/` | Command processor and the D3D12 renderer |
 | `src/vk/` | The Vulkan renderer and frame pacing (MIT, `src/vk/LICENSE`) and their adapter (`vk_adapter.cpp`) |
 | `src/common/` | Shared by the game and setup: `hc09.ini` settings, GitHub release check |
+| `fonts/` | The score bar's typeface, Barlow Condensed SemiBold (SIL Open Font License 1.1, `fonts/OFL.txt`) |
+| `thirdparty/stb/` | `stb_truetype.h` (public domain or MIT), which draws the score bar's letters |
 | `tools/installer/` | `HC09Setup.exe`: install/update wizard (disc import, build pipeline) |
 | `tools/` | Extraction, decryption and analysis scripts |
 
