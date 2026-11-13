@@ -57,7 +57,9 @@ struct DrawConsts
     uint32_t ds[4];           // RB_DEPTHCONTROL, RB_STENCILREFMASK, RB_STENCILREFMASK_BF, flags (kDs*)
     float blendConst[4];      // RB_BLEND_RED..ALPHA
     uint32_t clip[4];         // x: bit 0 near/far/w clipping on, bit 1 D3D clip space (0 <= z <= w)
-    float winOfs[4];          // window offset x, y and the half-pixel offset, added as the software does
+    float winOfs[4];          // window offset x, y and the half-pixel offset, added as the software does; w (hc09,
+                              // native, temporal upscaling): as uint bits, how many draws on the draw holding this one's
+                              // vertex constants of the frame before is (0: none; xe_glsl.cpp kMotion)
 };
 // DrawConsts::ds[3] flags.
 constexpr uint32_t kDsShade = 1;      // the pixel shader runs (colour on or alpha test)
@@ -149,6 +151,8 @@ struct ResolveConsts
 // mean of its s x s block (colour) or the block's centre (depth). `scaled` != 0: every
 // pixel of the source also goes to the scaled copy (binding 3: the words the guest
 // copy gets, untiled, scaledPitch x scaledRows, at texel (x + destX, y + destY) * s).
+// hc09: `srcPerOut` < 1: a depth source smaller than s times the guest size (the 3D scene drawn smaller for temporal
+// upscaling), each pixel at the scale read from the source's pixel under it.
 std::string NativeResolveShader(bool depth, bool ms = false);
 struct NativeResolveConsts
 {
@@ -160,6 +164,7 @@ struct NativeResolveConsts
     uint32_t samples, sampleSel, scale, scaledRows;
     uint32_t scaled, scaledPitch;
     int32_t destX, destY;
+    float srcPerOut;   // hc09: the source's pixels per pixel at the scale (1; less for a depth target drawn smaller)
 };
 
 // GLSL of the fixed geometry shader that expands rectangle lists (3 vertices

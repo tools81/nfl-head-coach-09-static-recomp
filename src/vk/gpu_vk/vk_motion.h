@@ -21,7 +21,9 @@ public:
     void BeginFrame(uint64_t frame, uint64_t tick, float fraction);
     // A draw's vertex constants `c` (`count` vec4, the shader's window), blended in place. `key`: the draw's kind
     // (shaders, index range); draws of the same kind are told apart by their constants.
-    void Process(uint64_t key, float* c, uint32_t count, uint32_t indices);
+    // `prevOut` (hc09, temporal upscaling): receives the constants this draw was drawn with a frame before (the
+    // whole window); returns whether there were (the draw was matched, and drawn then).
+    bool Process(uint64_t key, float* c, uint32_t count, uint32_t indices, float* prevOut = nullptr);
     // Every 600 frames, a line of statistics on stderr (HC09_SMOOTH_MOTION_STATS=1).
     void Report();
 
@@ -32,7 +34,10 @@ private:
         std::vector<uint8_t> blend;           // per vec4: drawn blended (changed with the newest tick)
         std::vector<uint8_t> between;         // per vec4: frames left during which it counts as changing between ticks
         uint64_t lastTick = 0, curTick = 0, lastFrame = 0;
+        std::vector<float> drawn;             // hc09: as drawn (blended) in frame drawnFrame
+        uint64_t drawnFrame = ~0ull;
     };
+    bool Drawn(Entry& e, const float* c, size_t n, float* prevOut);
     std::unordered_map<uint64_t, std::vector<Entry>> entries_;
     std::unordered_map<uint64_t, uint32_t> seen_;   // occurrences of each kind this frame
     uint64_t seenFrame_ = ~0ull;

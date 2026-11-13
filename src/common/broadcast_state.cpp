@@ -72,6 +72,7 @@ namespace hc09::broadcast
         bool g_wanted = false;          // the clip's _visible as the game set it
         Clock::time_point g_lastWanted{};   // when the game last hid it
         Clock::time_point g_lastField{};    // when the game last gave a score bug field its text
+        Clock::time_point g_bugUsed{};      // when the game last read or wrote the score bug itself (not its parent)
 
         // Whether a game is being played (mutex held): the game shows its score bug, or did, or filled in its fields,
         // within the last minute (it hides it for cutscenes, and before the first snap the clipboard may open first).
@@ -79,7 +80,8 @@ namespace hc09::broadcast
         {
             const auto now = Clock::now();
             auto recent = [&](Clock::time_point t) { return t != Clock::time_point{} && now - t < std::chrono::seconds(60); };
-            return g_wanted || recent(g_lastWanted) || recent(g_lastField);
+            // The score bug shown counts while the game still uses it (after a game it may be left shown, unused).
+            return (g_wanted && recent(g_bugUsed)) || recent(g_lastWanted) || recent(g_lastField);
         }
         bool g_parentVisible = true;    // its parent's
         // A billboard's _x: kStripX shows the score bug, 0 the clipboard's score box. The renderer's box is drawn
@@ -394,6 +396,11 @@ PPC_FUNC(sub_82B04AD0)
     }
     if (role != kRolePrep)
         Touched(ctx, base);
+    if (role == kRoleBug)
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_bugUsed = Clock::now();
+    }
     const bool visible = g_true && !std::strcmp(MemberOf(base, ctx.r6.u32), "_visible");
     __imp__sub_82B04AD0(ctx, base);
     if (visible && (ctx.r3.u32 == g_true || ctx.r3.u32 == g_true - 12))
@@ -458,8 +465,11 @@ PPC_FUNC(sub_82B04600)
          !std::strcmp(name, "txtQuarter") || !std::strcmp(name, "txtDownAndYards")))
     {
         // The clipboard's score box's scores and clock (before the first snap the game fills these, not the score bug's).
+        // Only the quarter, clock and down: the career's screens show this box too, with the scores 0 and the rest blank.
         const std::string text = Text(base, value);
-        if (text.find_first_not_of(' ') != std::string::npos)
+        Log("[scorebar] mcGameDay.%s \"%s\"\n", name, text.c_str());
+        const bool scores = !std::strcmp(name, "txtHomeScore") || !std::strcmp(name, "txtAwayScore");
+        if (!scores && text.find_first_not_of(' ') != std::string::npos)
         {
             std::lock_guard<std::mutex> lock(g_mutex);
             g_lastField = Clock::now();
@@ -507,8 +517,12 @@ PPC_FUNC(sub_82B04600)
     }
 
     const bool isBug = !std::strcmp(name, kBug);
-    if (isBug)
+    if (isBug || (FieldOf(name) != kNone && !std::strcmp(upName, kBug)))
+    {
         Touched(ctx, base);
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_bugUsed = Clock::now();
+    }
     if (!std::strcmp(name, "mcBillboard") && std::find(g_billboards.begin(), g_billboards.end(), object) == g_billboards.end())
         g_billboards.push_back(object);
     const Role role = RoleOf(base, object);

@@ -34,7 +34,17 @@ void MotionInterpolator::BeginFrame(uint64_t frame, uint64_t tick, float fractio
         }
 }
 
-void MotionInterpolator::Process(uint64_t key, float* c, uint32_t count, uint32_t indices)
+bool MotionInterpolator::Drawn(Entry& e, const float* c, size_t n, float* prevOut)
+{
+    if (!prevOut) return false;
+    const bool had = e.drawnFrame + 1 == frame_ && e.drawn.size() == n;
+    if (had) std::memcpy(prevOut, e.drawn.data(), n * 4);
+    e.drawn.assign(c, c + n);
+    e.drawnFrame = frame_;
+    return had;
+}
+
+bool MotionInterpolator::Process(uint64_t key, float* c, uint32_t count, uint32_t indices, float* prevOut)
 {
     ++draws_;
     const size_t n = size_t(count) * 4;
@@ -63,7 +73,7 @@ void MotionInterpolator::Process(uint64_t key, float* c, uint32_t count, uint32_
     }
     if (!e)
     {
-        if (list.size() >= kMaxPerKind) return;
+        if (list.size() >= kMaxPerKind) return false;
         list.emplace_back();
         e = &list.back();
         e->last.assign(c, c + n);
@@ -73,7 +83,7 @@ void MotionInterpolator::Process(uint64_t key, float* c, uint32_t count, uint32_
         e->lastTick = e->curTick = tick_;
         e->lastFrame = frame_;
         ++fresh_;
-        return;
+        return Drawn(*e, c, n, prevOut);
     }
     const bool ticked = tick_ != e->lastTick;
     if (ticked)
@@ -123,7 +133,7 @@ void MotionInterpolator::Process(uint64_t key, float* c, uint32_t count, uint32_
     if (!same) std::memcpy(e->last.data(), c, n * 4);
     e->lastTick = tick_;
     e->lastFrame = frame_;
-    if (e->curTick != tick_ || fraction_ >= 1.0f) return;   // drawn at the newest tick's values
+    if (e->curTick != tick_ || fraction_ >= 1.0f) return Drawn(*e, c, n, prevOut);   // drawn at the newest tick's values
     const float t = fraction_;
     // HC09_SMOOTH_MOTION_LOG=<indices>: per frame, the first blended vec4 of draws with that index count, as the
     // game gave it and as drawn (dev).
@@ -155,6 +165,7 @@ void MotionInterpolator::Process(uint64_t key, float* c, uint32_t count, uint32_
     }
     blendedDraws_ += blended;
     if (blended) ++blendedBySize_[indices];
+    return Drawn(*e, c, n, prevOut);
 }
 
 void MotionInterpolator::Report()

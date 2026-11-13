@@ -168,6 +168,12 @@ Scale=2
   screen pixel covers.
   `bilinear` stretches it as before.
 - `Sharpening`: `0` (off) to `100`, `75` by default; applied whenever the picture is scaled.
+- `TemporalUpscaling`: draws the 3D scenes (the game on the field, cutscenes and the 3D backdrops of the
+  menus) at a lower resolution and builds the full-resolution picture from the last few frames with AMD
+  FidelityFX Super Resolution 3. This is quicker on the graphics card, with almost the same picture, which
+  helps at `Scale=2` and `Scale=3`. `quality` draws them at 2/3 of the size on each side, `balanced` at 1/1.7
+  and `performance` at half. Menus, text and on-field graphics stay at full resolution. `off` by default.
+  It uses AMD's `amd_fidelityfx_vk.dll`, which the build downloads and puts beside the game.
 - `SmoothMotion`: `on` by default. The game draws players and the camera at the full frame rate, but
   the ball and a few objects only move 30 times a second; this draws them in even steps between those
   moves (about 1/30 s behind). `off` shows them as the game moves them.

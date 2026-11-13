@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(HC09Recomp VERSION 1.2.0 LANGUAGES C CXX)
+project(HC09Recomp VERSION 1.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -151,6 +151,34 @@ if(HC09_FETCH_VULKAN)
     hc09_fetch_vulkan_dep(glslang
         https://github.com/KhronosGroup/glslang/releases/download/16.6.0/glslang-16.6.0-windows-x86_64-release.zip lib/glslang.lib)
 endif()
+# AMD FidelityFX FSR 3.1 (FidelityFX SDK v1.1.4, MIT: its LICENSE.txt), for the Vulkan renderer's temporal upscaling
+# (hc09.ini TemporalUpscaling): the SDK's signed Vulkan DLL (SHA-256 pinned) and its ffx-api headers, downloaded into
+# thirdparty/fidelityfx when missing. The renderer loads the DLL at run time; without it, temporal upscaling is off.
+set(HC09_FFX_DIR ${CMAKE_SOURCE_DIR}/thirdparty/fidelityfx)
+set(HC09_FFX_DLL_SHA256 a1624cc4238fef046f30c4d80ce3f47be63fc5f5373f49e3ee9edb9960f54c78)
+if(HC09_FETCH_VULKAN AND NOT EXISTS ${HC09_FFX_DIR}/amd_fidelityfx_vk.dll)
+    set(base https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/v1.1.4)
+    message(STATUS "Downloading AMD FidelityFX FSR 3.1 (${base})")
+    set(ok TRUE)
+    foreach(file ffx-api/include/ffx_api/ffx_api.h ffx-api/include/ffx_api/ffx_api_types.h ffx-api/include/ffx_api/ffx_upscale.h
+                 ffx-api/include/ffx_api/vk/ffx_api_vk.h LICENSE.txt PrebuiltSignedDLL/amd_fidelityfx_vk.dll)
+        string(REGEX REPLACE "^ffx-api/|^PrebuiltSignedDLL/" "" dest ${file})
+        if(file MATCHES "\\.dll$")
+            file(DOWNLOAD ${base}/${file} ${HC09_FFX_DIR}/${dest} STATUS status TLS_VERIFY ON EXPECTED_HASH SHA256=${HC09_FFX_DLL_SHA256})
+        else()
+            file(DOWNLOAD ${base}/${file} ${HC09_FFX_DIR}/${dest} STATUS status TLS_VERIFY ON)
+        endif()
+        list(GET status 0 code)
+        if(NOT code EQUAL 0)
+            set(ok FALSE)
+        endif()
+    endforeach()
+    if(NOT ok)
+        message(WARNING "Downloading FSR 3.1 failed: temporal upscaling is left out")
+        file(REMOVE ${HC09_FFX_DIR}/amd_fidelityfx_vk.dll)
+    endif()
+endif()
+
 if(EXISTS ${HC09_VULKAN_DIR}/Vulkan-Headers/include/vulkan/vulkan.h AND EXISTS ${HC09_VULKAN_DIR}/volk/volk.c
         AND EXISTS ${HC09_VULKAN_DIR}/glslang/lib/glslang.lib)
     set(HC09_VULKAN ON)
@@ -188,6 +216,13 @@ foreach(game HC09 HC27)
             ${CMAKE_SOURCE_DIR}/src/vk/gpu_vk ${HC09_VULKAN_DIR}/glslang/include ${CMAKE_SOURCE_DIR}/thirdparty/stb)
         target_compile_definitions(${game} PRIVATE HC09_HAVE_VULKAN)
         target_link_libraries(${game} PRIVATE HC09Volk ${HC09_GLSLANG_LIBS})
+        if(EXISTS ${HC09_FFX_DIR}/amd_fidelityfx_vk.dll)
+            # FSR 3.1: its headers, and its DLL next to the game (loaded at run time).
+            target_include_directories(${game} PRIVATE ${HC09_FFX_DIR}/include)
+            target_compile_definitions(${game} PRIVATE HC09_HAVE_FFX)
+            add_custom_command(TARGET ${game} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${HC09_FFX_DIR}/amd_fidelityfx_vk.dll $<TARGET_FILE_DIR:${game}>)
+        endif()
     endif()
     if(HC09_DXC_DIR)
         add_custom_command(TARGET ${game} POST_BUILD

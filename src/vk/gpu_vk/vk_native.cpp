@@ -19,6 +19,7 @@
 #include "vk_materials.h"
 #include "vk_tessellation.h"
 #include "vk_motion.h"
+#include "vk_fsr3.h"
 #include "vk_replay.h"
 #include "vk_scene_effects.h"
 #include "vk_shader_compile.h"
@@ -222,6 +223,10 @@ struct NativeRenderer::Impl
     VkPipeline depthDecodePipe = VK_NULL_HANDLE;
     VkPipelineLayout resolvePipeLayout[2][2] = {}, decodePipeLayout = VK_NULL_HANDLE, mipPipeLayout = VK_NULL_HANDLE;
     VkPipeline resolvePipe[2][2] = {}, decodePipe = VK_NULL_HANDLE, mipPipe = VK_NULL_HANDLE;
+    // hc09: temporal upscaling: the 3D scene's motion from its depth and the camera's move (vk_fsr3.h).
+    VkDescriptorSetLayout motionSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout motionPipeLayout = VK_NULL_HANDLE;
+    VkPipeline motionPipe = VK_NULL_HANDLE;
     // Surfaces get the sample count the game asked for (2x/4x, the console's real
     // MSAA; the 3D scenes use 4x). HC09_NATIVE_MSAA=0: 1x, as the emulated renderers
     // (for comparisons with their reference images); 2: at most 2x (hc09.ini msaa).
@@ -490,6 +495,10 @@ struct NativeRenderer::Impl
         VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
         uint64_t lastUsed = 0;
         bool wide = false;   // hc09: widescreen: holds 3D content this frame (drawn wide), so its resolves do too
+        // hc09: its pixels per guest pixel: the scale, or for the 3D scene with temporal upscaling (vk_fsr3.h) less
+        // (`reduced`: drawn without multisampling, and brought to the scale at its colour resolve).
+        float tscale = 1.0f;
+        bool reduced = false;
     };
     std::unordered_map<uint32_t, Target> targets;   // by surface object address (+ depth flag in bit 0)
     // hc09: ambient occlusion and reflections (vk_scene_effects.h), on the frame's first resolve of the target the
@@ -498,6 +507,8 @@ struct NativeRenderer::Impl
     // hc09: smooth motion (vk_motion.h): on once the front end gives frame states.
     MotionInterpolator motion;
     bool motionOn = false;
+    uint64_t motionFrame = ~0ull;   // hc09: the matcher's frame when smooth motion is off (temporal upscaling)
+    bool motionBound = false;       // hc09: the rendering has the motion target (attachment 4; temporal upscaling)
     std::vector<float> motionScratch = std::vector<float>(512 * 4);
     SceneView sceneView;
     const Target* sceneColor = nullptr;
@@ -505,6 +516,8 @@ struct NativeRenderer::Impl
     uint64_t effectsFrame = ~0ull;
     // hc09: the score bar's replay (vk_replay.h): the scene kept at its first resolve of a frame.
     ReplayRecorder replay;
+    // hc09: temporal upscaling (vk_fsr3.h, roadmap 15).
+    TemporalUpscaler fsr;
     uint64_t replayFrame = ~0ull;
     uint64_t gainFrame = ~0ull;   // the frame whose scene made the HDR gain image
     bool frontGain = false;       // the front buffer DecodeFrontBuffer made last is that frame's
@@ -1089,18 +1102,34 @@ struct NativeRenderer::Impl
     }
 
     // ---- targets ------------------------------------------------------------------
+    // hc09: the pixels per guest pixel of what is drawn to now (the first colour target's, else the depth target's).
+    float BoundScale() const { return bt[0] ? bt[0]->tscale : bd ? bd->tscale : float(scale); }
+    // hc09: temporal upscaling: this frame's jitter for the 3D scene drawn smaller, in its pixels (window x right, y
+    // down: FSR's offset, which its own samples apply to the projection as (2x / w, -2y / h)).
+    void SceneJitter(float& x, float& y) const
+    {
+        const float ratio = TemporalUpscaler::Ratio(TemporalUpscaler::Mode());
+        const uint32_t outW = 1280 * scale, renderW = uint32_t(std::ceil(float(outW) / ratio));
+        TemporalUpscaler::Jitter(frame, renderW, outW, x, y);
+    }
+
     Target* GetTarget(const d3dn::Surface& s)
     {
         if (!s.valid()) return nullptr;
         uint32_t key = s.key | (s.depth ? 1u : 0u);
         VkSampleCountFlagBits samples = !msaa ? VK_SAMPLE_COUNT_1_BIT : s.msaa == 2 ? (msaaCap2 ? VK_SAMPLE_COUNT_2_BIT : VK_SAMPLE_COUNT_4_BIT)
                                       : s.msaa == 1 ? VK_SAMPLE_COUNT_2_BIT : VK_SAMPLE_COUNT_1_BIT;
+        // hc09: temporal upscaling: the 3D scene's targets (the screen-sized ones the game multisamples) drawn smaller.
+        const bool reduced = fsr.Ready() && s.msaa != 0 && s.width >= 1280 && s.height >= 720;
+        const float ts = reduced ? float(scale) / TemporalUpscaler::Ratio(TemporalUpscaler::Mode()) : float(scale);
+        if (reduced) samples = VK_SAMPLE_COUNT_1_BIT;
+        const uint32_t needW = uint32_t(std::ceil(float(std::max(1u, s.width)) * ts)), needH = uint32_t(std::ceil(float(std::max(1u, s.height)) * ts));
         auto it = targets.find(key);
         if (it != targets.end())
         {
             Target& t = it->second;
             // Grows (a surface bound with a larger tiling extent) or changes format: a new image.
-            if (t.s.format == s.format && t.samples == samples && t.img.width >= s.width * scale && t.img.height >= s.height * scale)
+            if (t.s.format == s.format && t.samples == samples && t.reduced == reduced && t.img.width >= needW && t.img.height >= needH)
             { t.lastUsed = frame; return &t; }
             EndRendering();
             garbage.push_back(t.img);
@@ -1112,7 +1141,9 @@ struct NativeRenderer::Impl
         t.s = s;
         t.samples = samples;
         t.lastUsed = frame;
-        uint32_t w = std::max(1u, s.width) * scale, h = std::max(1u, s.height) * scale;
+        t.tscale = ts;
+        t.reduced = reduced;
+        uint32_t w = needW, h = needH;
         if (s.depth)
         {
             t.format = depthFormat;
@@ -1236,8 +1267,18 @@ struct NativeRenderer::Impl
         if (!areaW || !areaH) return false;
         Begin();
         MemoryBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
-        VkRenderingAttachmentInfo ca[4]{};
+        VkRenderingAttachmentInfo ca[5]{};
         uint32_t n = 0;
+        motionBound = false;
+        if (bt[0] && bt[0]->reduced && motionPipe && EnsureMotion(bt[0]->img.width, bt[0]->img.height))
+        {
+            ca[4].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            ca[4].imageView = fsrMotion.view;
+            ca[4].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            ca[4].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            ca[4].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            motionBound = true;
+        }
         for (int i = 0; i < 4; ++i)
         {
             ca[i].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
@@ -1261,7 +1302,7 @@ struct NativeRenderer::Impl
         VkRenderingInfo ri{ VK_STRUCTURE_TYPE_RENDERING_INFO };
         ri.renderArea = { { 0, 0 }, { areaW, areaH } };
         ri.layerCount = 1;
-        ri.colorAttachmentCount = n;
+        ri.colorAttachmentCount = motionBound ? 5 : n;
         ri.pColorAttachments = ca;
         ri.pDepthAttachment = bd ? &da : nullptr;
         ri.pStencilAttachment = bd ? &da : nullptr;
@@ -1296,18 +1337,18 @@ struct NativeRenderer::Impl
             ++n;
         }
         if (!n) return;
-        int32_t sc = int32_t(scale);   // rectangles in guest pixels
-        int32_t x0 = rect ? std::max(0, rect[0] * sc) : 0, y0 = rect ? std::max(0, rect[1] * sc) : 0;
-        int32_t x1 = rect ? std::min<int32_t>(rect[2] * sc, int32_t(areaW)) : int32_t(areaW);
+        const float sc = BoundScale();   // rectangles in guest pixels
+        int32_t x0 = rect ? std::max(0, int32_t(std::floor(rect[0] * sc))) : 0, y0 = rect ? std::max(0, int32_t(std::floor(rect[1] * sc))) : 0;
+        int32_t x1 = rect ? std::min<int32_t>(int32_t(std::ceil(rect[2] * sc)), int32_t(areaW)) : int32_t(areaW);
         // hc09: widescreen (widescreen.h): a clear of part of a screen-sized target moves with the squeezed draws.
         if (rect && squeeze != 1.0f && bt[0] && bound[0].width >= 1024 && bound[0].height >= 576)
         {
-            const int32_t w = int32_t(bound[0].width) * sc;
+            const int32_t w = int32_t(std::lround(float(bound[0].width) * sc));
             const float mid = 0.5f * float(w);
             if (x0 > 0) x0 = int32_t(std::floor(mid + (float(x0) - mid) * squeeze));
             if (x1 < w) x1 = int32_t(std::ceil(mid + (float(x1) - mid) * squeeze));
         }
-        int32_t y1 = rect ? std::min<int32_t>(rect[3] * sc, int32_t(areaH)) : int32_t(areaH);
+        int32_t y1 = rect ? std::min<int32_t>(int32_t(std::ceil(rect[3] * sc)), int32_t(areaH)) : int32_t(areaH);
         if (x1 <= x0 || y1 <= y0) return;
         static const bool traceDrawsOn = Hc09Env("HC09_NATIVE_TRACE_DRAWS") != nullptr;
         if (traceDrawsOn && Tracing())
@@ -1384,13 +1425,14 @@ struct NativeRenderer::Impl
     // Pipeline state: everything that is not dynamic, as one key.
     VkPipeline Pipeline(const std::array<uint64_t, 9>& key, VkShaderModule vsMod, VkShaderModule psMod, bool rect, uint32_t cull,
                         uint32_t frontFace, uint64_t texKinds, const VkFormat colorFmt[4], const uint32_t writeMask[4],
-                        const uint32_t blend[4], bool hasDepth, uint32_t dc, bool zEnable, bool stencilOn, const ShaderEntry* tess = nullptr)
+                        const uint32_t blend[4], bool hasDepth, uint32_t dc, bool zEnable, bool stencilOn, const ShaderEntry* tess = nullptr,
+                        bool motionAtt = false, bool motionWrite = false)
     {
         auto it = pipelines.find(key);
         if (it != pipelines.end()) return it->second;
-        uint32_t kinds[2] = { uint32_t(texKinds), uint32_t(texKinds >> 32) };
-        VkSpecializationMapEntry me[2] = { { 0, 0, 4 }, { 1, 4, 4 } };
-        VkSpecializationInfo spec{ 2, me, sizeof(kinds), kinds };
+        uint32_t kinds[3] = { uint32_t(texKinds), uint32_t(texKinds >> 32), uint32_t(motionWrite) };
+        VkSpecializationMapEntry me[3] = { { 0, 0, 4 }, { 1, 4, 4 }, { 2, 8, 4 } };
+        VkSpecializationInfo spec{ 3, me, sizeof(kinds), kinds };
         VkPipelineShaderStageCreateInfo st[4]{};
         uint32_t n = 0;
         st[n++] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, tess ? tess->tessVs : vsMod, "main", &spec };
@@ -1431,7 +1473,7 @@ struct NativeRenderer::Impl
             ds.front = { VkStencilOp(f[1]), VkStencilOp(f[2]), VkStencilOp(f[3]), VkCompareOp(f[0]), 0, 0, 0 };
             ds.back = { VkStencilOp(b[1]), VkStencilOp(b[2]), VkStencilOp(b[3]), VkCompareOp(b[0]), 0, 0, 0 };
         }
-        VkPipelineColorBlendAttachmentState att[4]{};
+        VkPipelineColorBlendAttachmentState att[5]{};
         uint32_t nAtt = 0;
         for (int i = 0; i < 4; ++i)
         {
@@ -1449,6 +1491,12 @@ struct NativeRenderer::Impl
             a.blendEnable = !(Bits(bc, 0, 5) == 1 && Bits(bc, 8, 5) == 0 && Bits(bc, 5, 3) == 0 && Bits(bc, 16, 5) == 1 &&
                               Bits(bc, 24, 5) == 0 && Bits(bc, 21, 3) == 0);
         }
+        VkFormat formats[5] = { colorFmt[0], colorFmt[1], colorFmt[2], colorFmt[3], VK_FORMAT_R16G16_SFLOAT };
+        if (motionAtt)   // hc09: temporal upscaling: the motion target
+        {
+            nAtt = 5;
+            att[4].colorWriteMask = motionWrite ? VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT : 0;
+        }
         VkPipelineColorBlendStateCreateInfo cbs{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
         cbs.attachmentCount = nAtt;
         cbs.pAttachments = att;
@@ -1459,7 +1507,7 @@ struct NativeRenderer::Impl
         dy.pDynamicStates = dyn;
         VkPipelineRenderingCreateInfo ri{ VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
         ri.colorAttachmentCount = nAtt;
-        ri.pColorAttachmentFormats = colorFmt;
+        ri.pColorAttachmentFormats = formats;
         ri.depthAttachmentFormat = hasDepth ? depthFormat : VK_FORMAT_UNDEFINED;
         ri.stencilAttachmentFormat = hasDepth ? depthFormat : VK_FORMAT_UNDEFINED;
         VkGraphicsPipelineCreateInfo ci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
@@ -2048,7 +2096,7 @@ struct NativeRenderer::Impl
         // The 3D scene: a multisampled target (unless MSAA is off) the size of the screen, not the game's smaller
         // render-to-texture passes.
         if (effects.Enabled() && effectsFrame != frame && zEnable && zWrite && colorOn && bt[0] && bd && bound[0].width >= 1024 &&
-            bound[0].height >= 576 && (bd->samples != VK_SAMPLE_COUNT_1_BIT || !msaa))
+            bound[0].height >= 576 && (bd->samples != VK_SAMPLE_COUNT_1_BIT || !msaa || bd->reduced))
             NoteSceneCamera();
         lap.To(NativeProfile::kDrawState);
         // Textures first (a decode may wait for the GPU, which recycles the rings).
@@ -2086,7 +2134,7 @@ struct NativeRenderer::Impl
             }
         }
         lap.To(NativeProfile::kDrawTextures);
-        if (constUsed >= kMaxDraws || indexUsed + ibytes > kIndexRingBytes || descSets.size() >= kMaxSets)
+        if (constUsed + 1 >= kMaxDraws || indexUsed + ibytes > kIndexRingBytes || descSets.size() >= kMaxSets)
         {
             SubmitAndWait(NativeProfile::kWaitRing);
             if (!BeginRenderingBound()) return;
@@ -2128,15 +2176,22 @@ struct NativeRenderer::Impl
                 i = j;
             }
         };
-        if (motionOn && vsBase < 512)
+        // hc09: temporal upscaling: an opaque 3D draw into the scene drawn smaller writes its motion, from its vertex
+        // constants of the frame before (the same draw's, as the smooth-motion matcher finds it) in the next slot.
+        const bool motionDraw = motionBound && zEnable && zWrite && colorOn && !rect && psCode;
+        const bool wantPrev = motionDraw && vsBase < 512 && Perspective(vsBase, vsSize, vs->meta);
+        uint32_t prevOfs = 0;
+        if ((motionOn || wantPrev) && vsBase < 512)
         {
+            if (!motionOn && motionFrame != frame) { motion.BeginFrame(frame, frame, 1.0f); motionFrame = frame; }
             // The VS window blended between simulation ticks (vk_motion.h), then the constants the shader reads.
             const uint32_t size = std::min(vsSize, 512 - vsBase);
             float* w = motionScratch.data();
             xenos::RegRange(reg::ALU_CONSTANTS + vsBase * 4, size * 4, reinterpret_cast<uint32_t*>(w));
             // The draw's kind (its shaders and index range); draws of a kind are told apart by their constants.
             const uint64_t key = vsHash ^ (psHash * 0x100000001B3ull) ^ (uint64_t(d.dmaBase) << 20) ^ (uint64_t(d.numIndices) << 44);
-            motion.Process(key, w, size, d.numIndices);
+            DrawConsts& P = *reinterpret_cast<DrawConsts*>(static_cast<uint8_t*>(consts.mapped) + constBase + (constUsed + 1) * constStride);
+            if (motion.Process(key, w, size, d.numIndices, wantPrev ? reinterpret_cast<float*>(P.c[vsBase]) : nullptr)) prevOfs = 1;
             if (!trimConsts || vs->meta.constRelative)
                 std::memcpy(C.c[vsBase], w, size_t(size) * 16);
             else
@@ -2191,10 +2246,21 @@ struct NativeRenderer::Impl
                 for (Target* t : { bt[0], bt[1], bt[2], bt[3], bd })
                     if (t) t->wide = true;
         }
-        C.winOfs[0] = 0.0f; C.winOfs[1] = 0.0f; C.winOfs[2] = half; C.winOfs[3] = 0.0f;   // native: no window offset (no tiles)
+        C.winOfs[0] = 0.0f; C.winOfs[1] = 0.0f; C.winOfs[2] = half;   // native: no window offset (no tiles)
+        std::memcpy(&C.winOfs[3], &prevOfs, 4);   // hc09: temporal upscaling: the constants of the frame before
         // At scale s the window position is s times the guest's (the viewport stays (-K, -K, 2K, 2K)).
-        C.rtSize[0] = C.rtSize[1] = kClipScale / float(scale); C.rtSize[2] = C.rtSize[3] = float(scale) / kClipScale;
-        C.fragScale = 1.0f / float(scale);
+        const float ds = BoundScale();
+        // hc09: temporal upscaling: the 3D scene drawn smaller moves by this frame's jitter (in its pixels).
+        if (bt[0] ? bt[0]->reduced : bd && bd->reduced)
+        {
+            float jx, jy;
+            SceneJitter(jx, jy);
+            C.winOfs[0] = jx / ds;
+            C.winOfs[1] = jy / ds;
+            if (zEnable && zWrite && colorOn && Perspective(vsBase, vsSize, vs->meta)) VoteSceneCamera(vsBase, half);
+        }
+        C.rtSize[0] = C.rtSize[1] = kClipScale / ds; C.rtSize[2] = C.rtSize[3] = ds / kClipScale;
+        C.fragScale = 1.0f / ds;
         C.vte = ((vte >> 8) & 1) | (((vte >> 9) & 1) << 1) | (((vte >> 10) & 1) << 2);
         uint32_t pc = Reg(reg::SQ_PROGRAM_CNTL);
         C.interpCount = std::min(16u, Bits(pc, 20, 4) + 1);
@@ -2337,28 +2403,31 @@ struct NativeRenderer::Impl
         // hc09: smoother player models. HC09_TESS_AB=1 (dev): on odd frames only (two screenshots in a row compare).
         static const bool tessAb = Hc09Env("HC09_TESS_AB") != nullptr;
         const ShaderEntry* tess = vs->tessEval && !rect && !(tessAb && frame % 2 == 0) ? vs : nullptr;
+        const bool motionWrite = motionDraw && !tess && ps;
         PipeKey key = { vsHash, ps ? psHash : 0, uint64_t(rect) | (uint64_t(cull) << 8) | (uint64_t(frontFace) << 16) | (uint64_t(tess != nullptr) << 40) |
                                                      (uint64_t(hasDepth) << 24) | (uint64_t(zOn) << 25) | (uint64_t(sOn) << 26) |
-                                                     (uint64_t(boundSamples) << 32),
+                                                     (uint64_t(boundSamples) << 32) | (uint64_t(motionBound) << 41) | (uint64_t(motionWrite) << 42),
                         texKinds, dsKey };
         for (int i = 0; i < 4; ++i) key[5 + i] = uint64_t(colorFmt[i]) | (uint64_t(writeMask[i]) << 32) | (uint64_t(writeMask[i] ? blend[i] : 0) << 36);
         VkPipeline pipe = lastPipe && key == lastPipeKey ? lastPipe
                         : Pipeline(key, vs->module, ps ? ps->module : nullPs, rect, cull, frontFace, texKinds, colorFmt, writeMask, blend,
-                                   hasDepth, dc, zOn, sOn, tess);
+                                   hasDepth, dc, zOn, sOn, tess, motionBound, motionWrite);
         if (pipe && pipe != lastPipe) { lastPipe = pipe; lastPipeKey = key; }
         if (!pipe) { Skip("pipeline creation failed"); return; }
         lap.To(NativeProfile::kDrawPipeline);
 
         // Scissor: the window scissor (guest pixels, times the scale), clamped to the render area (no window offset natively).
         uint32_t tl = Reg(reg::PA_SC_WINDOW_SCISSOR_TL), br = Reg(reg::PA_SC_WINDOW_SCISSOR_BR);
-        int32_t sc = int32_t(scale);
-        int32_t scx0 = std::max(0, int32_t(Bits(tl, 0, 14)) * sc), scy0 = std::max(0, int32_t(Bits(tl, 16, 14)) * sc);
-        int32_t scx1 = std::min<int32_t>(int32_t(Bits(br, 0, 14)) * sc, int32_t(areaW)), scy1 = std::min<int32_t>(int32_t(Bits(br, 16, 14)) * sc, int32_t(areaH));
+        const float sc = BoundScale();
+        int32_t scx0 = std::max(0, int32_t(std::floor(Bits(tl, 0, 14) * sc))), scy0 = std::max(0, int32_t(std::floor(Bits(tl, 16, 14) * sc)));
+        int32_t scx1 = std::min<int32_t>(int32_t(std::ceil(Bits(br, 0, 14) * sc)), int32_t(areaW)),
+                scy1 = std::min<int32_t>(int32_t(std::ceil(Bits(br, 16, 14) * sc)), int32_t(areaH));
         if (squeezed)   // the scissor's sides inside the screen move with the draw (widescreen.h)
         {
-            const float mid = 0.5f * float(bound[0].width * scale);
+            const float boundW = float(bound[0].width) * sc;
+            const float mid = 0.5f * boundW;
             if (scx0 > 0) scx0 = int32_t(std::floor(mid + (float(scx0) - mid) * squeeze));
-            if (scx1 < int32_t(bound[0].width * scale)) scx1 = int32_t(std::ceil(mid + (float(scx1) - mid) * squeeze));
+            if (scx1 < int32_t(boundW)) scx1 = int32_t(std::ceil(mid + (float(scx1) - mid) * squeeze));
         }
         if (scx1 <= scx0 || scy1 <= scy0) { Skip("empty scissor"); return; }
         // HC09_NATIVE_TRACE_PASSES with HC09_NATIVE_TRACE_DRAWS=1: each draw on a screen-sized single-sampled target (dev).
@@ -2434,7 +2503,7 @@ struct NativeRenderer::Impl
             sl.tsDraw.push_back(int32_t(sl.drawInfo.size()));
             sl.drawInfo.push_back({ vsHash, ps ? psHash : 0, uint64_t(areaW) << 32 | areaH, uint64_t(boundSamples) << 32 | triIndices });
         }
-        ++constUsed;
+        constUsed += 1 + prevOfs;
         ++stats->draws;
         lap.To(NativeProfile::kDrawRecord);
     }
@@ -2459,7 +2528,7 @@ struct NativeRenderer::Impl
         camera.depthB *= zs;
         camera.sx *= squeeze;   // widescreen: the 3D draws' clip x is squeezed (widescreen.h)
         camera.cx *= squeeze;
-        float s = float(scale);
+        float s = BoundScale();
         sceneView.camera = camera;
         sceneView.x = (xo - xs) * s;
         sceneView.y = (yo + ys) * s;
@@ -2481,6 +2550,283 @@ struct NativeRenderer::Impl
                       [this](VkDescriptorSetLayout layout) { return ComputeSet(layout); }, garbage);
         if (float rect[4]; effects.HdrGain(rect)) gainFrame = frame;
         sceneView = {};
+    }
+
+    // hc09: temporal upscaling: the camera of the 3D scene drawn smaller. Its draws' matrices c156..c159 (the
+    // view-projection, or an object's world-view-projection; gpu/scene_camera.h) with the viewport; the one most
+    // draws use is the camera's (the stadium and field are drawn without a world transform).
+    struct FsrCamera
+    {
+        float m[16];
+        float vp[7];   // x scale, x offset, y scale, y offset, z scale, z offset, the half-pixel offset
+        uint32_t votes;
+    };
+    std::vector<FsrCamera> fsrVotes;
+    uint64_t fsrVotesFrame = ~0ull;
+    FsrCamera fsrPrev{};
+    uint64_t fsrPrevFrame = ~0ull;
+    Image fsrMotion;
+    std::chrono::steady_clock::time_point fsrLast{};
+    void VoteSceneCamera(uint32_t vsBase, float half)
+    {
+        if (fsrVotesFrame != frame) { fsrVotes.clear(); fsrVotesFrame = frame; }
+        FsrCamera c{};
+        for (uint32_t i = 0; i < 16; ++i) c.m[i] = AsF(Reg(reg::ALU_CONSTANTS + (vsBase + 156) * 4 + i));
+        const uint32_t vte = Reg(reg::PA_CL_VTE_CNTL);
+        c.vp[0] = (vte & 1) ? AsF(Reg(reg::PA_CL_VPORT_XSCALE)) : 1.0f;
+        c.vp[1] = (vte & 2) ? AsF(Reg(reg::PA_CL_VPORT_XOFFSET)) : 0.0f;
+        c.vp[2] = (vte & 4) ? AsF(Reg(reg::PA_CL_VPORT_YSCALE)) : 1.0f;
+        c.vp[3] = (vte & 8) ? AsF(Reg(reg::PA_CL_VPORT_YOFFSET)) : 0.0f;
+        c.vp[4] = (vte & 16) ? AsF(Reg(reg::PA_CL_VPORT_ZSCALE)) : 1.0f;
+        c.vp[5] = (vte & 32) ? AsF(Reg(reg::PA_CL_VPORT_ZOFFSET)) : 0.0f;
+        c.vp[6] = half;
+        if (c.vp[0] == 0.0f || c.vp[2] == 0.0f || c.vp[4] == 0.0f) return;
+        for (FsrCamera& v : fsrVotes)
+            if (!std::memcmp(v.m, c.m, sizeof(c.m)) && !std::memcmp(v.vp, c.vp, sizeof(c.vp))) { ++v.votes; return; }
+        if (fsrVotes.size() < 64) { c.votes = 1; fsrVotes.push_back(c); }
+    }
+    // a = b * c (4x4, column-major: m[column * 4 + row]).
+    static void Mul4(double* a, const double* b, const double* c)
+    {
+        double r[16];
+        for (int col = 0; col < 4; ++col)
+            for (int row = 0; row < 4; ++row)
+            {
+                double x = 0;
+                for (int k = 0; k < 4; ++k) x += b[k * 4 + row] * c[col * 4 + k];
+                r[col * 4 + row] = x;
+            }
+        std::memcpy(a, r, sizeof(r));
+    }
+    static bool Invert4(const double* m, double* out)
+    {
+        double a[4][8];
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c) { a[r][c] = m[c * 4 + r]; a[r][c + 4] = r == c ? 1.0 : 0.0; }
+        for (int c = 0; c < 4; ++c)
+        {
+            int piv = c;
+            for (int r = c + 1; r < 4; ++r)
+                if (std::fabs(a[r][c]) > std::fabs(a[piv][c])) piv = r;
+            if (std::fabs(a[piv][c]) < 1e-30) return false;
+            if (piv != c) for (int k = 0; k < 8; ++k) std::swap(a[c][k], a[piv][k]);
+            const double inv = 1.0 / a[c][c];
+            for (int k = 0; k < 8; ++k) a[c][k] *= inv;
+            for (int r = 0; r < 4; ++r)
+                if (r != c && a[r][c] != 0.0)
+                {
+                    const double f = a[r][c];
+                    for (int k = 0; k < 8; ++k) a[r][k] -= f * a[c][k];
+                }
+        }
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c) out[c * 4 + r] = a[r][c + 4];
+        return true;
+    }
+
+    // The scene drawn smaller upscaled by FSR into sceneFull. Its motion: the opaque 3D draws wrote their own (the
+    // vertex shader run again with the draw's constants of the frame before: players, the ball, the camera); where
+    // none did, each pixel's depth taken back through this frame's camera and forward through the last frame's.
+    // False: not done (the caller stretches it instead).
+    bool FsrScene(Target* src, uint32_t outW, uint32_t outH)
+    {
+        if (!fsr.Ready() || !motionPipe || !sceneDepth || !sceneDepth->reduced || !sceneDepth->depthView) return false;
+        if (fsrVotesFrame != frame || fsrVotes.empty()) return false;
+        const FsrCamera* cur = &fsrVotes[0];
+        for (const FsrCamera& v : fsrVotes)
+            if (v.votes > cur->votes) cur = &v;
+        const uint32_t rw = std::min(src->img.width, uint32_t(std::ceil(float(src->s.width) * src->tscale)));
+        const uint32_t rh = std::min(src->img.height, uint32_t(std::ceil(float(src->s.height) * src->tscale)));
+        if (!EnsureMotion(src->img.width, src->img.height)) return false;
+        // Last frame's camera: the motion's matrix S Mprev Mcur^-1 S^-1 (S: widescreen's squeeze of clip x).
+        bool reset = fsrPrevFrame + 1 != frame;
+        double R[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+        const FsrCamera& prev = reset ? *cur : fsrPrev;
+        if (!reset)
+        {
+            double mc[16], mp[16], inv[16];
+            const double sq = squeeze;
+            for (int i = 0; i < 16; ++i) { mc[i] = cur->m[i]; mp[i] = prev.m[i]; }
+            const double S[16] = { sq, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 }, Si[16] = { 1 / sq, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+            if (Invert4(mc, inv))
+            {
+                Mul4(R, S, mp);
+                Mul4(R, R, inv);
+                Mul4(R, R, Si);
+            }
+            else reset = true;
+        }
+        fsrPrev = *cur;
+        fsrPrevFrame = frame;
+        float jx, jy;
+        SceneJitter(jx, jy);
+        const float ts = src->tscale;
+        struct
+        {
+            float R[16];
+            float vpCur[4], vpPrev[4], z[4], j[4];
+        } pc{};
+        for (int i = 0; i < 16; ++i) pc.R[i] = float(R[i]);
+        for (int i = 0; i < 4; ++i) { pc.vpCur[i] = cur->vp[i]; pc.vpPrev[i] = prev.vp[i]; }
+        pc.z[0] = cur->vp[4]; pc.z[1] = cur->vp[5]; pc.z[2] = cur->vp[6]; pc.z[3] = ts;
+        pc.j[0] = jx / ts; pc.j[1] = jy / ts; pc.j[2] = float(rw); pc.j[3] = float(rh);
+        EndRendering();
+        Begin();
+        VkDescriptorSet set = ComputeSet(motionSetLayout);
+        if (!set) return false;
+        VkDescriptorImageInfo di{ nearest, sceneDepth->depthView, VK_IMAGE_LAYOUT_GENERAL };
+        VkDescriptorImageInfo mi{ VK_NULL_HANDLE, fsrMotion.view, VK_IMAGE_LAYOUT_GENERAL };
+        VkWriteDescriptorSet w[2]{};
+        for (auto& x : w) { x.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; x.dstSet = set; x.descriptorCount = 1; }
+        w[0].dstBinding = 0; w[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[0].pImageInfo = &di;
+        w[1].dstBinding = 1; w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; w[1].pImageInfo = &mi;
+        vkUpdateDescriptorSets(dev->device, 2, w, 0, nullptr);
+        Mark(NativeProfile::kGpuOther);
+        MemoryBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, motionPipe);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, motionPipeLayout, 0, 1, &set, 0, nullptr);
+        vkCmdPushConstants(cb, motionPipeLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cb, (rw + 7) / 8, (rh + 7) / 8, 1);
+        MemoryBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+
+        TemporalUpscaler::Frame f;
+        f.color = &src->img;
+        f.depth = &sceneDepth->img;
+        f.motion = &fsrMotion;
+        f.output = &sceneFull.img;
+        f.renderWidth = rw;
+        f.renderHeight = rh;
+        f.jitterX = jx;
+        f.jitterY = jy;
+        const auto now = std::chrono::steady_clock::now();
+        const float ms = std::chrono::duration<float, std::milli>(now - fsrLast).count();
+        f.frameMs = reset || !(ms > 0.0f) || ms > 100.0f ? 16.7f : ms;
+        fsrLast = now;
+        f.reset = reset;
+        // The camera's depth: w = depthB / (d - depthA) (gpu/scene_camera.h), at d 0 and 1.
+        float m[16];
+        std::memcpy(m, cur->m, sizeof(m));
+        const hc09::gpu::SceneCamera cam = hc09::gpu::CameraFromConstants(m);
+        if (cam.valid)
+        {
+            const float a = cur->vp[5] + cam.depthA * cur->vp[4], b = cam.depthB * cur->vp[4];
+            const float w0 = b / (0.0f - a), w1 = b / (1.0f - a);
+            f.depthInverted = w0 > w1;
+            f.nearZ = std::max(1e-3f, std::min(w0, w1));
+            f.farZ = std::max(f.nearZ * 2.0f, std::max(w0, w1));
+            f.fovY = 2.0f * std::atan(1.0f / std::max(0.05f, cam.sy));
+            static bool logged = false;
+            if (!logged)
+            {
+                logged = true;
+                fprintf(stderr, "[fsr3] scene %ux%u -> %ux%u, depth %s, near %.3g far %.3g, fov %.1f deg, %zu camera matrices\n", rw, rh, outW,
+                        outH, f.depthInverted ? "inverted" : "standard", f.nearZ, f.farZ, f.fovY * 57.2958f, fsrVotes.size());
+            }
+        }
+        MemoryBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        const bool ok = fsr.Dispatch(cb, f);
+        MemoryBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+        ClearMotion();
+        if (!ok) fsrPrevFrame = ~0ull;
+        return ok;
+    }
+    // The motion target: the scene drawn smaller's size; GENERAL, "none known" (32768) where no draw wrote it.
+    bool EnsureMotion(uint32_t w, uint32_t h)
+    {
+        if (fsrMotion.image && fsrMotion.width == w && fsrMotion.height == h) return true;
+        if (fsrMotion.image) garbage.push_back(fsrMotion);
+        fsrMotion = Image{};
+        if (!dev->CreateImage(VK_IMAGE_VIEW_TYPE_2D, w, h, 1, VK_FORMAT_R16G16_SFLOAT,
+                              VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                  VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                              fsrMotion))
+        {
+            Warn("motion image creation failed");
+            motionPipe = VK_NULL_HANDLE;
+            return false;
+        }
+        const bool was = rendering;
+        EndRendering();
+        Begin();
+        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = fsrMotion.image;
+        b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+        ClearMotion();
+        (void)was;
+        return true;
+    }
+    void ClearMotion()
+    {
+        if (!fsrMotion.image) return;
+        EndRendering();
+        Begin();
+        MemoryBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkClearColorValue none{};
+        none.float32[0] = none.float32[1] = 32768.0f;
+        VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        vkCmdClearColorImage(cb, fsrMotion.image, VK_IMAGE_LAYOUT_GENERAL, &none, 1, &range);
+        MemoryBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    }
+
+    // hc09: the 3D scene drawn smaller, brought to the scale for its colour resolve (once a frame): into sceneFull,
+    // a target like it at the scale: by FSR, or else a linear stretch.
+    Target sceneFull;
+    uint64_t sceneFullFrame = ~0ull;
+    Target* UpscaleScene(Target* src)
+    {
+        const uint32_t w = std::max(1u, src->s.width) * scale, h = std::max(1u, src->s.height) * scale;
+        if (sceneFull.img.width != w || sceneFull.img.height != h || sceneFull.img.format != src->img.format)
+        {
+            if (sceneFull.img.image) garbage.push_back(sceneFull.img);
+            sceneFull.img = Image{};
+            if (!dev->CreateImage(VK_IMAGE_VIEW_TYPE_2D, w, h, 1, src->img.format,
+                                  VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                  sceneFull.img))
+            {
+                Warn("scene upscale image creation failed");
+                return nullptr;
+            }
+            EndRendering();
+            Begin();
+            VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+            b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.image = sceneFull.img.image;
+            b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+            sceneFullFrame = ~0ull;
+        }
+        sceneFull.s = src->s;
+        sceneFull.format = src->format;
+        sceneFull.samples = VK_SAMPLE_COUNT_1_BIT;
+        sceneFull.tscale = float(scale);
+        sceneFull.reduced = false;
+        sceneFull.wide = src->wide;
+        sceneFull.lastUsed = frame;
+        if (sceneFullFrame == frame) return &sceneFull;
+        sceneFullFrame = frame;
+        if (FsrScene(src, w, h)) return &sceneFull;
+        EndRendering();
+        Begin();
+        MemoryBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkImageBlit bl{};
+        bl.srcSubresource = bl.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        bl.srcOffsets[1] = { int32_t(std::ceil(float(src->s.width) * src->tscale)), int32_t(std::ceil(float(src->s.height) * src->tscale)), 1 };
+        bl.dstOffsets[1] = { int32_t(w), int32_t(h), 1 };
+        bl.srcOffsets[1].x = std::min<int32_t>(bl.srcOffsets[1].x, int32_t(src->img.width));
+        bl.srcOffsets[1].y = std::min<int32_t>(bl.srcOffsets[1].y, int32_t(src->img.height));
+        vkCmdBlitImage(cb, src->img.image, VK_IMAGE_LAYOUT_GENERAL, sceneFull.img.image, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+        MemoryBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+        ClearMotion();
+        return &sceneFull;
     }
 
     // ---- resolves ----------------------------------------------------------------
@@ -2507,8 +2853,13 @@ struct NativeRenderer::Impl
             replay.Capture(*dev, cb, src->img, src->samples, vx, vy, std::fabs(view.width), std::fabs(view.height), garbage);
         }
         if (crowdOn && crowdAtlas && r.src < 4 && r.copy && r.destBase == crowdAtlas && r.x0 == 0 && r.y0 == 0) CaptureCrowd(src, r);
-        // The rectangle in guest pixels (the source image is `scale` times the surface).
-        int32_t x1 = std::min<int32_t>(r.x1, int32_t(src->img.width / scale)), y1 = std::min<int32_t>(r.y1, int32_t(src->img.height / scale));
+        // hc09: the 3D scene drawn smaller (temporal upscaling): its colour resolve reads it brought to the scale.
+        const bool smallDepth = src->reduced && r.src >= 4;
+        if (src->reduced && r.src < 4 && r.copy)
+            if (Target* full = UpscaleScene(src)) src = full;
+        // The rectangle in guest pixels (the source image is `tscale` times the surface).
+        int32_t x1 = std::min<int32_t>(r.x1, int32_t(float(src->img.width) / src->tscale)),
+                y1 = std::min<int32_t>(r.y1, int32_t(float(src->img.height) / src->tscale));
         if (r.copy && x1 > r.x0 && y1 > r.y0)
         {
             // Resolved 8888 data stays on the GPU (before the descriptor set: Acquire
@@ -2545,6 +2896,7 @@ struct NativeRenderer::Impl
             p.samples = uint32_t(src->samples);
             p.sampleSel = r.sampleSel;
             p.scale = scale;
+            p.srcPerOut = smallDepth ? src->tscale / float(scale) : 1.0f;
             if (sc)
             {
                 p.scaled = 1;
@@ -2595,6 +2947,39 @@ struct NativeRenderer::Impl
         }
     }
 };
+
+// hc09: temporal upscaling: the 3D scene's motion (vk_fsr3.h), from each pixel's depth: the pixel's place without
+// this frame's jitter, taken through R (this frame's camera back, last frame's forward) to where it was a frame ago,
+// in the scene's pixels.
+static std::string SceneMotionShader()
+{
+    return R"GLSL(#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D depthTex;
+layout(binding = 1, rg16f) uniform image2D motion;
+layout(push_constant) uniform Consts { mat4 R; vec4 vpCur; vec4 vpPrev; vec4 z; vec4 j; } P;
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(P.j.z) || p.y >= int(P.j.w)) return;
+    if (imageLoad(motion, p).x < 30000.0) return;   // a draw's own (its vertex shader's)
+    float d = texelFetch(depthTex, p, 0).r;
+    float ts = P.z.w;
+    vec2 g = (vec2(p) + 0.5) / ts - P.j.xy;   // the guest's window position without the jitter
+    vec2 q = vec2((g.x - P.z.z - P.vpCur.y) / P.vpCur.x, (g.y - P.z.z - P.vpCur.w) / P.vpCur.z);
+    vec4 h = P.R * vec4(q, (d - P.z.y) / P.z.x, 1.0);
+    vec2 mv = vec2(0.0);
+    if (h.w > 1e-6)
+    {
+        vec2 qp = h.xy / h.w;
+        vec2 gp = vec2(qp.x * P.vpPrev.x + P.vpPrev.y, qp.y * P.vpPrev.z + P.vpPrev.w) + P.z.z;
+        mv = (gp - g) * ts;
+        if (any(isnan(mv)) || any(greaterThan(abs(mv), vec2(4096.0)))) mv = vec2(0.0);
+    }
+    imageStore(motion, p, vec4(mv, 0.0, 0.0));
+}
+)GLSL";
+}
 
 bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* err, bool exact)
 {
@@ -2828,6 +3213,23 @@ bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* e
     VkSamplerCreateInfo nci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
     vkCreateSampler(d, &nci, nullptr, &I.nearest);
     I.effects.Init(dev);
+    if (const int mode = TemporalUpscaler::Mode())
+    {
+        // The game's 3D scene is 1280 x 736 (times the scale); drawn at 1 / Ratio of that per side.
+        const uint32_t ow = 1280 * I.scale, oh = 736 * I.scale;
+        const float ratio = TemporalUpscaler::Ratio(mode);
+        I.fsr.Create(dev, uint32_t(std::ceil(ow / ratio)), uint32_t(std::ceil(oh / ratio)), ow, oh);
+    }
+    if (I.fsr.Ready())
+    {
+        VkDescriptorSetLayoutBinding mv[2] = { { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+                                               { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr } };
+        if (!computePipe(SceneMotionShader(), "scene_motion_cs", mv, 2, 128, I.motionSetLayout, I.motionPipeLayout, I.motionPipe))
+        {
+            I.motionPipe = VK_NULL_HANDLE;
+            fprintf(stderr, "[fsr3] the motion pass could not be made: the scene is stretched instead\n");
+        }
+    }
     if (const char* e = Hc09Env("HC09_CROWD"); (!e || atoi(e) != 0) && dev.geometryShader) I.crowdOn = true;
     if (const char* e = Hc09Env("HC09_CROWD_MIRROR")) I.crowdMirror = atoi(e) != 0;
     std::vector<std::vector<xenos::Image>> one(1, std::vector<xenos::Image>(1));
@@ -3007,6 +3409,7 @@ void NativeRenderer::Shutdown()
     vkDeviceWaitIdle(d);
     I.effects.Shutdown();
     I.replay.Destroy(*I.dev);
+    I.fsr.Destroy();
     if (I.crowdHistory.img.image) I.dev->DestroyImage(I.crowdHistory.img);
     I.Park(I.slots[I.cur]);
     for (Impl::Slot& sl : I.slots)
@@ -3062,6 +3465,11 @@ void NativeRenderer::Shutdown()
     if (I.depthDecodePipeLayout) vkDestroyPipelineLayout(d, I.depthDecodePipeLayout, nullptr);
     if (I.depthDecodeSetLayout) vkDestroyDescriptorSetLayout(d, I.depthDecodeSetLayout, nullptr);
     if (I.mipPipe) vkDestroyPipeline(d, I.mipPipe, nullptr);
+    if (I.motionPipe) vkDestroyPipeline(d, I.motionPipe, nullptr);
+    if (I.motionPipeLayout) vkDestroyPipelineLayout(d, I.motionPipeLayout, nullptr);
+    if (I.motionSetLayout) vkDestroyDescriptorSetLayout(d, I.motionSetLayout, nullptr);
+    if (I.fsrMotion.image) I.dev->DestroyImage(I.fsrMotion);
+    if (I.sceneFull.img.image) I.dev->DestroyImage(I.sceneFull.img);
     if (I.decodePipeLayout) vkDestroyPipelineLayout(d, I.decodePipeLayout, nullptr);
     if (I.mipPipeLayout) vkDestroyPipelineLayout(d, I.mipPipeLayout, nullptr);
     if (I.decodeSetLayout) vkDestroyDescriptorSetLayout(d, I.decodeSetLayout, nullptr);

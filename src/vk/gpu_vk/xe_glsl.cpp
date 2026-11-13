@@ -254,7 +254,12 @@ vec4 sel4(bvec4 c, vec4 a, vec4 b) { return vec4(c.x ? a.x : b.x, c.y ? a.y : b.
 uint boolBit(uint a) { return (D.bools[(a >> 5) & 7u] >> (a & 31u)) & 1u; }
 
 uint cBase, cSize;
+uint cPrev = 0u;   // hc09: temporal upscaling (below)
 vec4 cnst(int i) { return (i < 0 || uint(i) >= cSize || cBase + uint(i) >= 512u) ? vec4(0.0) : D.c[cBase + uint(i)]; }
+// hc09: temporal upscaling (vk_fsr3.h): the draw's motion. The vertex shader runs a second time with the vertex
+// constants of the frame before (cPrev: how many draws on they are; DrawIndexedConsts), and the pixel shader writes
+// where each pixel was then (attachment 4, the motion target).
+layout(constant_id = 2) const uint kMotion = 0u;
 
 int loopDepth = 0;
 uint loopIter[4];
@@ -1453,6 +1458,7 @@ std::string HostPixelShader(const std::string& body, uint32_t temps, bool fast, 
     g += std::string((relaxed & 2) ? "" : "precise ") + "vec4 r[" + std::to_string(temps) + "];\n";
     g += "layout(location = 0) in vec4 vin[16];\n";
     g += "layout(location = 16) noperspective in float xeZ;   // unused: matches the vertex shader's interface\n";
+    g += "layout(location = 17) in vec3 xeMcur;\nlayout(location = 18) in vec3 xeMprev;\nlayout(location = 4) out vec2 xeMotion;\n";
     for (int i = 0; i < 4; ++i)
         g += ((exportMask >> i) & 1 ? "layout(location = " + std::to_string(i) + ") out vec4 oc" : std::string("vec4 oc")) +
              std::to_string(i) + ";\n";
@@ -1485,6 +1491,10 @@ void main()
     g += R"GLSL(    if (killed) discard;
     if ((D.alpha & 8u) != 0u && !alphaPass(D.alpha & 7u, oc0.w, D.alphaRef)) discard;
     oc0 *= D.rtScale.x; oc1 *= D.rtScale.y; oc2 *= D.rtScale.z; oc3 *= D.rtScale.w;
+    // hc09: where the pixel was a frame before, in the target's pixels (none known: 32768, the depth's instead).
+    if (kMotion != 0u)
+        xeMotion = floatBitsToUint(D.winOfs.w) != 0u && xeMcur.z > 0.0 && xeMprev.z > 0.0
+                       ? (xeMprev.xy / xeMprev.z - xeMcur.xy / xeMcur.z) / D.fragScale : vec2(32768.0);
 }
 )GLSL";
     return g;
@@ -1508,6 +1518,8 @@ std::string DrawIndexedConsts(std::string g)
     g.replace(e, tail.size(), "\n};\nlayout(std430, set = 0, binding = 1) readonly buffer DrawConstsBlock { DrawConstsT dcs[]; };\n"
                               "layout(push_constant) uniform XePush { uint draw; } xePush;\n#define D dcs[xePush.draw]\n");
     g.replace(h, head.size(), "struct DrawConstsT {");
+    const std::string read = ": D.c[cBase + uint(i)]; }";
+    if (size_t r = g.find(read); r != std::string::npos) g.replace(r, read.size(), ": dcs[xePush.draw + cPrev].c[cBase + uint(i)]; }");
     return g;
 }
 
@@ -1532,19 +1544,51 @@ TranslatedShader TranslateShader(const ShaderCode& code, const TranslateOptions&
     g += kVertexFetch;
     g += "layout(location = 0) out vec4 o[16];\n";
     g += "layout(location = 16) noperspective out float xeZ;\n";
+    g += "layout(location = 17) out vec3 xeMcur;\nlayout(location = 18) out vec3 xeMprev;\n";
     g += "out gl_PerVertex { vec4 gl_Position; float gl_ClipDistance[3]; };\n";
     // Host render targets: the hardware depth test (z from gl_Position); EDRAM: the
     // pixel shader's epilogue tests xeZ itself.
     g += opt.hostRt ? "#define XE_HOST_Z (scr.z * cw)\n" : "#define XE_HOST_Z 0.0\n";
     g += kEdramLib;
     g += ExactSampler();
+    // hc09: the position global: temporal upscaling runs the translated program twice (kMotion), inline both times (a
+    // function holding it crashed NVIDIA's pipeline compiler, 616.92).
+    g += "vec4 pos;\n";
+    g += R"GLSL(// hc09: temporal upscaling: a position's place in the window (the game's pixels, without the jitter) times its w,
+// with its w: linear across a triangle, so interpolated as it is and divided in the pixel shader.
+vec3 xeScreenH(vec4 pp)
+{
+    bool xyFmt = (D.vte & 1u) != 0u, w0Fmt = (D.vte & 4u) != 0u;
+    if (D.wideClip != 0.0) pp.x *= D.wideClip;
+    float invW = w0Fmt ? (pp.w != 0.0 ? 1.0 / pp.w : 1.0) : pp.w;
+    vec2 q = xyFmt ? pp.xy : pp.xy * invW;
+    vec2 s = q * D.vpScale.xy + D.vpOffset.xy + D.winOfs.z;
+    float cw = invW != 0.0 ? 1.0 / invW : 1.0;
+    return vec3(s * cw, cw);
+}
+)GLSL";
+    const std::string clearR = "    for (int k = 0; k < " + std::to_string(temps) + "; ++k) r[k] = vec4(0.0);\n";
     g += "void main()\n{\n";
     g += "    cBase = D.vsBase; cSize = D.vsSize;\n";
-    g += "    for (int k = 0; k < " + std::to_string(temps) + "; ++k) r[k] = vec4(0.0);\n";
+    g += clearR;
     g += "    for (int k = 0; k < 16; ++k) o[k] = vec4(0.0);\n";
-    g += "    vec4 pos = vec4(0.0, 0.0, 0.0, 1.0);\n";
+    g += "    pos = vec4(0.0, 0.0, 0.0, 1.0);\n";
     g += "    r[0].x = float(gl_VertexIndex);\n";
     g += e.body;
+    g += "    xeMcur = vec3(0.0); xeMprev = vec3(0.0);\n";
+    g += "    if (kMotion != 0u)\n    {\n";
+    g += "        vec4 posNow = pos, posPrev = pos;\n";
+    g += "        uint prevOfs = floatBitsToUint(D.winOfs.w);\n";
+    g += "        if (prevOfs != 0u)\n        {\n";
+    g += "            vec4 oNow[16];\n            for (int k = 0; k < 16; ++k) oNow[k] = o[k];\n";
+    g += "    " + clearR;
+    g += "            pos = vec4(0.0, 0.0, 0.0, 1.0);\n            r[0].x = float(gl_VertexIndex);\n";
+    g += "            loopDepth = 0; p = false; a0 = 0; ps = 0.0; xeRegLod = 0.0; xeGradH = vec3(0.0); xeGradV = vec3(0.0);\n";
+    g += "            cPrev = prevOfs;\n            {\n" + e.body + "            }\n            cPrev = 0u;\n";
+    g += "            posPrev = pos;\n            for (int k = 0; k < 16; ++k) o[k] = oNow[k];\n            pos = posNow;\n";
+    g += "        }\n";
+    g += "        xeMcur = xeScreenH(posNow);\n        xeMprev = xeScreenH(posPrev);\n";
+    g += "    }\n";
     g += R"GLSL(    // Xenos viewport transform (PA_CL_VTE_CNTL) in the software rasterizer's
     // order of operations; the viewport maps clip space 1:1 to pixels
     // (x_window = x_ndc * K, K = 1 / rtSize.z), so no rounding is added.
@@ -1765,6 +1809,7 @@ layout(push_constant) uniform NativeResolveConsts {
     uint destBytes, endian, swapRB; float destScale;
     uint samples, sampleSel, scale, scaledRows;
     uint scaled, scaledPitch; int destX, destY;
+    float srcPerOut;
 } R;
 layout(std430, set = 0, binding = 3) buffer ScaledCopy { uint smem[]; };
 )GLSL";
@@ -1829,11 +1874,13 @@ void main()
             for (uint i = 0u; i < S; ++i)
             {
                 ivec2 q = ivec2(x * S + i, y * S + j);
-                float dq = texelFetch(srcDepth, q, 0).r;
-                uint sq = texelFetch(srcStencil, q, 0).r;
+                ivec2 qs = R.srcPerOut == 1.0 ? q : ivec2((vec2(q) + 0.5) * R.srcPerOut);
+                float dq = texelFetch(srcDepth, qs, 0).r;
+                uint sq = texelFetch(srcStencil, qs, 0).r;
                 writeScaled(uint(q.x), uint(q.y), swapWord((uint(clamp(dq, 0.0, 1.0) * 16777215.0 + 0.5) << 8) | (sq & 0xFFu), R.endian, 4u));
             }
     ivec2 p = ivec2(x * S + S / 2u, y * S + S / 2u);   // the block's centre
+    if (R.srcPerOut != 1.0) p = ivec2((vec2(x * S, y * S) + 0.5 * float(S)) * R.srcPerOut);
     float d = texelFetch(srcDepth, p, 0).r;   // MS: sample 0, as the EDRAM copy
     uint s = texelFetch(srcStencil, p, 0).r;
     v.x = (uint(clamp(d, 0.0, 1.0) * 16777215.0 + 0.5) << 8) | (s & 0xFFu);
@@ -1897,6 +1944,8 @@ layout(location = 0) in vec4 gi[][16];
 layout(location = 16) noperspective in float giz[];
 layout(location = 0) out vec4 go[16];
 layout(location = 16) noperspective out float goz;
+layout(location = 17) out vec3 goMcur;   // hc09: temporal upscaling's motion (none for rectangles)
+layout(location = 18) out vec3 goMprev;
 in gl_PerVertex { vec4 gl_Position; float gl_ClipDistance[3]; } gl_in[];
 out gl_PerVertex { vec4 gl_Position; };
 layout(std430, set = 0, binding = 1) readonly buffer DrawConstsBlock {
@@ -1908,6 +1957,7 @@ void Emit(vec4 pos, int src)
     gl_Position = pos;
     for (int k = 0; k < 16; ++k) go[k] = gi[src][k];
     goz = giz[src];
+    goMcur = vec3(0.0); goMprev = vec3(0.0);
     EmitVertex();
 }
 void main()

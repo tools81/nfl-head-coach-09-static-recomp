@@ -88,6 +88,11 @@ keeps and arranged in its career database's tables.
   [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) models (BSD 3-clause) into `thirdparty/realesrgan`
   on the player's PC, checked against a pinned SHA-256.
 
+- For temporal upscaling (`TemporalUpscaling`), downloaded into `thirdparty/fidelityfx` when the project is
+  configured and copied beside the game: the [FidelityFX SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK)
+  v1.1.4's ffx-api headers and its prebuilt, signed `amd_fidelityfx_vk.dll` (FSR 3.1), checked against a pinned
+  SHA-256. MIT; Copyright (C) 2024 Advanced Micro Devices, Inc. (its `LICENSE.txt` is downloaded with it).
+
 - [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) — MIT; modified by `patches/xenonrecomp.patch`.
 - [FFmpeg](https://ffmpeg.org) — LGPL 2.1+ shared build, dynamically linked.
 - For the Vulkan renderer, downloaded into `thirdparty/vulkan` when the project is configured:
