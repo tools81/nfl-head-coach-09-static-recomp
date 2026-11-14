@@ -283,6 +283,40 @@ Redskins are the Commanders): the game names a team's uniforms, helmets and care
 its name in the roster and finds them by a hash of that name, so HC27 hashes the old name for
 them (`kRenamedTeams` in `src/common/edition.cpp`).
 
+### Roster editor (HC09RosterEditor.exe)
+
+`build\roster_editor\HC09RosterEditor.exe` (Start menu: NFL Head Coach 09 Roster Editor) edits rosters without
+any scripts. It opens HC27's default roster (`hc27\ROSTER`) or any roster saved from the game (**My Coach > File
+Management > Save**; **File > Open a saved roster**). Pick a team to list its coaches and players, and pick one
+to see his portrait and everything the roster holds about him. Double-click a value, or press Enter, to change it.
+
+- **Players:** name, position, number, age, height and weight, college, every rating and its potential, the 3D
+  appearance (skin tone, head, hair, equipment, build) and the contract.
+- **Coaches:** name, job, offensive and defensive playbooks, base defense and tendencies, skills and the skills
+  at developing each position group, ratings, 3D appearance (**Person > Coach appearance preset** gives him one
+  of the game's create-a-coach looks) and career record.
+- **Pictures:** **Change picture** takes any image file and saves it, cropped square from the top, as that
+  person's portrait in `textures\swappables` (`hc27\textures\swappables` for HC27). A person who shared a
+  portrait with others gets a portrait number of his own, so save the roster afterwards.
+- **3D head:** beside the portrait, the editor shows the head the person has in 3D, from the game's own
+  images: for a coach, the game's picture of the create-a-coach appearance with that head (the appearance
+  preset list shows each one as you go through it); for a player, the face texture of his head. It changes as
+  you pick another head. Equipment and build are not pictured.
+- **Moves:** **Move to a team** and **Release to free agents** move a player. A free agent who joins a team
+  signs for one season at the league's lowest salary; a player moved between teams keeps his contract. Both
+  teams' depth charts are rebuilt by overall rating and the team ratings are worked out again.
+- **Draft picks** (**Team > Draft picks**, HC27 only): give any pick of the next three drafts to another team,
+  as if traded. The picks are not in the roster: they are what every new HC27 career starts with, and are saved
+  to `hc27\disc` and `hc27\draft_picks.txt`.
+- **Special skills** (HC27 only): a coach's special skills are listed with his other values; double-click one to
+  give or take it. They too apply to careers started afterwards. The game holds a fixed number of them over all
+  coaches, so one must be taken before another can be given.
+
+Saving keeps the roster as it was in `<name>.bak` the first time. Careers already in progress are not changed:
+a career copies the roster when it starts. Names of playbooks, colleges and heads, draft picks and special
+skills are read from your disc image (`IsoPath` in `hc09.ini`), as are the game's own portraits and heads;
+without it the editor shows numbers and only the pictures that replace portraits.
+
 ## Fixes to the original game
 
 - **Injured players heal after Play Creator again.** In the original game, opening Play Creator

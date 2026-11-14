@@ -193,8 +193,12 @@ the game's default: everything it needs goes in the `hc27` folder of the install
 
 - `roster_moves.py` brings a roster up to date with the league's transactions (trades, waiver claims,
   signings, releases) from NFL.com's transaction pages, saved as a CSV: each player goes to the team
-  of his latest transaction, and depth charts and team ratings are rebuilt. Players the roster does
-  not have (practice squad and undrafted players missing from the ratings) cannot be added. The
+  of his latest transaction, and depth charts and team ratings are rebuilt. `fetch_transactions.py
+  --months 2026/10 2026/11` downloads those pages into `data/transactions_2026.csv`. A free agent of
+  the roster's pool whom a team signs to its active roster joins it on a one-year minimum deal, and
+  a released player loses his contract. Players the roster does not have (practice squad and
+  undrafted players missing from the ratings) cannot be added, so a team keeps its only kicker or
+  punter when it releases him for one of those. The
   week 8 2026 roster was made with
 
   ```sh
@@ -202,7 +206,8 @@ the game's default: everything it needs goes in the `hc27` folder of the install
       --since 2026/08/01 --out tools/roster_import/data/ROSTER-M27_week8 --report tools/roster_import/data/moves_week8.csv
   ```
 
-  and is `hc27/ROSTER`, with its depth charts rebuilt and `draft_rounds.py` applied. The tools
+  and is `hc27/ROSTER`, with its depth charts rebuilt and `draft_rounds.py` applied. It was brought
+  up to the trade deadline (week 10) by running the script on itself with `--since 2026/10/01`. The tools
   build depth charts no deeper than the game allows at each position (`POSITION_DEPTH` in
   `import_roster.py`, 91 entries a team); a deeper chart makes the game hang at the kickoff.
 - `career_picks.py` gives new careers the real owners of the 2027 and 2028 draft picks (the trades

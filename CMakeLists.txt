@@ -1,11 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
-project(HC09Recomp VERSION 1.4.0 LANGUAGES C CXX)
+project(HC09Recomp VERSION 1.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # The installer wizard (HC09Setup.exe) contains no game code and builds without ppc/.
 add_subdirectory(tools/installer)
+# The roster editor (HC09RosterEditor.exe) likewise.
+add_subdirectory(tools/roster_editor)
 
 # Recompiled PowerPC code, generated into ppc/ by XenonRecomp (never committed).
 file(GLOB HC09_PPC_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/ppc/*.cpp)

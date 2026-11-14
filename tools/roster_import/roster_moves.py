@@ -9,9 +9,13 @@ transaction after --since decides where he is now:
     released or waived (and not since)    a free agent
 
 A player is found in the roster by name: on the team he left when the transaction names it, else
-by name alone when only one rostered player has it. Players not in the roster (signed from outside
-the league, or not in the ratings the roster was built from) are listed but cannot be added: the
-roster has no ratings for them. Depth charts and team ratings are rebuilt for every team that changed.
+by name alone when only one rostered player has it. A free agent of the roster's pool joins a team
+when it signs him to its active roster (not to its practice squad: the pool holds those players),
+on a year's league minimum for his experience; a released player loses his contract. Players not in
+the roster (signed from outside the league, or not in the ratings the roster was built from) are
+listed but cannot be added: the roster has no ratings for them. Depth charts and team ratings are
+rebuilt for every team that changed. A team's only kicker or punter stays when it releases him for
+one the roster does not have.
 
     python tools/roster_import/roster_moves.py --roster hc27/ROSTER --transactions tx.csv \\
         --since 2026/09/08 --out tools/roster_import/data/ROSTER-M27_week8 --report moves.csv
@@ -24,7 +28,8 @@ import sys
 import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from import_roster import FREE_AGENTS, build_depth_charts, rate_teams  # noqa: E402
+from import_roster import CONTRACT_FIELDS, FREE_AGENTS, build_depth_charts, rate_teams, write_contract  # noqa: E402
+from league_salaries import minimum_salary  # noqa: E402
 from tdb import SaveFile  # noqa: E402
 
 TEAM_SLUGS = {
@@ -80,7 +85,7 @@ def main():
 
     by_name = {}
     for i in range(play.count):
-        if 1 <= play.get(i, "TGID") <= 32:
+        if 1 <= play.get(i, "TGID") <= 32 or play.get(i, "TGID") == FREE_AGENTS:
             by_name.setdefault(name_key(f"{play.get(i, 'PFNA')} {play.get(i, 'PLNA')}"), []).append(i)
 
     rows = [r for r in csv.DictReader(open(args.transactions, encoding="utf-8")) if r["date"] >= args.since]
@@ -115,6 +120,9 @@ def main():
             chosen = [i for i in candidates if team[i] == frm]
         else:
             chosen = [i for i in candidates if team[i] in (FREE_AGENTS, where) or practice.get(i)]
+        pooled = len(chosen) == 1 and play.get(chosen[0], "TGID") == FREE_AGENTS and team[chosen[0]] == FREE_AGENTS
+        if pooled and "practice squad" in row["text"].lower():
+            continue  # a pool free agent on a practice squad stays in the pool
         if len(chosen) != 1:
             if not by_name.get(name_key(row["name"])) and where != FREE_AGENTS:
                 missing.setdefault(row["name"], (row, 0))
@@ -129,13 +137,36 @@ def main():
 
     changes = []
     touched = set()
+    kept = []
     for i, (row, where) in latest.items():
         before = play.get(i, "TGID")
         if where == before:
             continue
+        position = play.get(i, "PPOS")
+        if where == FREE_AGENTS and position in (19, 20) and not any(
+                j != i and play.get(j, "PPOS") == position and latest.get(j, (None, play.get(j, "TGID")))[1] == before
+                for j in range(play.count)):
+            # His replacement is not in the roster: the team keeps its only kicker or punter.
+            kept.append((play.get(i, "PFNA"), play.get(i, "PLNA"), names.get(before), row["date"]))
+            continue
         changes.append((play.get(i, "PFNA"), play.get(i, "PLNA"), names.get(before), names.get(where), row["date"], row["text"]))
         play.set(i, "TGID", where)
+        play.set(i, "PPTI", before)
+        play.set(i, "PYWT", 0)
         touched |= {before, where}
+        if where == FREE_AGENTS:
+            for field in CONTRACT_FIELDS:
+                play.set(i, field, 0)
+            continue
+        if not play.get(i, "PCON") or not play.get(i, "PCYL"):
+            write_contract(play, i, {"length": 1, "years": [(minimum_salary(play.get(i, "PYRP")), 0)]})
+        # A number no new teammate wears: his own if free, else the nearest.
+        worn = {play.get(j, "PJEN") for j in range(play.count) if j != i and play.get(j, "TGID") == where}
+        number = play.get(i, "PJEN")
+        for candidate in sorted(range(1, 100), key=lambda n: abs(n - number)):
+            if candidate not in worn:
+                play.set(i, "PJEN", candidate)
+                break
 
     records_by_team = {}
     for i in range(play.count):
@@ -150,6 +181,8 @@ def main():
     moved = sum(1 for c in changes if c[3] != "Free Agents")
     print(f"{moved} players moved to new teams, {len(changes) - moved} released, "
           f"{len(missing)} signed players not in the roster, {len(conflicts)} signings of a namesake on another team skipped")
+    for first, last, before, date in kept:
+        print(f"  kept: {first} {last}, released by the {before} on {date}, whose replacement the roster does not have")
     for row, where in conflicts:
         print(f"  skipped: {row['date']} {row['name']} {row['text']} -> {row['to']} (roster has him on {', '.join(where)})")
     for first, last, before, after, date, text in sorted(changes, key=lambda c: c[4]):

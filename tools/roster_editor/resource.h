@@ -1,0 +1,37 @@
+#pragma once
+
+#define IDR_MENU 100
+#define IDD_MOVE 101
+#define IDD_PICKS 102
+#define IDD_PRESET 103
+
+#define IDM_OPEN_DEFAULT 200
+#define IDM_OPEN 201
+#define IDM_SAVE 202
+#define IDM_EXIT 203
+#define IDM_PICTURE 210
+#define IDM_PICTURE_REMOVE 211
+#define IDM_MOVE 212
+#define IDM_RELEASE 213
+#define IDM_DEPTH 220
+#define IDM_PICKS 221
+#define IDM_PRESET 222
+
+#define IDC_TEAM 300
+#define IDC_PEOPLE 301
+#define IDC_GRID 302
+#define IDC_PORTRAIT 303
+#define IDC_NAME 304
+#define IDC_STATUS 305
+#define IDC_INFO 306
+#define IDC_LOOK 307
+#define IDC_LOOK_LABEL 308
+
+#define IDC_MOVE_TEAM 400
+#define IDC_MOVE_TEXT 401
+#define IDC_MOVE_PREVIEW 402
+#define IDC_PICKS_DRAFT 410
+#define IDC_PICKS_LIST 411
+#define IDC_PICKS_OWNER 412
+#define IDC_PICKS_GIVE 413
+#define IDC_PICKS_NOTE 414

@@ -521,11 +521,19 @@ namespace hc09::setup
         if (!SaveSettings(options_.root, settings))
             return Fail(L"Cannot write " + SettingsPath(options_.root).wstring());
         Log(L"Saved " + SettingsPath(options_.root).wstring() + (settings.autoUpdate ? L" (automatic update checks on)" : L""));
-        if (options_.update)
-            return true;
-
         // The pipeline runs on a worker thread: the shell link object needs COM on this thread.
         const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        // The roster editor (tools/roster_editor), also for installs made before it existed.
+        const std::filesystem::path editor = options_.root / L"build\\roster_editor\\HC09RosterEditor.exe";
+        if (std::filesystem::exists(editor))
+            CreateShortcut(KnownFolder(FOLDERID_Programs) / L"NFL Head Coach 09 Roster Editor.lnk", editor, options_.root,
+                L"Edits NFL Head Coach 09 rosters");
+        if (options_.update)
+        {
+            if (SUCCEEDED(com))
+                CoUninitialize();
+            return true;
+        }
         const std::filesystem::path game = options_.root / L"build\\hc09\\HC09.exe";
         const wchar_t name[] = L"NFL Head Coach 09 (Recompiled).lnk";
         const wchar_t description[] = L"NFL Head Coach 09 static recompilation";
