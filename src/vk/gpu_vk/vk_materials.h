@@ -8,6 +8,12 @@ namespace hc09vk {
 
 // The field's pixel shader (the turf).
 constexpr uint64_t kTurfPs = 0x076698e96199da36ull;
+// The field as night games draw it during play: the same shader less one texture (the same constants).
+constexpr uint64_t kTurfNightPs = 0xcf6a1cd735fb0fdcull;
+constexpr uint64_t kHelmetPs = 0xe263d5063e531450ull;   // the helmets' shells
+// The game's own shadows of players, coaches and officials: their models drawn dark into a 640x360 target (cleared
+// white, then blurred), which the field's shader reads.
+constexpr uint64_t kPlayerShadowPs = 0x5c2d30a29ad4dff3ull;
 
 // Adds our shading to the translated pixel shader `glsl` with that hash, if it is one we know. Returns whether it
 // did. HC09_SHADER_TINT=<hash>[,<hash>...] (dev): those shaders' draws in solid colours, in that order red, green,

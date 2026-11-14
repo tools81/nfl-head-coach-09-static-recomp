@@ -195,9 +195,22 @@ vec3 hcSkin(vec3 c, vec3 toEye, float strength)
     vec3 col = c * vec3(1.02, 0.995, 0.98) + tone * sun * (scatter + behind * vec3(1.0, 0.3, 0.15));
     return mix(c, col, strength);
 }
+
+// The coaches' skin, seen in close-up: the wrapped light only, and less of it (their shader's interpolator is not
+// the direction to the camera all over the face, so the glow from behind broke into the model's triangles, and
+// the players' amount tinted a shaded face orange).
+vec3 hcCoachSkin(vec3 c, vec3 toEye, float strength)
+{
+    vec3 n = hcNormal(), l = hcSunDir();
+    float nl = dot(n, l);
+    vec3 tone = c / (max(max(c.r, c.g), c.b) + 1e-3) * clamp(hcLum(c) * 1.8 + 0.2, 0.25, 0.8);
+    float wrap = clamp((nl + 0.45) / 1.45, 0.0, 1.0) - clamp(nl, 0.0, 1.0);
+    vec3 col = c * vec3(1.02, 0.995, 0.98) + tone * hcSunColour() * vec3(1.0, 0.38, 0.22) * wrap * 0.12;
+    return mix(c, col, strength);
+}
 )GLSL";
 
-enum class Material { Fabric, ClearCoat, Skin };
+enum class Material { Fabric, ClearCoat, Skin, CoachSkin };
 struct PlayerShader
 {
     uint64_t hash;
@@ -214,7 +227,7 @@ constexpr PlayerShader kPlayerShaders[] = {
     // The coaches.
     { 0x146fcacb58c42f1dull, Material::Fabric, 48, 6 },       // shirt and cap
     { 0x164849505f6b7b32ull, Material::Fabric, 55, 5 },       // clothes
-    { 0x50557abc53c1c6b8ull, Material::Skin, 81, 3 },         // skin
+    { 0x50557abc53c1c6b8ull, Material::CoachSkin, 81, 3 },    // skin
 };
 
 // Before instruction `at`, the vector it dots with c204 into hcN, in c204's (the world's) axes: the instruction's
@@ -269,7 +282,7 @@ bool PlayerPatch(uint64_t hash, std::string& glsl)
         return false;
     }
     patched.insert(patched.find("void main()"), std::string("// hc09: the players (vk_materials.cpp).") + kNoise + kPlayers + "\n");
-    static const char* const kCalls[] = { "hcFabric", "hcClearCoat", "hcSkin" };
+    static const char* const kCalls[] = { "hcFabric", "hcClearCoat", "hcSkin", "hcCoachSkin" };
     char call[160];
     snprintf(call, sizeof(call), "    oc0.rgb = %s(oc0.rgb, vin[%d].xyz, %.3f%s);\n", kCalls[int(shader->material)], shader->view, strength,
              kPlayersAb ? " * step(0.5, fract(gl_FragCoord.x / 48.0))" : "");

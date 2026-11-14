@@ -65,6 +65,15 @@ layout(push_constant) uniform Effects { vec4 r0, r1, r2, r3, r4, r5, r6, r7; } E
 #define gradeStrength E.r7.y
 #define depthOfFieldStrength E.r7.z
 #define sourceInRect E.r7.w
+// hc09: the traced occlusion's lights (vk_raytrace.h), in slots that pass does not use (the blur's direction, the
+// in-target passes' target size and the post-processing's strengths): the world's x axis in view space, the
+// shadows' darkness, the direction toward the sun in the world's axes, and whether it is day (else floodlights).
+#define worldXView vec3(E.r5.xy, E.r6.x)
+#define sunShadow E.r6.y
+#define sunWorld E.r7.xyz
+#define sunDay E.r7.w
+// and how much of the light its rays' hits send back (the reflections' slot)
+#define bounceStrength E.r4.y
 
 #if MSAA
 layout(set = 0, binding = 0) uniform sampler2DMS depthTexture;
@@ -178,30 +187,238 @@ void main()
 }
 #endif
 
+#if PASS_TRACED_OCCLUSION || PASS_TRACED_REFLECTIONS
+// hc09: ray-traced ambient occlusion (vk_raytrace.h): rays over the surface's hemisphere against the scene's own
+// geometry (players, the field, the stands; what is off screen or behind something too), each covering by how near
+// it hits; and contact shadows: a few rays up toward the stadium's lights and the sky (world up, in a cone), which
+// players' feet, pileups and the sidelines' benches catch. Output as the screen-space pass's.
+layout(set = 0, binding = 5) uniform accelerationStructureEXT scene;
+
+// The nearest hit from `start` between `nearest` and `range` (-1: none). Hits nearer than `nearest` are ignored: the
+// game's models are low-poly, so a ray leaving one flat triangle of a curved surface meets its neighbours at once.
+float Hit(vec3 start, vec3 direction, float nearest, float range)
+{
+    rayQueryEXT q;
+    rayQueryInitializeEXT(q, scene, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, start, nearest, direction, range);
+    while (rayQueryProceedEXT(q)) {}
+    return rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT ? rayQueryGetIntersectionTEXT(q, true) : -1.0;
+}
+
+// Bounce light: the colour of the scene (input0: a copy of the whole target) where a ray hit, if that point is on
+// screen and what is seen there (not behind something, nor off screen: black, so such a hit only occludes).
+vec3 HitColor(vec3 hit)
+{
+    if (bounceStrength <= 0.0 || hit.z <= 0.0)
+        return vec3(0.0);
+    vec2 q = ProjectToPixel(hit);
+    if (any(lessThan(q, vec2(0.0))) || any(greaterThanEqual(q, size)))
+        return vec3(0.0);
+    if (abs(ViewDepth(ivec2(q)) - hit.z) > 0.05 + hit.z * 0.02)
+        return vec3(0.0);
+    return clamp(textureLod(input0, (q * depthScale + origin) / vec2(textureSize(input0, 0)), 0.0).rgb, 0.0, 1.0);
+}
+#endif
+
+#if PASS_TRACED_REFLECTIONS
+// hc09: ray-traced reflections (vk_raytrace.h), in place of the march through the depth buffer: the mirrored view
+// ray against the scene's geometry, so what is hidden or off screen reflects too. On the field as the screen-space
+// pass draws them (a dark tone, near where a player stands). On the helmets' shells (the scene's glossy triangles,
+// from `glossyFrom` on: the pixel's own triangle is found with a ray along the view) a mirror image, by the angle
+// (Fresnel), of what the ray hits if the screen shows it; the sky and the lights the game's own shading has.
+#define glossyFrom E.r5.x
+void main()
+{
+    vec2 fragPixel = FragPixel();
+    ivec2 p = ivec2(fragPixel);
+    outColor = vec4(0.0);
+    if (RawDepth(p) >= kSky)
+        return;
+    vec3 origin3 = PositionAt(p);
+    vec3 normal = NormalAt(p, origin3);
+    vec3 view = normalize(origin3);
+    float away = length(origin3);
+    vec3 ray = reflect(view, normal);
+    vec3 start = origin3 + normal * (0.02 + origin3.z * 0.0015);
+    float nearest = 0.05 + origin3.z * 0.002;
+    bool glossy = false;
+    if (glossyFrom >= 0.0)
+    {
+        rayQueryEXT q;
+        rayQueryInitializeEXT(q, scene, gl_RayFlagsOpaqueEXT, 0xFF, vec3(0.0), max(away * 0.95 - 0.1, 0.01), view, away * 1.05 + 0.1);
+        while (rayQueryProceedEXT(q)) {}
+        glossy = rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT &&
+                 float(rayQueryGetIntersectionPrimitiveIndexEXT(q, true)) >= glossyFrom;
+    }
+    if (glossy)
+    {
+        if (debugView == 3.0)   // HC09_EFFECTS_DEBUG=3 (dev): the glossy pixels
+        {
+            outColor = vec4(1.0, 0.0, 1.0, 1.0);
+            return;
+        }
+        float t = Hit(start, ray, nearest, 150.0);
+        if (t < 0.0)
+            return;
+        vec3 hit = start + ray * t;
+        vec2 q = ProjectToPixel(hit);
+        if (hit.z <= 0.0 || any(lessThan(q, vec2(0.0))) || any(greaterThanEqual(q, size)) ||
+            abs(ViewDepth(ivec2(q)) - hit.z) > 0.05 + hit.z * 0.02)
+            return;
+        vec3 color = textureLod(input0, (q * depthScale + origin) * targetInvSize, 0.0).rgb;
+        float nv = clamp(dot(normal, -view), 0.0, 1.0);
+        float fresnel = 0.04 + 0.96 * pow(1.0 - nv, 5.0);
+        float alpha = clamp(min(0.06 + fresnel * 1.5, 0.5) * reflectionStrength, 0.0, 1.0);
+        outColor = vec4(color * alpha, alpha);
+        return;
+    }
+    float facing = clamp((dot(normal, upView) - 0.9) / 0.08, 0.0, 1.0);
+    if (facing <= 0.0)
+        return;
+    float grazing = mix(0.6, 1.0, clamp(1.0 - dot(-view, normal), 0.0, 1.0));
+    float reach = radius * 5.0;
+    float t = Hit(start, ray, nearest, reach);
+    if (t < 0.0)
+        return;
+    // The reflected colour's luminance (black where the screen does not show the hit), its contrast deepened and
+    // brought down to a dark tone, as the screen-space pass's.
+    float luminance = dot(HitColor(start + ray * t), vec3(0.299, 0.587, 0.114));
+    float tone = clamp((luminance - 0.5) * 2.0 + 0.5, 0.0, 1.0) * 0.12;
+    float alpha = clamp(0.45 * reflectionStrength * grazing, 0.0, 1.0) * facing * clamp(1.0 - t / reach, 0.0, 1.0);
+    outColor = vec4(tone * alpha, tone * alpha, tone * alpha, alpha);
+}
+#endif
+
+#if PASS_TRACED_OCCLUSION
+
+void main()
+{
+    vec2 pixel = FragPixel();
+    ivec2 p = ivec2(pixel);
+    float raw = RawDepth(p);
+    vec3 center3 = PositionAt(p);
+    outColor = vec4(1.0, center3.z, 0.0, 0.0);
+    if (raw >= kSky)
+        return;
+    vec3 normal = NormalAt(p, center3);
+    // Off the surface, further with distance (the depth's precision, and the scene's triangles against the pixels').
+    vec3 start = center3 + normal * (0.02 + center3.z * 0.0015);
+    float nearest = 0.05 + center3.z * 0.002;
+    vec3 tangent = normalize(abs(normal.y) < 0.9 ? cross(normal, vec3(0.0, 1.0, 0.0)) : cross(normal, vec3(1.0, 0.0, 0.0)));
+    vec3 bitangent = cross(normal, tangent);
+    float angle = Noise(pixel) * 6.2831853, offset = Noise(pixel.yx + 23.17);
+    const int kRays = 6;
+    // The rays' reach shrinks in close-ups (a fixed reach would cover a whole head there), as the screen-space
+    // pass's radius in pixels is capped.
+    float reach = clamp(center3.z * 0.06, 0.1, 1.0);
+    float range = radius * 2.0 * reach, covered = 0.0;
+    vec3 bounce = vec3(0.0);
+    for (int i = 0; i < kRays; i++)
+    {
+        // Cosine-weighted directions, spread by a golden-angle spiral turned per pixel.
+        float u = (float(i) + offset) / float(kRays);
+        float a = angle + float(i) * 2.3999632;
+        float r = sqrt(u);
+        vec3 direction = normalize(tangent * (cos(a) * r) + bitangent * (sin(a) * r) + normal * sqrt(max(0.0, 1.0 - u)));
+        float t = Hit(start, direction, nearest, range);
+        if (t >= 0.0)
+        {
+            // What covers the surface lights it too, in its own colour (the turf's green under a player, a jersey's
+            // on the one beside it).
+            float cover = 1.0 - t / range;
+            covered += cover;
+            bounce += cover * HitColor(start + direction * t);
+        }
+    }
+    float open = 1.0 - covered / float(kRays);
+    // Contact shadows from above.
+    vec3 up = normalize(upView);
+    float lit = 1.0;
+    const int kShadowRays = 2;
+    float kContact = 1.5 * reach;   // view units (about yards)
+    if (dot(normal, up) > -0.3)
+        for (int i = 0; i < kShadowRays; i++)
+        {
+            float a = angle * 1.7 + float(i) * 6.2831853 / float(kShadowRays);
+            vec3 direction = normalize(up + (tangent * cos(a) + bitangent * sin(a)) * 0.3 * (0.5 + 0.5 * offset));
+            float t = Hit(start, direction, nearest, kContact);
+            if (t >= 0.0)
+                lit -= (1.0 - t / kContact) / float(kShadowRays);
+        }
+    // Shadows from the lights: the sun by day (soft: rays in a narrow cone), at night the stadium's four floodlight
+    // towers (each a quarter of the light, a wider cone: four faint shadows around each player, as on TV). On
+    // surfaces that face the light, fading in over the first few degrees.
+    float sunLit = 1.0;
+    if (sunShadow > 0.0)
+    {
+        vec3 wx = normalize(worldXView), wy = normalize(upView);
+        vec3 wz = normalize(cross(wy, wx));   // the game's world is left-handed
+        bool day = sunDay > 0.5;
+        int lights = day ? 1 : 4;
+        float shadowed = 0.0;
+        // Close-ups: more rays in a wider cone, for a soft edge (a cap's brim across a face).
+        float closeUp = 1.0 - smoothstep(6.0, 18.0, center3.z);
+        for (int k = 0; k < lights; k++)
+        {
+            // The towers: beyond the field's corners, about 40 degrees up.
+            vec3 w = day ? sunWorld : normalize(vec3((k & 1) != 0 ? 0.55 : -0.55, 0.62, (k & 2) != 0 ? 0.56 : -0.56));
+            vec3 l = normalize(wx * w.x + wy * w.y + wz * w.z);
+            float facing = dot(normal, l);
+            if (facing <= 0.0)
+                continue;
+            vec3 lt = normalize(abs(l.y) < 0.9 ? cross(l, vec3(0.0, 1.0, 0.0)) : cross(l, vec3(1.0, 0.0, 0.0)));
+            vec3 lb = cross(l, lt);
+            int rays = closeUp > 0.0 ? 4 : day ? 2 : 1;
+            float blocked = 0.0;
+            for (int i = 0; i < rays; i++)
+            {
+                float a = angle + float(i) * 6.2831853 / float(rays) + float(k) * 1.3;
+                float cone = mix(day ? 0.035 : 0.07, 0.1, closeUp) * sqrt(fract(offset + float(i) * 0.618));
+                vec3 direction = normalize(l + (lt * cos(a) + lb * sin(a)) * cone);
+                // By night only what is near casts (players, benches): the towers stand above the stands.
+                if (Hit(start, direction, nearest, day ? 150.0 : 25.0) >= 0.0)
+                    blocked += 1.0 / float(rays);
+            }
+            shadowed += blocked * smoothstep(0.0, 0.15, facing) / float(lights);
+        }
+        // Mostly on the ground (a player's own pads and helmet shadow him less: the models are coarse); in close-ups
+        // on everything, a little lighter.
+        float receiver = mix(mix(0.35, 1.0, smoothstep(0.3, 0.8, dot(normal, wy))), 0.8, closeUp);
+        sunLit = 1.0 - sunShadow * (day ? 0.7 : 1.0) * shadowed * receiver;   // the sun fills in more than the towers
+    }
+    // The light left, coloured by the bounce: its luminance where the screen-space pass has its occlusion, its tint
+    // (Co, Cg) beside the view distance.
+    vec3 light = clamp((vec3(open) + bounce * (bounceStrength / float(kRays))) * (mix(1.0, lit, 0.6) * sunLit), 0.0, 1.0);
+    outColor = vec4((light.r + 2.0 * light.g + light.b) * 0.25, center3.z, (light.r - light.b) * 0.5,
+                    (2.0 * light.g - light.r - light.b) * 0.25);
+}
+#endif
+
 #if PASS_BLUR || PASS_COMPOSITE
 // One direction of a depth-aware blur of the occlusion (9 taps).
-vec2 Blur(ivec2 p)
+vec4 Blur(ivec2 p)
 {
-    vec2 middle = texelFetch(input0, p, 0).rg;
-    float sum = middle.r, weights = 1.0;
+    vec4 middle = texelFetch(input0, p, 0);
+    vec3 sum = middle.rba;
+    float weights = 1.0;
     for (int i = -4; i <= 4; i++)
     {
         if (i == 0)
             continue;
         ivec2 q = clamp(p + ivec2(blurDirection * float(i)), ivec2(0), ivec2(size) - 1);
-        vec2 sample2 = texelFetch(input0, q, 0).rg;
+        vec4 sample2 = texelFetch(input0, q, 0);
         float weight = exp(-float(i * i) / 18.0) * exp(-abs(sample2.g - middle.g) / (middle.g * 0.02 + 1e-3));
-        sum += sample2.r * weight;
+        sum += sample2.rba * weight;
         weights += weight;
     }
-    return vec2(sum / weights, middle.g);
+    sum /= weights;
+    return vec4(sum.x, middle.g, sum.yz);
 }
 #endif
 
 #if PASS_BLUR
 void main()
 {
-    outColor = vec4(Blur(ivec2(FragPixel())), 0.0, 0.0);
+    outColor = Blur(ivec2(FragPixel()));
 }
 #endif
 
@@ -209,42 +426,61 @@ void main()
 // The occlusion (blurred both ways, `occlusion` maybe smaller than the scene) at a scene pixel: enlarged, each of
 // the four nearest of its pixels counted by how near it is and by how near its view distance is to this pixel's,
 // so the shading stays on its own side of an outline (a joint bilateral upsample).
-float OcclusionAt(sampler2D occlusion, ivec2 p)
+// As the light's colour: the occlusion's luminance and tint (Co, Cg; none from the screen-space pass).
+vec3 Tint(vec3 l)
+{
+    return vec3(l.x + l.y - l.z, l.x + l.z, l.x - l.y - l.z);
+}
+
+vec3 OcclusionAt(sampler2D occlusion, ivec2 p)
 {
     vec2 lowSize = vec2(textureSize(occlusion, 0));
     if (lowSize.x >= size.x - 0.5)
-        return texelFetch(occlusion, p, 0).r;
+        return Tint(texelFetch(occlusion, p, 0).rba);
     float w = ViewDepth(p);
     vec2 at = (vec2(p) + 0.5) * lowSize / size - 0.5;
     ivec2 b = ivec2(floor(at));
     vec2 f = at - vec2(b);
-    float sum = 0.0, weights = 0.0;
+    vec3 sum = vec3(0.0);
+    float weights = 0.0;
     for (int i = 0; i < 4; i++)
     {
         ivec2 o = ivec2(i & 1, i >> 1);
-        vec2 s = texelFetch(occlusion, clamp(b + o, ivec2(0), ivec2(lowSize) - 1), 0).rg;
+        vec4 s = texelFetch(occlusion, clamp(b + o, ivec2(0), ivec2(lowSize) - 1), 0);
         float near = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
         float weight = near * (exp(-abs(s.g - w) / (w * 0.02 + 1e-3)) + 1e-3);
-        sum += s.r * weight;
+        sum += s.rba * weight;
         weights += weight;
     }
-    return sum / max(weights, 1e-6);
+    return Tint(sum / max(weights, 1e-6));
 }
 #endif
 
 #if PASS_REFLECTION_COMPOSITE || MERGED
 // The reflections at a scene pixel (its centre), softened: a 5x5 tent over every other scene pixel, filtered from
 // the reflection image (which covers the rectangle, whatever its size). Premultiplied colour, opacity.
-vec4 ReflectionAt(sampler2D reflections, vec2 pixel)
+// `depths` (when reflectionDepths: the occlusion image, of the reflections' size, its view distances): each sample
+// counted by how near its surface is to this pixel's, so a helmet's reflection stays on the helmet.
+#define reflectionDepths E.r6.w
+vec4 ReflectionAt(sampler2D reflections, sampler2D depths, vec2 pixel)
 {
     vec4 sum = vec4(0.0);
     float weights = 0.0;
+    bool aware = reflectionDepths > 0.0;
+    float w = aware ? ViewDepth(ivec2(pixel)) : 0.0;
+    ivec2 lowSize = textureSize(depths, 0);
     for (int y = -2; y <= 2; y++)
     {
         for (int x = -2; x <= 2; x++)
         {
             float weight = (3.0 - abs(float(x))) * (3.0 - abs(float(y)));
-            sum += textureLod(reflections, (pixel + vec2(x, y) * 2.0) * invSize, 0.0) * weight;
+            vec2 at = (pixel + vec2(x, y) * 2.0) * invSize;
+            if (aware)
+            {
+                float d = texelFetch(depths, clamp(ivec2(at * vec2(lowSize)), ivec2(0), lowSize - 1), 0).g;
+                weight *= exp(-abs(d - w) / (w * 0.02 + 1e-3)) + 1e-4;
+            }
+            sum += textureLod(reflections, at, 0.0) * weight;
             weights += weight;
         }
     }
@@ -258,9 +494,9 @@ vec4 ReflectionAt(sampler2D reflections, vec2 pixel)
 void main()
 {
     ivec2 p = ivec2(FragPixel());
-    float blurred = vec2(textureSize(input0, 0)).x >= size.x - 0.5 ? Blur(p).r : OcclusionAt(input0, p);
-    float occlusion = debugView == 1.0 ? blurred : mix(1.0, blurred, occlusionStrength);
-    outColor = vec4(occlusion, occlusion, occlusion, 1.0);
+    vec3 blurred = vec2(textureSize(input0, 0)).x >= size.x - 0.5 ? Tint(Blur(p).rba) : OcclusionAt(input0, p);
+    vec3 occlusion = debugView == 1.0 ? blurred : mix(vec3(1.0), blurred, occlusionStrength);
+    outColor = vec4(clamp(occlusion, 0.0, 1.0), 1.0);
 }
 #endif
 
@@ -340,8 +576,8 @@ void main()
 // The reflections over the scene (blend: source premultiplied).
 void main()
 {
-    vec4 reflection = ReflectionAt(input0, FragPixel() + 0.5);
-    outColor = debugView == 2.0 ? vec4(reflection.rgb, 1.0) : reflection;
+    vec4 reflection = ReflectionAt(input0, input1, FragPixel() + 0.5);
+    outColor = debugView >= 2.0 ? vec4(reflection.rgb, 1.0) : reflection;
 }
 #endif
 
@@ -501,10 +737,10 @@ void main()
     vec4 scene = sourceInRect > 0.0 ? texelFetch(input0, p, 0) : texelFetch(input0, p + ivec2(origin), 0);
 #if MERGED
     if (occlusionStrength > 0.0)
-        scene.rgb *= mix(1.0, OcclusionAt(input2, p), occlusionStrength);
+        scene.rgb *= mix(vec3(1.0), clamp(OcclusionAt(input2, p), 0.0, 1.0), occlusionStrength);
     if (reflectionStrength > 0.0)
     {
-        vec4 reflection = ReflectionAt(input3, vec2(p) + 0.5);
+        vec4 reflection = ReflectionAt(input3, input2, vec2(p) + 0.5);
         scene.rgb = scene.rgb * (1.0 - reflection.a) + reflection.rgb;
     }
 #endif
@@ -547,7 +783,7 @@ void main()
 )GLSL";
 
 constexpr uint32_t kBindings = 5;   // depth, input0, input1, input2, input3
-constexpr VkFormat kOcclusionFormat = VK_FORMAT_R16G16_SFLOAT;          // occlusion, view distance
+constexpr VkFormat kOcclusionFormat = VK_FORMAT_R16G16B16A16_SFLOAT;   // occlusion, view distance, its tint (Co, Cg)
 constexpr VkFormat kReflectionFormat = VK_FORMAT_R16G16B16A16_SFLOAT;   // premultiplied colour, opacity
 constexpr VkFormat kBloomFormat = VK_FORMAT_R16G16B16A16_SFLOAT;        // linear colour (bloom, depth of field)
 
@@ -643,6 +879,21 @@ bool SceneEffects::Init(Device& dev)
         hdr_ = false;
         return false;
     }
+    if (dev.rayQuery && occlusion_ > 0)
+    {
+        // hc09: ray-traced occlusion (vk_raytrace.h): binding 5, the scene's acceleration structure.
+        VkDescriptorSetLayoutBinding tb[kBindings + 1]{};
+        std::memcpy(tb, b, sizeof(b));
+        tb[kBindings] = { kBindings, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
+        VkDescriptorSetLayoutCreateInfo tl = lci;
+        tl.bindingCount = kBindings + 1;
+        tl.pBindings = tb;
+        VkPipelineLayoutCreateInfo tp = pci;
+        tp.pSetLayouts = &tracedSetLayout_;
+        if (vkCreateDescriptorSetLayout(d, &tl, nullptr, &tracedSetLayout_) != VK_SUCCESS ||
+            vkCreatePipelineLayout(d, &tp, nullptr, &tracedPipeLayout_) != VK_SUCCESS)
+            std::fprintf(stderr, "[effects] the ray-traced occlusion's layout could not be made\n");
+    }
     std::fprintf(stderr, "[effects] ambient occlusion %.2f, reflections %.2f, bloom %.2f, colour grading %.2f, depth of field %.2f\n",
                  occlusion_, reflections_, bloom_, grade_, dof_);
     return true;
@@ -654,7 +905,7 @@ void SceneEffects::Shutdown()
     VkDevice d = dev_->device;
     for (Pipelines& p : pipelines_)
         for (VkPipeline pipe : { p.occlusion, p.blur, p.composite, p.reflections, p.reflectionComposite, p.bloomPrefilter, p.bloomDown,
-                                 p.bloomUp, p.focus, p.depthOfField, p.post, p.hdrGain, p.postMerged })
+                                 p.bloomUp, p.focus, p.depthOfField, p.post, p.hdrGain, p.postMerged, p.tracedOcclusion, p.tracedReflections })
             if (pipe) vkDestroyPipeline(d, pipe, nullptr);
     pipelines_.clear();
     for (Image* img : { &occlusionRaw_, &occlusionBlurred_, &sceneCopy_, &reflectionTarget_, &focus_[0], &focus_[1], &depthOfFieldTarget_,
@@ -667,13 +918,17 @@ void SceneEffects::Shutdown()
     if (nearest_) vkDestroySampler(d, nearest_, nullptr);
     if (pipeLayout_) vkDestroyPipelineLayout(d, pipeLayout_, nullptr);
     if (setLayout_) vkDestroyDescriptorSetLayout(d, setLayout_, nullptr);
+    if (tracedPipeLayout_) vkDestroyPipelineLayout(d, tracedPipeLayout_, nullptr);
+    if (tracedSetLayout_) vkDestroyDescriptorSetLayout(d, tracedSetLayout_, nullptr);
+    tracedPipeLayout_ = VK_NULL_HANDLE;
+    tracedSetLayout_ = VK_NULL_HANDLE;
     vs_ = VK_NULL_HANDLE;
     linear_ = nearest_ = VK_NULL_HANDLE;
     pipeLayout_ = VK_NULL_HANDLE;
     setLayout_ = VK_NULL_HANDLE;
 }
 
-VkPipeline SceneEffects::CreatePipeline(VkShaderModule fs, VkFormat target, VkSampleCountFlagBits samples, int blend)
+VkPipeline SceneEffects::CreatePipeline(VkShaderModule fs, VkFormat target, VkSampleCountFlagBits samples, int blend, VkPipelineLayout layout)
 {
     if (!fs) return VK_NULL_HANDLE;
     VkPipelineShaderStageCreateInfo st[2]{};
@@ -730,7 +985,7 @@ VkPipeline SceneEffects::CreatePipeline(VkShaderModule fs, VkFormat target, VkSa
     pi.pMultisampleState = &ms;
     pi.pColorBlendState = &cbs;
     pi.pDynamicState = &ds;
-    pi.layout = pipeLayout_;
+    pi.layout = layout ? layout : pipeLayout_;
     VkPipeline pipe = VK_NULL_HANDLE;
     vkCreateGraphicsPipelines(dev_->device, VK_NULL_HANDLE, 1, &pi, nullptr, &pipe);
     return pipe;
@@ -756,7 +1011,7 @@ SceneEffects::Pipelines* SceneEffects::GetPipelines(VkFormat format, VkSampleCou
         { "PASS_BLUR", false, kOcclusionFormat, VK_SAMPLE_COUNT_1_BIT, 0, &p.blur },
         { "PASS_COMPOSITE", true, format, samples, debug_ == 1 ? 0 : 1, &p.composite },
         { "PASS_REFLECTIONS", false, kReflectionFormat, VK_SAMPLE_COUNT_1_BIT, 0, &p.reflections },
-        { "PASS_REFLECTION_COMPOSITE", true, format, samples, debug_ == 2 ? 0 : 2, &p.reflectionComposite },
+        { "PASS_REFLECTION_COMPOSITE", true, format, samples, debug_ >= 2 ? 0 : 2, &p.reflectionComposite },
         { "PASS_BLOOM_PREFILTER", false, kBloomFormat, VK_SAMPLE_COUNT_1_BIT, 0, &p.bloomPrefilter },
         { "PASS_BLOOM_DOWN", false, kBloomFormat, VK_SAMPLE_COUNT_1_BIT, 0, &p.bloomDown },
         { "PASS_BLOOM_UP", false, kBloomFormat, VK_SAMPLE_COUNT_1_BIT, 3, &p.bloomUp },
@@ -778,6 +1033,22 @@ SceneEffects::Pipelines* SceneEffects::GetPipelines(VkFormat format, VkSampleCou
         std::fprintf(stderr, "[effects] pipelines for format %d x%d failed; no effects on that target\n", int(format), int(samples));
         return nullptr;
     }
+    if (tracedPipeLayout_)
+    {
+        const std::string source = std::string("#version 460\n#extension GL_EXT_ray_query : require\n#define MSAA ") +
+                                   (samples != VK_SAMPLE_COUNT_1_BIT ? "1\n" : "0\n") + "#define PASS_TRACED_OCCLUSION 1\n#define IN_TARGET 0\n" + kFragment;
+        VkShaderModule fs = Module(d, source, Stage::kFragment, "PASS_TRACED_OCCLUSION");
+        p.tracedOcclusion = CreatePipeline(fs, kOcclusionFormat, VK_SAMPLE_COUNT_1_BIT, 0, tracedPipeLayout_);
+        if (fs) vkDestroyShaderModule(d, fs, nullptr);
+        if (!p.tracedOcclusion) std::fprintf(stderr, "[effects] the ray-traced occlusion pipeline failed; screen-space occlusion instead\n");
+        const std::string source2 = std::string("#version 460\n#extension GL_EXT_ray_query : require\n#define MSAA ") +
+                                    (samples != VK_SAMPLE_COUNT_1_BIT ? "1\n" : "0\n") + "#define PASS_TRACED_REFLECTIONS 1\n#define IN_TARGET 0\n" +
+                                    kFragment;
+        fs = Module(d, source2, Stage::kFragment, "PASS_TRACED_REFLECTIONS");
+        p.tracedReflections = CreatePipeline(fs, kReflectionFormat, VK_SAMPLE_COUNT_1_BIT, 0, tracedPipeLayout_);
+        if (fs) vkDestroyShaderModule(d, fs, nullptr);
+        if (!p.tracedReflections) std::fprintf(stderr, "[effects] the ray-traced reflections pipeline failed; screen-space reflections instead\n");
+    }
     return &p;
 }
 
@@ -790,10 +1061,12 @@ bool SceneEffects::Prepare(Image& image, VkFormat format, uint32_t width, uint32
 }
 
 void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFlagBits samples, VkImageView depthView, const SceneView& view,
-                         const std::function<VkDescriptorSet(VkDescriptorSetLayout)>& allocate, std::vector<Image>& retired)
+                         const std::function<VkDescriptorSet(VkDescriptorSetLayout)>& allocate, std::vector<Image>& retired,
+                         VkAccelerationStructureKHR scene, const float* sun, uint32_t glossyFrom)
 {
     const hc09::gpu::SceneCamera& camera = view.camera;
     gainMade_ = false;
+    tracedShadows_ = false;
     if (!Enabled() || !camera.valid) return;
     if (color.format != VK_FORMAT_R8G8B8A8_UNORM && color.format != VK_FORMAT_A2B10G10R10_UNORM_PACK32 &&
         color.format != VK_FORMAT_R16G16B16A16_SFLOAT)
@@ -832,7 +1105,7 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
     bool ready = pipelines && prepare(occlusionBlurred_, kOcclusionFormat, lowWidth, lowHeight, attachment);
     // The blurred occlusion target is also the (unread) input of the occlusion pass.
     if (ready && occlusion_ > 0) ready = prepare(occlusionRaw_, kOcclusionFormat, lowWidth, lowHeight, attachment);
-    if (ready && (reflections_ > 0 || post)) ready = prepare(sceneCopy_, color.format, color.width, color.height, VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    if (ready && (reflections_ > 0 || post || scene)) ready = prepare(sceneCopy_, color.format, color.width, color.height, VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     if (ready && reflections_ > 0) ready = prepare(reflectionTarget_, kReflectionFormat, lowWidth, lowHeight, attachment);
     if (post && bloom_ > 0)
         for (int i = 0; ready && i < kBloomLevels; ++i) ready = prepare(bloomLevels_[i], kBloomFormat, bloomWidth[i], bloomHeight[i], attachment);
@@ -889,9 +1162,11 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
 
     // One full-screen pass: `target` (the scene's own colour target is drawn at the rectangle, others whole), reading
     // the depth buffer, `input` and `input1` (`input` if none). `load` keeps the target's contents (for blending).
+    // `traced`: the ray-traced occlusion's layout, with the scene's acceleration structure.
+    bool traced = false;
     auto pass = [&](VkPipeline pipe, const Image& target, bool inTarget, const Image& input, VkSampler inputSampler,
                     const Image* input1 = nullptr, bool load = false, const Image* input2 = nullptr, const Image* input3 = nullptr) {
-        VkDescriptorSet set = allocate(setLayout_);
+        VkDescriptorSet set = allocate(traced ? tracedSetLayout_ : setLayout_);
         if (!set) return;
         VkDescriptorImageInfo images[kBindings] = { { nearest_, depthView, VK_IMAGE_LAYOUT_GENERAL },
                                                     { inputSampler, input.view, VK_IMAGE_LAYOUT_GENERAL },
@@ -909,6 +1184,19 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
             w[i].pImageInfo = &images[i];
         }
         vkUpdateDescriptorSets(dev_->device, kBindings, w, 0, nullptr);
+        if (traced)
+        {
+            VkWriteDescriptorSetAccelerationStructureKHR as{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR };
+            as.accelerationStructureCount = 1;
+            as.pAccelerationStructures = &scene;
+            VkWriteDescriptorSet wa{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            wa.pNext = &as;
+            wa.dstSet = set;
+            wa.dstBinding = kBindings;
+            wa.descriptorCount = 1;
+            wa.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+            vkUpdateDescriptorSets(dev_->device, 1, &wa, 0, nullptr);
+        }
         VkRenderingAttachmentInfo ca{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
         ca.imageView = target.view;
         ca.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -925,8 +1213,9 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
         vkCmdSetViewport(cb, 0, 1, &vp);
         vkCmdSetScissor(cb, 0, 1, &area);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout_, 0, 1, &set, 0, nullptr);
-        vkCmdPushConstants(cb, pipeLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(c), &c);
+        const VkPipelineLayout layout = traced ? tracedPipeLayout_ : pipeLayout_;
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, nullptr);
+        vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(c), &c);
         vkCmdDraw(cb, 3, 1, 0, 0);
         vkCmdEndRendering(cb);
         Barrier(cb);
@@ -949,25 +1238,6 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
     static const bool mergeAb = Hc09Env("HC09_EFFECTS_MERGE_AB") != nullptr;
     static uint32_t mergeTurn = 0;
     const bool merged = post && dof_ <= 0 && !hdr_ && debug_ == 0 && !(mergeAb && (mergeTurn++ & 1));
-    const Image* occlusionImage = nullptr;
-    if (occlusion_ > 0)
-    {
-        atLow(true);
-        pass(pipelines->occlusion, occlusionRaw_, false, occlusionBlurred_, nearest_);
-        c.blurDirection[0] = 1;
-        pass(pipelines->blur, occlusionBlurred_, false, occlusionRaw_, nearest_);
-        c.blurDirection[0] = 0;
-        c.blurDirection[1] = 1;
-        occlusionImage = &occlusionBlurred_;
-        if (divisor > 1 || merged)
-        {
-            // Both directions here, then enlarged by the composite.
-            pass(pipelines->blur, occlusionRaw_, false, occlusionBlurred_, nearest_);
-            occlusionImage = &occlusionRaw_;
-        }
-        atLow(false);
-        if (!merged) pass(pipelines->composite, color, true, *occlusionImage, nearest_);
-    }
     // A single-sampled copy of the scene as it is so far.
     auto copyScene = [&] {
         if (samples != VK_SAMPLE_COUNT_1_BIT)
@@ -986,14 +1256,72 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
         }
         Barrier(cb);
     };
-    if (merged) copyScene();   // the one copy (without the occlusion: the reflections and bloom hardly see it)
+    const Image* occlusionImage = nullptr;
+    float reflectionDepths = 0.0f;
+    bool copied = false;
+    if (occlusion_ > 0)
+    {
+        traced = scene && pipelines->tracedOcclusion;
+        // The traced occlusion's bounce light reads the scene: as strong as HC09_RAY_TRACING_BOUNCE (0..1; 1).
+        static const float bounce = [] {
+            const char* e = Hc09Env("HC09_RAY_TRACING_BOUNCE");
+            return e && *e ? std::clamp(float(atof(e)), 0.0f, 1.0f) : 1.0f;
+        }();
+        if (traced)
+        {
+            copyScene();
+            copied = merged;   // the merged pass's one copy too
+        }
+        atLow(true);
+        const Constants kept = c;
+        if (traced) c.reflections = bounce;
+        if (traced && sun)   // the lights' slots, back after the pass
+        {
+            tracedShadows_ = sun[3] > 0.0f;
+            c.blurDirection[0] = sun[0];
+            c.blurDirection[1] = sun[1];
+            c.targetInvSize[0] = sun[2];
+            c.targetInvSize[1] = sun[3];
+            c.bloom = sun[4];
+            c.grade = sun[5];
+            c.depthOfField = sun[6];
+            c.sourceInRect = sun[7];
+        }
+        pass(traced ? pipelines->tracedOcclusion : pipelines->occlusion, occlusionRaw_, false, traced ? sceneCopy_ : occlusionBlurred_,
+             traced ? linear_ : nearest_);
+        traced = false;
+        c = kept;
+        c.blurDirection[0] = 1;
+        pass(pipelines->blur, occlusionBlurred_, false, occlusionRaw_, nearest_);
+        c.blurDirection[0] = 0;
+        c.blurDirection[1] = 1;
+        occlusionImage = &occlusionBlurred_;
+        if (divisor > 1 || merged)
+        {
+            // Both directions here, then enlarged by the composite.
+            pass(pipelines->blur, occlusionRaw_, false, occlusionBlurred_, nearest_);
+            occlusionImage = &occlusionRaw_;
+        }
+        atLow(false);
+        if (!merged) pass(pipelines->composite, color, true, *occlusionImage, nearest_);
+    }
+    if (merged && !copied) copyScene();   // the one copy (without the occlusion: the reflections and bloom hardly see it)
     if (reflections_ > 0)
     {
         if (!merged) copyScene();   // with its occlusion, to reflect
         atLow(true);
-        pass(pipelines->reflections, reflectionTarget_, false, sceneCopy_, linear_);
+        traced = scene && pipelines->tracedReflections;
+        const bool tracedReflections = traced;
+        const float keptDirection = c.blurDirection[0];
+        if (traced) c.blurDirection[0] = glossyFrom == ~0u ? -1.0f : float(glossyFrom);   // glossyFrom's slot
+        pass(traced ? pipelines->tracedReflections : pipelines->reflections, reflectionTarget_, false, sceneCopy_, linear_);
+        traced = false;
+        c.blurDirection[0] = keptDirection;
         atLow(false);
-        if (!merged) pass(pipelines->reflectionComposite, color, true, reflectionTarget_, linear_);
+        // Traced, the reflections' blur keeps to its surface, by the occlusion image's view distances.
+        reflectionDepths = tracedReflections && occlusionImage && occlusionImage->width == reflectionTarget_.width ? 1.0f : 0.0f;
+        c.inputInvSize[1] = reflectionDepths;
+        if (!merged) pass(pipelines->reflectionComposite, color, true, reflectionTarget_, linear_, reflectionDepths > 0 ? occlusionImage : nullptr);
     }
     if (!post) return;
 
@@ -1047,6 +1375,7 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
         // The strengths say which of the occlusion and reflections there are.
         c.occlusion = occlusionImage ? std::min(occlusion_, 1.0f) : 0.0f;
         c.reflections = reflections_ > 0 ? reflections_ : 0.0f;
+        c.inputInvSize[1] = reflectionDepths;
         pass(pipelines->postMerged, color, true, *source, nearest_, bloom_ > 0 ? &bloomLevels_[0] : nullptr, false, occlusionImage,
              reflections_ > 0 ? &reflectionTarget_ : nullptr);
         return;

@@ -137,7 +137,7 @@ namespace hc09::vk
         // default; on: collect the game's textures, HC09_DUMP_HASHED, for tools/hdpack); Bloom, ColorGrading and
         // DepthOfField: strength (1 the default, DepthOfField 0; 0 off); HDR on or off (the default), HDRPeak and
         // HDRPaperWhite in nits (1000, 200); Crowd on (the default) or off; Turf and Players: strength (1 the default, 0 off);
-        // SharpText on (the default) or off; ScoreBar on (the default) or off; TemporalUpscaling off (the default),
+        // SharpText on (the default) or off; ScoreBar on (the default) or off; RayTracing on or off (the default); TemporalUpscaling off (the default),
         // quality, balanced or performance; AspectRatio (below).
         static const std::pair<const wchar_t*, const char*> kSettings[] = {
             { L"FrameRate", "HC09_FRAMERATE" }, { L"Scale", "HC09_SCALE" },       { L"VSync", "HC09_VSYNC" },
@@ -148,7 +148,7 @@ namespace hc09::vk
             { L"DepthOfField", "HC09_DOF" }, { L"HDR", "HC09_HDR" }, { L"HDRPeak", "HC09_HDR_PEAK" },
             { L"HDRPaperWhite", "HC09_HDR_PAPER_WHITE" }, { L"Crowd", "HC09_CROWD" }, { L"Turf", "HC09_TURF" },
             { L"Players", "HC09_PLAYERS" }, { L"SharpText", "HC09_SHARP_TEXT" }, { L"ScoreBar", "HC09_SCORE_BAR" },
-            { L"TemporalUpscaling", "HC09_TEMPORAL_UPSCALING" },
+            { L"TemporalUpscaling", "HC09_TEMPORAL_UPSCALING" }, { L"RayTracing", "HC09_RAY_TRACING" },
         };
         const std::wstring file = (std::filesystem::current_path() / L"hc09.ini").wstring();
         for (const auto& [key, variable] : kSettings)

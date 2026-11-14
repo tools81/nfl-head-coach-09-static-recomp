@@ -1508,15 +1508,16 @@ std::string HostNullPixelShader() { return "#version 450\nlayout(location = 16) 
 // draw's element picked by a push constant, instead of a dynamic buffer offset. A set layout with no dynamic buffer
 // can be an update-after-bind one, which Intel's driver needs for the 192 texture bindings (its ordinary limit is 64
 // samplers per stage; HANDOFF_M12.md step 4). The block's members are unchanged, so `D.x` still works.
-std::string DrawIndexedConsts(std::string g)
+std::string DrawIndexedConsts(std::string g, bool capture)
 {
     const std::string head = "layout(std430, set = 0, binding = 1) readonly buffer DrawConstsBlock {";
     const std::string tail = "\n} D;\n";
     size_t h = g.find(head);
     size_t e = h == std::string::npos ? h : g.find(tail, h);
     if (e == std::string::npos) return g;
-    g.replace(e, tail.size(), "\n};\nlayout(std430, set = 0, binding = 1) readonly buffer DrawConstsBlock { DrawConstsT dcs[]; };\n"
-                              "layout(push_constant) uniform XePush { uint draw; } xePush;\n#define D dcs[xePush.draw]\n");
+    g.replace(e, tail.size(), std::string("\n};\nlayout(std430, set = 0, binding = 1) readonly buffer DrawConstsBlock { DrawConstsT dcs[]; };\n"
+                                          "layout(push_constant) uniform XePush { uint draw; } xePush;\n#define D dcs[xePush.draw]\n") +
+                                  (capture ? "layout(std430, set = 0, binding = 9) writeonly buffer XeCapture { vec4 xeCap[]; };\n" : ""));
     g.replace(h, head.size(), "struct DrawConstsT {");
     const std::string read = ": D.c[cBase + uint(i)]; }";
     if (size_t r = g.find(read); r != std::string::npos) g.replace(r, read.size(), ": dcs[xePush.draw + cPrev].c[cBase + uint(i)]; }");
@@ -1575,6 +1576,16 @@ vec3 xeScreenH(vec4 pp)
     g += "    pos = vec4(0.0, 0.0, 0.0, 1.0);\n";
     g += "    r[0].x = float(gl_VertexIndex);\n";
     g += e.body;
+    if (opt.capture)   // hc09: ray-traced lighting (vk_raytrace.h): the draw's clip positions, before widescreen's squeeze
+        g += R"GLSL(    if (D.clip.y != 0u)
+    {
+        bool cxy = (D.vte & 1u) != 0u, cw0 = (D.vte & 4u) != 0u;
+        float ciw = cw0 ? (pos.w != 0.0 ? 1.0 / pos.w : 1.0) : pos.w;
+        float ccw = ciw != 0.0 ? 1.0 / ciw : 1.0;
+        vec2 cq = cxy ? pos.xy : pos.xy * ciw;
+        xeCap[int(D.clip.z) + gl_VertexIndex] = vec4(cq * ccw, 0.0, ccw);
+    }
+)GLSL";
     g += "    xeMcur = vec3(0.0); xeMprev = vec3(0.0);\n";
     g += "    if (kMotion != 0u)\n    {\n";
     g += "        vec4 posNow = pos, posPrev = pos;\n";
@@ -1619,7 +1630,7 @@ vec3 xeScreenH(vec4 pp)
     gl_ClipDistance[2] = clipOn ? pos.w - pos.z : 1.0;
 }
 )GLSL";
-    t.glsl = opt.hostRt ? DrawIndexedConsts(std::move(g)) : std::move(g);
+    t.glsl = opt.hostRt ? DrawIndexedConsts(std::move(g), opt.capture) : std::move(g);
     return t;
 }
 

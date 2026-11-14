@@ -58,10 +58,10 @@ struct NativeProfile
     double gpuSeconds = 0;            // GPU time of the frame command buffers (timestamps)
     uint64_t submits = 0;
     // GPU time by kind of work (timestamps where the kind changes).
-    enum GpuKind { kGpuDraws, kGpuResolves, kGpuDecodes, kGpuFront, kGpuOther, kGpuKinds };
+    enum GpuKind { kGpuDraws, kGpuResolves, kGpuDecodes, kGpuFront, kGpuOther, kGpuEffects, kGpuKinds };
     double gpuKind[kGpuKinds] = {};
 };
-inline constexpr const char* kNativeGpuKindNames[NativeProfile::kGpuKinds] = { "draws", "resolves", "texture decodes", "front buffer", "other" };
+inline constexpr const char* kNativeGpuKindNames[NativeProfile::kGpuKinds] = { "draws", "resolves", "texture decodes", "front buffer", "other", "scene effects" };
 inline constexpr const char* kNativeSectionNames[NativeProfile::kSections] = {
     "state", "textures", "consts", "indices", "descriptors", "pipeline", "record", "resolve", "clear",
     "front", "submit", "wait-frame", "wait-ring", "wait-texture", "wait-compute", "wait-resolve", "wait-fence" };

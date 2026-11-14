@@ -56,7 +56,8 @@ struct DrawConsts
     uint32_t surf[4];         // pitch, MSAA mode, depth base tile, depth is D24FS8
     uint32_t ds[4];           // RB_DEPTHCONTROL, RB_STENCILREFMASK, RB_STENCILREFMASK_BF, flags (kDs*)
     float blendConst[4];      // RB_BLEND_RED..ALPHA
-    uint32_t clip[4];         // x: bit 0 near/far/w clipping on, bit 1 D3D clip space (0 <= z <= w)
+    uint32_t clip[4];         // x: bit 0 near/far/w clipping on, bit 1 D3D clip space (0 <= z <= w); y (hc09, native):
+                              // 1: write the clip positions to the ray tracer's capture (vk_raytrace.h), z: at z + index
     float winOfs[4];          // window offset x, y and the half-pixel offset, added as the software does; w (hc09,
                               // native, temporal upscaling): as uint bits, how many draws on the draw holding this one's
                               // vertex constants of the frame before is (0: none; xe_glsl.cpp kMotion)
@@ -100,6 +101,9 @@ struct TranslateOptions
     bool hostRt = false;
     // Experiment for weak GPUs (M12 step 4): ALU temporaries without `precise` (the compiler may fuse and reorder).
     uint32_t relaxed = 0;     // bit 1 (2): no `precise` on ALU temporaries (dev: HC09_NATIVE_RELAXED=2; no gain measured)
+    // hc09: ray-traced lighting (vk_raytrace.h): the vertex shader can write its clip positions to binding 9 (with
+    // DrawConsts clip.y set; clip.z the draw's place in it).
+    bool capture = false;
 };
 TranslatedShader TranslateShader(const xenos::ShaderCode& code, const TranslateOptions& opt = {});
 // The EDRAM library: GLSL ports of the software rasterizer's render-target
@@ -172,7 +176,7 @@ struct NativeResolveConsts
 // interpolators and the screen-space z likewise).
 const char* RectListGeometryShader();
 // The native renderer's form of the per-draw constants (an array indexed by a push constant; xe_glsl.cpp).
-std::string DrawIndexedConsts(std::string glsl);
+std::string DrawIndexedConsts(std::string glsl, bool capture = false);
 
 // Vertex fetch constant slots (0..95) a vertex shader reads with full vfetch
 // instructions (each slot: 2 dwords at FETCH_CONSTANTS; address in dword 0,

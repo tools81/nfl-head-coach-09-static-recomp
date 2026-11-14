@@ -47,12 +47,23 @@ public:
     // depth buffer's depth aspect; both GENERAL, `samples` per pixel, and left GENERAL. `allocate` gives a
     // descriptor set of a layout for this frame's work. Images replaced at a new size go to `retired` (the GPU may
     // still be using them).
+    // `scene` (hc09, ray-traced lighting, vk_raytrace.h): the scene's acceleration structure, in the view space the
+    // depth buffer gives: the occlusion is traced against it (with contact shadows) instead of read from the depth.
     void Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFlagBits samples, VkImageView depthView, const SceneView& view,
-               const std::function<VkDescriptorSet(VkDescriptorSetLayout)>& allocate, std::vector<Image>& retired);
+               const std::function<VkDescriptorSet(VkDescriptorSetLayout)>& allocate, std::vector<Image>& retired,
+               VkAccelerationStructureKHR scene = VK_NULL_HANDLE, const float* sun = nullptr,
+               uint32_t glossyFrom = ~0u);
+    // `glossyFrom` (with `scene`): the scene's triangles from this one on are mirror-like (the helmets' shells): the
+    // traced reflections show the scene in them (~0: none).
+    // `sun` (with `scene`; 8 values): the world's x axis in view space, how dark the lights' shadows are (0..1), the
+    // direction toward the sun in the world's axes and 1 by day (0: the stadium's floodlights instead): traced
+    // shadows from them, in the occlusion.
 
     // HDR output (HC09_HDR): the gain image the last Apply made (R16G16: gain, the brightness shown; GENERAL) and
     // the rectangle of the scene's target it covers (x, y, width, height), or nullptr.
     const Image* HdrGain(float rect[4]) const;
+    // hc09: whether the last Apply traced the lights' shadows (so the game's own are not needed).
+    bool TracedShadows() const { return tracedShadows_; }
 
 private:
     static constexpr int kBloomLevels = 5;
@@ -65,10 +76,13 @@ private:
                    reflectionComposite = VK_NULL_HANDLE, bloomPrefilter = VK_NULL_HANDLE, bloomDown = VK_NULL_HANDLE,
                    bloomUp = VK_NULL_HANDLE, focus = VK_NULL_HANDLE, depthOfField = VK_NULL_HANDLE, post = VK_NULL_HANDLE,
                    hdrGain = VK_NULL_HANDLE, postMerged = VK_NULL_HANDLE;
+        VkPipeline tracedReflections = VK_NULL_HANDLE;
+        VkPipeline tracedOcclusion = VK_NULL_HANDLE;   // hc09: ray-traced (with the device's ray queries)
     };
     bool Post() const { return bloom_ > 0 || grade_ > 0 || dof_ > 0 || hdr_; }
     Pipelines* GetPipelines(VkFormat format, VkSampleCountFlagBits samples);
-    VkPipeline CreatePipeline(VkShaderModule fs, VkFormat target, VkSampleCountFlagBits samples, int blend);
+    VkPipeline CreatePipeline(VkShaderModule fs, VkFormat target, VkSampleCountFlagBits samples, int blend,
+                              VkPipelineLayout layout = VK_NULL_HANDLE);
     bool Prepare(Image& image, VkFormat format, uint32_t width, uint32_t height, VkImageUsageFlags usage, std::vector<Image>& retired);
 
     Device* dev_ = nullptr;
@@ -81,10 +95,14 @@ private:
     bool hdr_ = false;            // HDR output: the gain image (vk_hdr.h)
     float peakRatio_ = 5.0f;      // its peak / paper white
     bool gainMade_ = false;       // the last Apply made the gain image
+    bool tracedShadows_ = false;  // and traced the lights' shadows
     float gainRect_[4] = {};
     bool loggedCamera_ = false;
     VkDescriptorSetLayout setLayout_ = VK_NULL_HANDLE;
     VkPipelineLayout pipeLayout_ = VK_NULL_HANDLE;
+    // hc09: the ray-traced occlusion's: the same bindings and the acceleration structure (binding 5).
+    VkDescriptorSetLayout tracedSetLayout_ = VK_NULL_HANDLE;
+    VkPipelineLayout tracedPipeLayout_ = VK_NULL_HANDLE;
     VkSampler linear_ = VK_NULL_HANDLE, nearest_ = VK_NULL_HANDLE;
     VkShaderModule vs_ = VK_NULL_HANDLE;
     std::vector<Pipelines> pipelines_;

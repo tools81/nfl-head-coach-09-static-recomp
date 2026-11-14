@@ -53,6 +53,10 @@ struct Device
     float anisotropy = 1.0f;           // the most sampler anisotropy the device allows (1: none)
     bool geometryShader = false;       // hc09: the feature is on (gl_PrimitiveID in fragment shaders: the crowd)
     bool tessellation = false;         // hc09: the feature is on (smoother player models, vk_tessellation.h)
+    bool vertexStores = false;         // hc09: vertex shaders may write storage buffers (ray tracing's scene capture)
+    // hc09: ray queries, acceleration structures and buffer device addresses are on (ray-traced lighting,
+    // vk_raytrace.h; only when hc09.ini RayTracing asks for them).
+    bool rayQuery = false;
 
     // Step 1: the instance, with the window's surface extensions.
     bool CreateInstance(const std::vector<const char*>& extensions, std::string* err);

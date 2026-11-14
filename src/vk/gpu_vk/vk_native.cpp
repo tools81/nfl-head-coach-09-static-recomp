@@ -20,6 +20,7 @@
 #include "vk_tessellation.h"
 #include "vk_motion.h"
 #include "vk_fsr3.h"
+#include "vk_raytrace.h"
 #include "vk_replay.h"
 #include "vk_scene_effects.h"
 #include "vk_shader_compile.h"
@@ -518,6 +519,45 @@ struct NativeRenderer::Impl
     ReplayRecorder replay;
     // hc09: temporal upscaling (vk_fsr3.h, roadmap 15).
     TemporalUpscaler fsr;
+    SceneRayTracer rt;                 // hc09: ray-traced lighting (vk_raytrace.h)
+    std::vector<uint32_t> rtIndices;   // a captured draw's triangle list (cached memory)
+    // hc09: ray-traced shadows' lights this frame, from the field's draw: its pixel constants c204 and c205 are the
+    // sun's direction and colour in the world's axes (y up; by day: at night the colour is black and the game lights
+    // the scene without a direction, so the stadium's four floodlight towers stand in), and its vertex constants
+    // c156..c159 the view-projection (the field has no world transform), which gives the world's x axis in view space
+    // (with the camera's up, the effects' shader has the world's axes).
+    float sunWorld[4] = {};   // toward the sun; w: 1 by day, 0: the floodlights
+    float worldX[3] = {};     // the world's x axis in view space
+    uint64_t sunFrame = ~0ull;
+    uint64_t tracedShadowsFrame = ~0ull - 1;   // the last frame whose lights' shadows were traced
+    void NoteSun(uint32_t vsBase, uint32_t psBase)
+    {
+        if (vsBase + 160 > 512 || psBase + 206 > 512) return;
+        float m[16], l[3], c[3];
+        for (uint32_t i = 0; i < 16; ++i) m[i] = AsF(Reg(reg::ALU_CONSTANTS + (vsBase + 156) * 4 + i));
+        for (uint32_t i = 0; i < 3; ++i)
+        {
+            l[i] = AsF(Reg(reg::ALU_CONSTANTS + (psBase + 204) * 4 + i));
+            c[i] = AsF(Reg(reg::ALU_CONSTANTS + (psBase + 205) * 4 + i));
+        }
+        const hc09::gpu::SceneCamera cam = hc09::gpu::CameraFromConstants(m);
+        if (!cam.valid) return;
+        // World x in view space: its clip x without the w part over the projection's scale, clip y likewise, and w.
+        float x[3] = { (m[0] - cam.cx * m[3]) / cam.sx, (m[1] - cam.cy * m[3]) / cam.sy, m[3] };
+        const float xn = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+        if (!(xn > 1e-9f)) return;
+        for (int i = 0; i < 3; ++i) worldX[i] = x[i] / xn;
+        const float ln = std::sqrt(l[0] * l[0] + l[1] * l[1] + l[2] * l[2]);
+        const bool day = ln > 1e-3f && std::max({ c[0], c[1], c[2] }) > 0.05f && std::fabs(l[1]) / ln > 0.15f;
+        const float sign = l[1] < 0.0f ? -1.0f : 1.0f;   // toward the light (above), as the turf's shading takes it
+        for (int i = 0; i < 3; ++i) sunWorld[i] = day ? sign * l[i] / ln : 0.0f;
+        sunWorld[3] = day ? 1.0f : 0.0f;
+        sunFrame = frame;
+        static uint64_t logged = 0;
+        if (Hc09Env("HC09_RAY_TRACING_PROF") && (logged++ < 3 || frame % 600 == 0))
+            fprintf(stderr, "[raytrace] frame %llu: sun %.3f %.3f %.3f colour %.3f %.3f %.3f: %s\n", (unsigned long long)frame, l[0], l[1], l[2],
+                    c[0], c[1], c[2], day ? "day" : "floodlights");
+    }
     uint64_t replayFrame = ~0ull;
     uint64_t gainFrame = ~0ull;   // the frame whose scene made the HDR gain image
     bool frontGain = false;       // the front buffer DecodeFrontBuffer made last is that frame's
@@ -2042,6 +2082,13 @@ struct NativeRenderer::Impl
         // HC09_NATIVE_SKIP_PS=<hex hash>: leave out the draws with that pixel shader (to see what they are; dev).
         static const uint64_t skipPs = [] { const char* e = Hc09Env("HC09_NATIVE_SKIP_PS"); return e ? strtoull(e, nullptr, 16) : 0ull; }();
         if (skipPs && psHash == skipPs) { Skip("HC09_NATIVE_SKIP_PS"); return; }
+        // hc09: ray-traced lighting: the lights' traced shadows replace the game's own (drawn into their own target
+        // before the scene, so by what the frame before did; HC09_RAY_TRACING_GAME_SHADOWS=1 keeps them: dev).
+        if (psHash == kPlayerShadowPs && tracedShadowsFrame + 1 == frame)
+        {
+            static const bool keep = [] { const char* e = Hc09Env("HC09_RAY_TRACING_GAME_SHADOWS"); return e && atoi(e) != 0; }();
+            if (!keep) { Skip("traced shadows"); return; }
+        }
         // HC09_NATIVE_SKIP_TARGET=<w>x<h>: leave out the draws into colour targets of that size (dev).
         static const std::pair<uint32_t, uint32_t> skipTarget = [] {
             uint32_t w = 0, h = 0;
@@ -2374,7 +2421,7 @@ struct NativeRenderer::Impl
             ai.pSetLayouts = &setLayout;
             if (vkAllocateDescriptorSets(dev->device, &ai, &set) != VK_SUCCESS) { Skip("descriptor pool exhausted"); return; }
             VkDescriptorBufferInfo bMem{ guest.buffer, 0, VK_WHOLE_SIZE }, bConst{ consts.buffer, 0, VK_WHOLE_SIZE };
-            VkWriteDescriptorSet w[8]{};
+            VkWriteDescriptorSet w[9]{};
             for (auto& x : w) { x.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; x.dstSet = set; x.descriptorCount = 1; }
             w[0].dstBinding = 0; w[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[0].pBufferInfo = &bMem;
             w[1].dstBinding = 1; w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[1].pBufferInfo = &bConst;
@@ -2388,7 +2435,10 @@ struct NativeRenderer::Impl
                 w[5 + k].descriptorCount = 32;
                 w[5 + k].pImageInfo = uimages[k];
             }
-            vkUpdateDescriptorSets(dev->device, 8, w, 0, nullptr);
+            // hc09: binding 9, the ray tracer's capture (any storage buffer when it is off: never written).
+            VkDescriptorBufferInfo bCapture{ rt.Ready() ? rt.CaptureBuffer() : consts.buffer, 0, VK_WHOLE_SIZE };
+            w[8].dstBinding = 9; w[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[8].pBufferInfo = &bCapture;
+            vkUpdateDescriptorSets(dev->device, 9, w, 0, nullptr);
             descSets.emplace(descKey, set);
         }
         if (set != lastSet) { lastSet = set; lastDescKey = descKey; }
@@ -2493,6 +2543,21 @@ struct NativeRenderer::Impl
             vkCmdSetStencilWriteMask(cb, VK_STENCIL_FACE_BACK_BIT, Bits(rmB, 16, 8));
             rec.stencilB = rmB;
         }
+        // hc09: ray-traced lighting: an opaque 3D draw of the scene writes its clip positions for the scene's
+        // acceleration structure (vk_raytrace.h).
+        if (rt.Ready() && (psHash == kTurfPs || psHash == kTurfNightPs) && sunFrame != frame && bt[0] && bound[0].width >= 1024) NoteSun(vsBase, psBase);
+        if (rt.Ready() && zEnable && zWrite && colorOn && !rect && !tess && bt[0] && bd && bound[0].width >= 1024 && bound[0].height >= 576 &&
+            !((Reg(reg::RB_COLORCONTROL) >> 3) & 1) && Perspective(vsBase, vsSize, vs->meta))
+        {
+            rtIndices.resize(triIndices);
+            WriteTriangleIndices(d, rtIndices.data());
+            int32_t capBase = 0;
+            if (rt.Add(frame, rtIndices.data(), triIndices, capBase, psHash == kHelmetPs))
+            {
+                C.clip[1] = 1;
+                C.clip[2] = uint32_t(capBase);
+            }
+        }
         Mark(NativeProfile::kGpuDraws);
         vkCmdDrawIndexed(cb, triIndices, 1, uint32_t(indexAt / 4), 0, 0);
         if (drawProf && tsPool && recording && this->slots[cur].tsN + 1 < kMaxTs)
@@ -2545,10 +2610,20 @@ struct NativeRenderer::Impl
         // The passes' descriptor sets (up to 17) must not make ComputeSet submit in the middle of them.
         if (computeSetsUsed + 24 > kComputeSets) SubmitAndWait(NativeProfile::kWaitCompute);
         Begin();
-        Mark(NativeProfile::kGpuOther);
+        Mark(NativeProfile::kGpuEffects);
+        const bool traced = rt.Ready() && rt.Build(cb, frame, sceneView.camera, squeeze);
+        // The lights' shadows: as dark as HC09_RAY_TRACING_SHADOWS (0..1; 0.85).
+        static const float shadowDark = [] {
+            const char* e = Hc09Env("HC09_RAY_TRACING_SHADOWS");
+            return e && *e ? std::clamp(float(atof(e)), 0.0f, 1.0f) : 0.85f;
+        }();
+        const float sun[8] = { worldX[0], worldX[1], worldX[2], shadowDark, sunWorld[0], sunWorld[1], sunWorld[2], sunWorld[3] };
         effects.Apply(cb, src->img, src->samples, bd->depthView, sceneView,
-                      [this](VkDescriptorSetLayout layout) { return ComputeSet(layout); }, garbage);
+                      [this](VkDescriptorSetLayout layout) { return ComputeSet(layout); }, garbage,
+                      traced ? rt.Scene() : VK_NULL_HANDLE, traced && sunFrame == frame ? sun : nullptr,
+                      traced && rt.HasGlossy() ? rt.GlossyFrom() : ~0u);
         if (float rect[4]; effects.HdrGain(rect)) gainFrame = frame;
+        if (effects.TracedShadows()) tracedShadowsFrame = frame;
         sceneView = {};
     }
 
@@ -3041,7 +3116,7 @@ bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* e
     }
 
     // Draw descriptors: as vk_edram without binding 3 (EDRAM).
-    VkDescriptorSetLayoutBinding b[8]{};
+    VkDescriptorSetLayoutBinding b[9]{};
     // hc09: guest memory and the draw constants are read by the tessellation stages too (vk_tessellation.h).
     const VkShaderStageFlags tessStages = dev.tessellation ? VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT : 0;
     b[0] = { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | tessStages, nullptr };
@@ -3051,8 +3126,10 @@ bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* e
     b[4] = { 5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
     for (uint32_t k = 0; k < 3; ++k)
         b[5 + k] = { 6 + k, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
+    // hc09: ray-traced lighting: the vertex shaders' capture of the scene's positions (vk_raytrace.h).
+    b[8] = { 9, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | tessStages, nullptr };
     VkDescriptorSetLayoutCreateInfo lci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    lci.bindingCount = 8;
+    lci.bindingCount = 9;
     lci.pBindings = b;
     // Update-after-bind pool: the 192 texture bindings count against the update-after-bind limits (Intel: 64
     // samplers per stage otherwise). Descriptors are still all written before the set is bound.
@@ -3066,7 +3143,7 @@ bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* e
     pci.pushConstantRangeCount = 1;
     pci.pPushConstantRanges = &pcr;
     VkDescriptorPoolSize sizes[3] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxSets },
-                                      { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxSets },
+                                      { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxSets * 2 },
                                       { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxSets / 2 * 32 * kTexKinds * 2 } };   // under Intel's 1M update-after-bind descriptors in all pools (x kSlots)
     VkDescriptorPoolCreateInfo dpi{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     if (uab) dpi.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
@@ -3079,12 +3156,13 @@ bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* e
         if (vkCreateDescriptorPool(d, &dpi, nullptr, &sl.pool) != VK_SUCCESS) { if (err) *err = "descriptor pool"; return false; }
 
     // Compute: one pool for resolves, texture decodes and mips.
-    VkDescriptorPoolSize cps[3] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, Impl::kComputeSets * 2 },
+    VkDescriptorPoolSize cps[4] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, Impl::kComputeSets * 2 },
                                     { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, Impl::kComputeSets * 2 },
-                                    { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, Impl::kComputeSets * 3 } };
+                                    { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, Impl::kComputeSets * 3 },
+                                    { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 8 } };   // hc09: ray-traced lighting
     VkDescriptorPoolCreateInfo cpi{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     cpi.maxSets = Impl::kComputeSets;
-    cpi.poolSizeCount = 3;
+    cpi.poolSizeCount = dev.rayQuery ? 4 : 3;
     cpi.pPoolSizes = cps;
     for (Impl::Slot& sl : I.slots)
         if (vkCreateDescriptorPool(d, &cpi, nullptr, &sl.computePool) != VK_SUCCESS) { if (err) *err = "compute pool"; return false; }
@@ -3213,6 +3291,7 @@ bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* e
     VkSamplerCreateInfo nci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
     vkCreateSampler(d, &nci, nullptr, &I.nearest);
     I.effects.Init(dev);
+    if (I.rt.Init(dev)) I.translate.capture = true;
     if (const int mode = TemporalUpscaler::Mode())
     {
         // The game's 3D scene is 1280 x 736 (times the scale); drawn at 1 / Ratio of that per side.
@@ -3410,6 +3489,7 @@ void NativeRenderer::Shutdown()
     I.effects.Shutdown();
     I.replay.Destroy(*I.dev);
     I.fsr.Destroy();
+    I.rt.Destroy();
     if (I.crowdHistory.img.image) I.dev->DestroyImage(I.crowdHistory.img);
     I.Park(I.slots[I.cur]);
     for (Impl::Slot& sl : I.slots)

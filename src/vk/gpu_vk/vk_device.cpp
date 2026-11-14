@@ -189,6 +189,11 @@ bool Device::CreateDevice(VkSurfaceKHR surface, std::string* err)
     // EDRAM renderer (vk_edram): fragment shader interlock, stores from fragment
     // shaders, clip distances for the near/far planes.
     VkPhysicalDeviceFragmentShaderInterlockFeaturesEXT fsi{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_INTERLOCK_FEATURES_EXT };
+    // hc09: ray-traced lighting (vk_raytrace.h): ray queries on acceleration structures, when asked for and there.
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR asf{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR };
+    VkPhysicalDeviceRayQueryFeaturesKHR rqf{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR };
+    bool wantRays = false;
+    if (const char* e = Hc09Env("HC09_RAY_TRACING")) wantRays = *e && strcmp(e, "0") != 0;
     {
         uint32_t n = 0;
         vkEnumerateDeviceExtensionProperties(physical, nullptr, &n, nullptr);
@@ -205,6 +210,37 @@ bool Device::CreateDevice(VkSurfaceKHR surface, std::string* err)
                 vkGetPhysicalDeviceProperties2(physical, &p2);
                 hostImportAlignment = hp.minImportedHostPointerAlignment;
             }
+        auto has = [&](const char* name) {
+            for (auto& e : avail)
+                if (!strcmp(e.extensionName, name)) return true;
+            return false;
+        };
+        if (wantRays && has(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) && has(VK_KHR_RAY_QUERY_EXTENSION_NAME) &&
+            has(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME))
+        {
+            VkPhysicalDeviceFeatures2 q{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+            VkPhysicalDeviceVulkan12Features q12{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+            VkPhysicalDeviceAccelerationStructureFeaturesKHR qa{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR };
+            VkPhysicalDeviceRayQueryFeaturesKHR qr{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR };
+            q.pNext = &q12;
+            q12.pNext = &qa;
+            qa.pNext = &qr;
+            vkGetPhysicalDeviceFeatures2(physical, &q);
+            if (q12.bufferDeviceAddress && qa.accelerationStructure && qr.rayQuery && supported.vertexPipelineStoresAndAtomics)
+            {
+                exts.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
+                exts.push_back(VK_KHR_RAY_QUERY_EXTENSION_NAME);
+                exts.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+                f12.bufferDeviceAddress = VK_TRUE;
+                asf.accelerationStructure = VK_TRUE;
+                rqf.rayQuery = VK_TRUE;
+                rayQuery = true;
+            }
+            else
+                fprintf(stderr, "[vk] ray tracing asked for, but this GPU or driver has no ray queries: off\n");
+        }
+        else if (wantRays)
+            fprintf(stderr, "[vk] ray tracing asked for, but this GPU or driver has no ray queries: off\n");
         for (auto& e : avail)
             if (!strcmp(e.extensionName, VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME))
             {
@@ -222,6 +258,14 @@ bool Device::CreateDevice(VkSurfaceKHR surface, std::string* err)
     VkPhysicalDeviceFeatures2 f2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
     f2.pNext = &f12;
     if (fsi.fragmentShaderPixelInterlock) f13.pNext = &fsi;
+    if (rayQuery)
+    {
+        rqf.pNext = f13.pNext;
+        asf.pNext = &rqf;
+        f13.pNext = &asf;
+    }
+    f2.features.vertexPipelineStoresAndAtomics = supported.vertexPipelineStoresAndAtomics;
+    vertexStores = supported.vertexPipelineStoresAndAtomics != VK_FALSE;
     f2.features.fragmentStoresAndAtomics = supported.fragmentStoresAndAtomics;
     f2.features.shaderClipDistance = supported.shaderClipDistance;
     f2.features.shaderFloat64 = supported.shaderFloat64;   // exact divisions in the EDRAM arithmetic
@@ -292,6 +336,9 @@ bool Device::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryP
     VkMemoryAllocateInfo ai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
     ai.allocationSize = req.size;
     ai.memoryTypeIndex = MemoryType(req.memoryTypeBits, flags);
+    VkMemoryAllocateFlagsInfo af{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO };   // hc09: buffer device addresses
+    af.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+    if (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) ai.pNext = &af;
     if (ai.memoryTypeIndex == ~0u || vkAllocateMemory(device, &ai, nullptr, &out.memory) != VK_SUCCESS) return false;
     vkBindBufferMemory(device, out.buffer, out.memory, 0);
     out.size = size;

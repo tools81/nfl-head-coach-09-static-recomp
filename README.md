@@ -183,6 +183,18 @@ Scale=2
   `textures\hd`, where the game loads them from the next start. The first run downloads the upscaler
   (45 MB) into `thirdparty\realesrgan`. Data textures (normal maps, masks) are left as the game has
   them. The pack is made from your own copy of the game and stays on your PC. `off` by default.
+- `RayTracing`: `on` traces the 3D scenes' ambient occlusion with the graphics card's ray tracing, against
+  the scene's real geometry rather than only what the depth buffer shows. Players get soft contact shadows on
+  the turf and in pileups, and creases under helmets and arms darken more naturally. It also traces shadows
+  from the lights: four faint shadows around each player from the floodlight towers at night, and the sun's
+  shadows by day; in close-ups a coach's cap shades his face. These replace the game's own player shadows,
+  which are no longer drawn while they are traced. Nearby surfaces also pass on a little of their
+  colour, such as the turf's green on shoes and lower legs. With `Reflections` on, the field's reflections are
+  traced too (so players hidden behind others or off screen still show), and helmet shells mirror what is
+  around them when the camera is close. It needs a card with
+  Vulkan ray queries (NVIDIA RTX, AMD RX 6000 and later, Intel Arc); without one, the usual ambient occlusion
+  stays. At 1440p it costs about 4 to 7 ms per frame on an RTX 3070. `off` by default. `AmbientOcclusion` still
+  sets its strength.
 - `Bloom`, `ColorGrading` and `DepthOfField`: post-processing of the 3D scenes (never the menus or
   on-field graphics), each a strength where `0` is off and `1` the default. Bloom makes stadium lights and
   other near-white highlights glow softly. Colour grading adds a filmic roll-off into white (so the bloom
