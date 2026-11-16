@@ -18,6 +18,8 @@
 #include <vector>
 
 #include "common/broadcast_state.h"
+#include "gpu/swappable_images.h"
+#include "gpu/texture_replacements.h"
 #include "gpu_vk/vk_replay.h"
 #include "gpu_vk/vk_swapchain.h"
 #include "xenos_texture.h"
@@ -243,28 +245,66 @@ namespace
             }
     }
 
+    // The lower-third's player: his portrait, from the picture that replaces it (PlayerPortraits/<id>.png among the
+    // swappable images' replacements, HC27's or the user's; the game's own are not read here), premultiplied. Empty
+    // if there is none.
+    constexpr int kPortrait = 4;   // its slot
+    struct Portrait
+    {
+        uint32_t id = 0;
+        Logo picture;
+    } g_portrait;
+
+    void LoadPortrait(uint32_t id)
+    {
+        if (g_portrait.id == id)
+            return;
+        g_portrait.id = id;
+        g_portrait.picture = Logo{};
+        if (!id)
+            return;
+        const std::wstring path = hc09::gpu::SwappableReplacementPath(hc09::gpu::SwappableImage{ "PlayerPortraits", id });
+        std::vector<uint8_t> pixels;
+        uint32_t width = 0, height = 0;
+        if (path.empty() || !hc09::gpu::LoadReplacementPixels(path, kSlotH, kSlotH, pixels, width, height) || !width || !height)
+            return;
+        Logo& out = g_portrait.picture;
+        out.width = width;
+        out.height = height;
+        out.rgba.resize(size_t(width) * height);
+        for (size_t i = 0; i < out.rgba.size(); ++i)
+        {
+            const uint32_t a = pixels[i * 4 + 3];
+            uint32_t p = a << 24;
+            for (int c = 0; c < 3; ++c)
+                p |= ((pixels[i * 4 + c] * a + 127) / 255) << (8 * c);
+            out.rgba[i] = p;
+        }
+    }
+
     // The atlas: the font's coverage as premultiplied white, then two rows of two slots: the teams' logos (away, home),
-    // the score box's backdrop and frame.
+    // the score box's backdrop and frame; beside the first row, the lower-third's portrait.
     struct Atlas
     {
-        uint64_t fontVersion = ~0ull, versions[4] = { ~0ull, ~0ull, ~0ull, ~0ull };
-        uint32_t pictures[4] = { ~0u, ~0u, ~0u, ~0u };
-        float logoUv[4][4] = {};     // u0, v0, u1, v1 of each slot's picture
-        float logoAspect[4] = {};    // its width / height (0: none)
+        uint64_t fontVersion = ~0ull, versions[5] = { ~0ull, ~0ull, ~0ull, ~0ull, ~0ull };
+        uint32_t pictures[5] = { ~0u, ~0u, ~0u, ~0u, ~0u };
+        float logoUv[5][4] = {};     // u0, v0, u1, v1 of each slot's picture
+        float logoAspect[5] = {};    // its width / height (0: none)
         uint64_t version = 0;
     } g_atlas;
 
-    void Compose(hc09vk::Swapchain& swapchain, const uint32_t teams[2])
+    void Compose(hc09vk::Swapchain& swapchain, const uint32_t teams[2], uint32_t portrait)
     {
-        const uint32_t pictures[4] = { teams[0], teams[1], kBackdrop, kFrame };
-        uint64_t versions[4];
+        LoadPortrait(portrait);
+        const uint32_t pictures[5] = { teams[0], teams[1], kBackdrop, kFrame, portrait };
+        uint64_t versions[5] = {};
         {
             std::lock_guard<std::mutex> lock(g_logoMutex);
             for (int i = 0; i < 4; ++i)
                 versions[i] = pictures[i] >= 1 && pictures[i] <= 34 ? g_logos[pictures[i]].version : 0;
         }
         bool same = g_atlas.fontVersion == g_font.version && swapchain.overlayAtlasVersion == g_atlas.version;
-        for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < 5; ++i)
             same = same && g_atlas.pictures[i] == pictures[i] && g_atlas.versions[i] == versions[i];
         if (same)
             return;
@@ -272,10 +312,13 @@ namespace
         std::vector<uint32_t> atlas(size_t(width) * height, 0);
         for (size_t i = 0; i < g_font.atlas.size(); ++i)
             atlas[i] = g_font.atlas[i] * 0x01010101u;
-        for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < 5; ++i)
         {
             g_atlas.logoAspect[i] = 0;
             Logo logo;
+            if (i == kPortrait)
+                logo = g_portrait.picture;
+            else
             {
                 std::lock_guard<std::mutex> lock(g_logoMutex);
                 if (pictures[i] >= 1 && pictures[i] <= 34)
@@ -287,7 +330,8 @@ namespace
             const uint32_t w = std::max(1u, uint32_t(logo.width * scale + 0.5f)), h = std::max(1u, uint32_t(logo.height * scale + 0.5f));
             std::vector<uint32_t> fitted;
             Resize(logo, w, h, fitted);
-            const uint32_t ox = kBorder + (i % 2) * (kSlotW + 2 * kBorder), oy = uint32_t(g_font.height) + kBorder + (i / 2) * (kSlotH + 2 * kBorder);
+            const uint32_t column = i == kPortrait ? 2 : i % 2, row = i == kPortrait ? 0 : i / 2;
+            const uint32_t ox = kBorder + column * (kSlotW + 2 * kBorder), oy = uint32_t(g_font.height) + kBorder + row * (kSlotH + 2 * kBorder);
             for (uint32_t y = 0; y < h; ++y)
                 std::copy_n(&fitted[size_t(y) * w], w, &atlas[size_t(oy + y) * width + ox]);
             g_atlas.logoUv[i][0] = float(ox) / width;
@@ -297,7 +341,7 @@ namespace
             g_atlas.logoAspect[i] = float(w) / h;
         }
         g_atlas.fontVersion = g_font.version;
-        for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < 5; ++i)
             g_atlas.pictures[i] = pictures[i], g_atlas.versions[i] = versions[i];
         g_atlas.version = swapchain.overlayAtlasVersion + 1;
         swapchain.overlayAtlas = std::move(atlas);
@@ -506,6 +550,69 @@ namespace
             }
         }
     }
+
+    // A lower-third (common/play_log.cpp), centred above the ribbon (whose top is `ribbonTop`) and the game's ticker strip over it: the player's
+    // portrait on his team's colour (its logo when he has no picture), then his name with his position and number,
+    // and under it what he did and his game so far. It rises into place, stays six seconds and fades.
+    void Third(std::vector<OverlayVtx>& out, const hc09::broadcast::Scoreboard& board, const hc09::broadcast::LowerThird& third, float x0,
+               float w, float ribbonTop, float H, float opacity)
+    {
+        if (!third.id)
+            return;
+        const float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - third.at).count();
+        constexpr float kIn = 0.30f, kStay = 6.0f, kOut = 0.35f;
+        if (t < 0 || t > kStay + kOut)
+            return;
+        const float in = std::clamp(t / kIn, 0.0f, 1.0f), ease = 1 - (1 - in) * (1 - in);
+        const float alpha = opacity * (t > kStay ? 1 - (t - kStay) / kOut : ease);
+        if (alpha <= 0)
+            return;
+        const int side = third.side == 0 || third.side == 1 ? third.side : -1;
+        const uint32_t colour = side < 0 ? 0x3A414B : side == 0 ? board.away.rgb : board.home.rgb;
+        const float shadow = std::max(1.0f, std::round(H / 30)), pad = std::round(H * 0.36f);
+        const float rowA = std::round(H * 1.02f), rowB = std::round(H * 0.80f), height = rowA + rowB;
+        const bool portrait = third.portrait && g_atlas.pictures[kPortrait] == third.portrait && g_atlas.logoAspect[kPortrait] > 0;
+        const int picture = portrait ? kPortrait : side;
+        const float block =
+            picture >= 0 && g_atlas.logoAspect[picture] > 0 ? std::round(height * (portrait ? 1.0f : 1.15f)) : std::round(H * 0.3f);
+        const float nameW = Width(g_font.big, third.name), tagW = Width(g_font.small, third.tag);
+        const float headW = Width(g_font.small, third.headline), statW = Width(g_font.small, third.stats);
+        const float gap = std::round(H * 0.45f);
+        const float textW = std::max(nameW + (tagW > 0 ? gap + tagW : 0), headW + (statW > 0 ? gap + statW : 0));
+        const float width = block + pad + std::round(textW) + pad;
+        const float frame = std::max(1.0f, std::round(H * 0.04f));
+        const float bottom = std::round(ribbonTop - frame - H * 1.14f + (1 - ease) * H * 0.5f), top = bottom - height;
+        const float left = std::round(x0 + (w - width) / 2);
+        Rect(out, left - frame, top - frame, left + width + frame, bottom + frame, Rgba(0x06080A, 0.90f * alpha));
+        // The team's block.
+        Quad(out, left, top, left + block, bottom, Rgba(Mix(colour, 0xFFFFFF, 0.12f), alpha), Rgba(Shade(colour, 0.70f), alpha),
+             Rgba(Shade(colour, 0.40f), alpha), Rgba(Shade(colour, 0.80f), alpha));
+        if (portrait)
+            Logo(out, kPortrait, left, top, block, height, alpha);   // square, filling the block
+        else if (side >= 0 && g_atlas.logoAspect[side] > 0)
+        {
+            const float aspect = g_atlas.logoAspect[side];
+            float lw = block * 0.80f, lh = lw / aspect;
+            if (lh > height * 0.80f)
+                lh = height * 0.80f, lw = lh * aspect;
+            Logo(out, side, std::round(left + (block - lw) / 2), std::round(top + (height - lh) / 2), std::round(lw), std::round(lh), alpha);
+        }
+        // The name's row, and under it the play's: brighter for a score or a turnover.
+        const float tx = left + block;
+        Quad(out, tx, top, left + width, top + rowA, Rgba(0x30353D, alpha), Rgba(0x2A2E35, alpha), Rgba(0x1A1D22, alpha), Rgba(0x1E2126, alpha));
+        const uint32_t under = third.big ? Shade(colour, 0.85f) : 0x121417;
+        Quad(out, tx, top + rowA, left + width, bottom, Rgba(under, alpha), Rgba(Shade(under, 0.8f), alpha), Rgba(Shade(under, 0.6f), alpha),
+             Rgba(Shade(under, 0.8f), alpha));
+        Rect(out, tx, top + rowA, left + width, top + rowA + std::max(1.0f, std::round(H * 0.05f)), Rgba(colour, alpha));
+        ShadowedText(out, g_font.big, third.name, tx + pad, top + rowA / 2, 0xF6F7F8, alpha, shadow);
+        if (tagW > 0)
+            ShadowedText(out, g_font.small, third.tag, tx + pad + nameW + gap, top + rowA / 2 + (g_font.big.cap - g_font.small.cap) / 2, 0xB9C0C9,
+                         alpha, shadow);
+        const float by = top + rowA + rowB / 2 + std::round(H * 0.02f);
+        ShadowedText(out, g_font.small, third.headline, tx + pad, by, third.big ? TextOn(under) : 0xFFC233, alpha, shadow);
+        if (statW > 0)
+            ShadowedText(out, g_font.small, third.stats, tx + pad + headW + gap, by, third.big ? TextOn(under) : 0xD5DAE0, alpha, shadow);
+    }
 }
 
 void ScoreBarBuild(hc09vk::Swapchain& swapchain, float x0, float y0, float w, float h)
@@ -543,7 +650,8 @@ void ScoreBarBuild(hc09vk::Swapchain& swapchain, float x0, float y0, float w, fl
     if (!Bake(barHeight))
         return;
     const uint32_t teams[2] = { board.away.id, board.home.id };
-    Compose(swapchain, teams);
+    const hc09::broadcast::LowerThird third = hc09::broadcast::LatestLowerThird();
+    Compose(swapchain, teams, third.portrait);
     if (board.box > 0)
         Box(swapchain, board, x0, y0, w, h);
     if (opacity <= 0)
@@ -581,6 +689,18 @@ void ScoreBarBuild(hc09vk::Swapchain& swapchain, float x0, float y0, float w, fl
 
     std::vector<OverlayVtx>& out = swapchain.overlay;
     const float left = std::round(x0 + (w - total) / 2);
+    // The TV camera's name, for a few seconds after a change of camera: above the bar's left end.
+    if (const char* camera = hc09::broadcast::TvCameraNote())
+    {
+        const std::string label = "CAMERA", name = camera;
+        const float lw = std::round(Width(g_font.small, label)), nw = std::round(Width(g_font.big, name));
+        const float nh = std::round(H * 0.9f), nb = top - gap * 2, nt = nb - nh;
+        const float mid = (nt + nb) / 2, sep = std::round(H * 0.28f);
+        Quad(out, left, nt, left + pad + lw + sep + nw + pad, nb, Rgba(0x30353D, opacity), Rgba(0x2A2E35, opacity), Rgba(0x14171B, opacity),
+             Rgba(0x181B20, opacity));
+        ShadowedText(out, g_font.small, label, left + pad, mid, 0xB9C0C9, opacity, shadow);
+        ShadowedText(out, g_font.big, name, left + pad + lw + sep, mid, 0xFFC233, opacity, shadow);
+    }
     // The ribbon's frame: dark, a little larger than the panels, which its colour shows between.
     const float frame = std::max(1.0f, std::round(H * 0.04f));
     Rect(out, left - frame, top - frame, left + total + frame, bottom + frame, Rgba(0x06080A, 0.92f * opacity));
@@ -666,4 +786,5 @@ void ScoreBarBuild(hc09vk::Swapchain& swapchain, float x0, float y0, float w, fl
         if (sW > 0)
             ShadowedText(out, g_font.small, spot, x + pad + dW + std::round(H * 0.25f), middle, 0xB9C0C9, opacity, shadow);
     }
+    Third(out, board, third, x0, w, top, H, opacity);
 }

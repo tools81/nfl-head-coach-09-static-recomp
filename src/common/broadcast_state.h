@@ -40,6 +40,27 @@ namespace hc09::broadcast
         std::chrono::steady_clock::time_point playClockChanged;   // the play clock's last change (it stops at a snap)
     };
 
+    // A lower-third: after a play worth one, the player who made it, what he did and his game so far, from the
+    // game's own play-by-play (common/play_log.cpp).
+    struct LowerThird
+    {
+        uint64_t id = 0;                               // changes with each (0: none yet)
+        std::chrono::steady_clock::time_point at;      // when it was made
+        int side = -1;                                 // 0 the away team's player, 1 the home team's, -1 not known
+        std::string name, tag, headline, stats;        // "JOSH JACOBS", "HB  #8", "18-YARD RUN", "5 CAR   46 YDS"
+        bool big = false;                              // a score or a turnover
+        uint32_t portrait = 0;                         // his portrait (PLAY.PSXP; 0: not known)
+    };
+
+    // The latest lower-third (LowerThirds, HC09_LOWER_THIRDS: on with the score bar; "off" for none).
+    LowerThird LatestLowerThird();
+
+    // The TV cameras (common/tv_camera.cpp; TVCamera, HC09_TV_CAMERA). The next one of main, end zone, low sideline
+    // and aerial: false when the game's camera is not the Broadcast one (nothing changed).
+    bool CycleTvCamera();
+    // The camera's name for a few seconds after a change (nullptr otherwise), for the score bar to show.
+    const char* TvCameraNote();
+
     // The bar's font (SIL Open Font License, fonts/OFL.txt), from the game's folder.
     inline constexpr const char* kFontFile = "fonts\\BarlowCondensed-SemiBold.ttf";
 

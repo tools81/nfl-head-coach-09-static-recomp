@@ -330,7 +330,10 @@ void main()
         }
     }
     float open = 1.0 - covered / float(kRays);
-    // Contact shadows from above.
+    // Close-ups (a coach's face filling the picture).
+    float closeUp = 1.0 - smoothstep(6.0, 18.0, center3.z);
+    // Contact shadows from above. Not in close-ups: straight under a cap's brim they made a dark patch down the
+    // middle of a face that looks down; there the brim's shadow comes from the light below instead.
     vec3 up = normalize(upView);
     float lit = 1.0;
     const int kShadowRays = 2;
@@ -344,6 +347,7 @@ void main()
             if (t >= 0.0)
                 lit -= (1.0 - t / kContact) / float(kShadowRays);
         }
+    lit = mix(lit, 1.0, closeUp);
     // Shadows from the lights: the sun by day (soft: rays in a narrow cone), at night the stadium's four floodlight
     // towers (each a quarter of the light, a wider cone: four faint shadows around each player, as on TV). On
     // surfaces that face the light, fading in over the first few degrees.
@@ -352,16 +356,29 @@ void main()
     {
         vec3 wx = normalize(worldXView), wy = normalize(upView);
         vec3 wz = normalize(cross(wy, wx));   // the game's world is left-handed
+        // With no field in the picture (a close-up against the stands) the sun is not known: then only the
+        // close-up's own light below casts.
+        bool keyOnly = sunDay > 1.5;
         bool day = sunDay > 0.5;
         int lights = day ? 1 : 4;
         float shadowed = 0.0;
-        // Close-ups: more rays in a wider cone, for a soft edge (a cap's brim across a face).
-        float closeUp = 1.0 - smoothstep(6.0, 18.0, center3.z);
+        // Close-ups: more rays in a wider cone, for a soft edge (a cap's brim across a face); and the rays start
+        // nearer the surface and count what is nearer. The usual start (about 2 cm off) and nearest hit (about 5 cm)
+        // passed by where the brim meets the cap, leaving the top of the forehead lit right under the cap.
+        vec3 lightStart = center3 + normal * mix(0.02 + center3.z * 0.0015, 0.004, closeUp);
+        float lightNearest = mix(nearest, 0.003, closeUp);
         for (int k = 0; k < lights; k++)
         {
             // The towers: beyond the field's corners, about 40 degrees up.
             vec3 w = day ? sunWorld : normalize(vec3((k & 1) != 0 ? 0.55 : -0.55, 0.62, (k & 2) != 0 ? 0.56 : -0.56));
             vec3 l = normalize(wx * w.x + wy * w.y + wz * w.z);
+            // Close-ups: the game lights a face with its own lights, not the sun, so the sun's shadows fell only on
+            // the part of the face turned to it (a dark band down the middle under a high sun). There the light
+            // comes from above the camera instead, as a broadcast lights a face: a cap's brim then shades the
+            // forehead and eyes, whichever way the stadium faces.
+            // (Above as the picture has it, not the world's up: a camera that looks up at a face from below would
+            // put a light from the world's up behind the cap.)
+            l = normalize(mix(l, normalize(vec3(0.0, 0.80, 0.0) - normalize(center3) * 0.60), keyOnly ? 1.0 : closeUp));
             float facing = dot(normal, l);
             if (facing <= 0.0)
                 continue;
@@ -374,8 +391,12 @@ void main()
                 float a = angle + float(i) * 6.2831853 / float(rays) + float(k) * 1.3;
                 float cone = mix(day ? 0.035 : 0.07, 0.1, closeUp) * sqrt(fract(offset + float(i) * 0.618));
                 vec3 direction = normalize(l + (lt * cos(a) + lb * sin(a)) * cone);
-                // By night only what is near casts (players, benches): the towers stand above the stands.
-                if (Hit(start, direction, nearest, day ? 150.0 : 25.0) >= 0.0)
+                // Only what is near casts (players, benches, the goal posts), not the stands. By night the towers
+                // stand above them; by day the game has the stands' shadow in the field's own lighting already (a
+                // late-afternoon game: most of the field, with bands of sun), and tracing it again darkened that
+                // shade a second time, nearly to black. In close-ups only what the person wears (a cap's brim, a
+                // headset).
+                if (Hit(lightStart, direction, lightNearest, mix(25.0, 0.6, closeUp)) >= 0.0)
                     blocked += 1.0 / float(rays);
             }
             shadowed += blocked * smoothstep(0.0, 0.15, facing) / float(lights);
@@ -383,7 +404,9 @@ void main()
         // Mostly on the ground (a player's own pads and helmet shadow him less: the models are coarse); in close-ups
         // on everything, a little lighter.
         float receiver = mix(mix(0.35, 1.0, smoothstep(0.3, 0.8, dot(normal, wy))), 0.8, closeUp);
-        sunLit = 1.0 - sunShadow * (day ? 0.7 : 1.0) * shadowed * receiver;   // the sun fills in more than the towers
+        // By day the sky fills the shadows in: at 0.7 here a day game's shadowed turf kept 40% of its light, which
+        // read as black patches (Soldier Field, the stands' shadow over half the field).
+        sunLit = 1.0 - sunShadow * (day && !keyOnly ? 0.5 : keyOnly ? 0.7 : 1.0) * shadowed * receiver * (keyOnly ? closeUp : 1.0);
     }
     // The light left, coloured by the bounce: its luminance where the screen-space pass has its occlusion, its tint
     // (Co, Cg) beside the view distance.
@@ -1277,7 +1300,7 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
         if (traced) c.reflections = bounce;
         if (traced && sun)   // the lights' slots, back after the pass
         {
-            tracedShadows_ = sun[3] > 0.0f;
+            tracedShadows_ = sun[3] > 0.0f && sun[7] < 1.5f;   // not when only close-ups are shadowed (no sun known)
             c.blurDirection[0] = sun[0];
             c.blurDirection[1] = sun[1];
             c.targetInvSize[0] = sun[2];

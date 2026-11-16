@@ -260,6 +260,21 @@ namespace hc09::debug
         std::fflush(stderr);
     }
 
+    void WatchNow(uint32_t address, uint32_t length)
+    {
+        std::thread([address, length] {
+            static std::once_flag handler;
+            std::call_once(handler, [] { AddVectoredExceptionHandler(1, OnWatchHit); });
+            std::lock_guard lock(g_mutex);
+            if (g_watches.size() >= 4)
+                return;
+            g_watches.push_back({ address, length });
+            std::fprintf(stderr, "[watch] 0x%08X (%u bytes) armed\n", address, length);
+            for (const auto& entry : g_threads)
+                ArmWatches(entry.handle);
+        }).detach();
+    }
+
     void StartWatchdogFromEnvironment()
     {
         // HC09_WATCH entries: "ADDR" watches one byte, "ADDR:LEN" LEN (1, 2, 4 or 8, aligned)

@@ -18,4 +18,7 @@ namespace hc09::debug
     // If HC09_WATCH=<guest address>[,...] is set (up to 4), every guest thread gets a
     // hardware write breakpoint on those bytes; each write logs the value and the writer's stack.
     void StartWatchdogFromEnvironment();
+
+    // Dev: adds a write breakpoint on `length` (1, 2, 4 or 8, aligned) guest bytes now (at most 4 in all).
+    void WatchNow(uint32_t address, uint32_t length);
 }

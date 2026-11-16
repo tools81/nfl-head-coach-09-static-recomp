@@ -419,6 +419,32 @@ PPC_FUNC(sub_82B04600)
         return;
     }
     const char* name = NameOf(base, object);
+    // Dev (HC09_APT_LOG): every text the script sets, with the clip it is set on (and its parents).
+    static const bool aptLog = Hc09Env("HC09_APT_LOG") != nullptr;
+    if (aptLog && Word(base, value) == kString)
+    {
+        std::string path;
+        uint32_t up = object;
+        for (int depth = 0; depth < 5 && Guest(up); ++depth, up = Word(base, up + 0x1C))
+        {
+            const char* n = NameOf(base, up);
+            bool clean = n[0] != 0;
+            for (int k = 0; k < 48 && n[k]; ++k)
+                clean = clean && n[k] > 32 && n[k] < 127;
+            path = std::string(clean ? n : "?") + (depth ? "/" : "") + path;
+        }
+        const char* m = MemberOf(base, ctx.r6.u32);
+        bool clean = m[0] != 0;
+        for (int k = 0; k < 48 && m[k]; ++k)
+            clean = clean && m[k] > 32 && m[k] < 127;
+        static std::string last;
+        const std::string line = path + " ." + (clean ? m : "?") + " = \"" + Text(base, value) + "\"";
+        if (line != last)
+        {
+            last = line;
+            std::fprintf(stderr, "[apt] %s\n", line.c_str());
+        }
+    }
     if (!name[0])
     {
         __imp__sub_82B04600(ctx, base);

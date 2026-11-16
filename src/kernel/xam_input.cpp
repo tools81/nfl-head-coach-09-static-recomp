@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "common/broadcast_state.h"
 #include "gpu/draw.h"
 #include "kernel/guest.h"
 
@@ -200,6 +201,22 @@ namespace hc09
                     merged.sThumbRX = host.Gamepad.sThumbRX, merged.sThumbRY = host.Gamepad.sThumbRY;
             }
             merged.wButtons |= WORD(buttons);
+            // hc09: a click of the right stick goes to the next TV camera (common/tv_camera.cpp) while the game's
+            // Broadcast camera is on; the game is not given that click.
+            {
+                static bool held = false, taken = false;
+                const bool down = (merged.wButtons & XINPUT_GAMEPAD_RIGHT_THUMB) != 0;
+                if (down && !held)
+                    taken = hc09::broadcast::CycleTvCamera();
+                held = down;
+                if (!down)
+                    taken = false;
+                if (taken)
+                {
+                    merged.wButtons &= WORD(~XINPUT_GAMEPAD_RIGHT_THUMB);
+                    buttons &= ~uint32_t(XINPUT_GAMEPAD_RIGHT_THUMB);
+                }
+            }
             if (buttons & kLeftTrigger)
                 merged.bLeftTrigger = 255;
             if (buttons & kRightTrigger)

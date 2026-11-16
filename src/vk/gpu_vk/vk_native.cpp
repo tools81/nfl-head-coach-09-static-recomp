@@ -1,3 +1,4 @@
+#include "gpu/texture_replacements.h"
 #include "../dev_env.h"
 #include "vk_native.h"
 
@@ -2181,6 +2182,11 @@ struct NativeRenderer::Impl
             }
         }
         lap.To(NativeProfile::kDrawTextures);
+        if (insetFrame == frame && !zEnable && n <= 24 && bt[0] && bound[0].width >= 1024 && PanelShadow(slots, texOf, tfOf))
+        {
+            Skip("panel shadow");
+            return;
+        }
         if (constUsed + 1 >= kMaxDraws || indexUsed + ibytes > kIndexRingBytes || descSets.size() >= kMaxSets)
         {
             SubmitAndWait(NativeProfile::kWaitRing);
@@ -2501,8 +2507,10 @@ struct NativeRenderer::Impl
             for (uint32_t s = 0; s < 32; ++s)
                 if ((slots & (1u << s)) && texOf[s])
                 {
-                    char at[16];
-                    snprintf(at, sizeof(at), "@%08X", texOf[s]->pa);
+                    char at[40];
+                    uint64_t content = 0;
+                    hc09::gpu::TextureContentHash(tfOf[s].dword, content);
+                    snprintf(at, sizeof(at), "@%08X#%016llX", texOf[s]->pa, (unsigned long long)content);
                     tex += " " + std::to_string(texOf[s]->width) + "x" + std::to_string(texOf[s]->height) + (SamplesWide(tfOf[s]) ? "w" : "") + at;
                 }
             fprintf(stderr, "[draw] %ux%u ms%u vs %016llx ps %016llx sq %d 3d %d colour %d stencil %d z %d%d scissor %d,%d-%d,%d n %u tex%s\n", bound[0].width,
@@ -2546,8 +2554,9 @@ struct NativeRenderer::Impl
         // hc09: ray-traced lighting: an opaque 3D draw of the scene writes its clip positions for the scene's
         // acceleration structure (vk_raytrace.h).
         if (rt.Ready() && (psHash == kTurfPs || psHash == kTurfNightPs) && sunFrame != frame && bt[0] && bound[0].width >= 1024) NoteSun(vsBase, psBase);
+        if (zEnable && zWrite && bt[0] && bd && bound[0].width >= 1024 && bound[0].height >= 576 && SmallViewport()) NoteInset();
         if (rt.Ready() && zEnable && zWrite && colorOn && !rect && !tess && bt[0] && bd && bound[0].width >= 1024 && bound[0].height >= 576 &&
-            !((Reg(reg::RB_COLORCONTROL) >> 3) & 1) && Perspective(vsBase, vsSize, vs->meta))
+            !((Reg(reg::RB_COLORCONTROL) >> 3) & 1) && Perspective(vsBase, vsSize, vs->meta) && !SmallViewport())
         {
             rtIndices.resize(triIndices);
             WriteTriangleIndices(d, rtIndices.data());
@@ -2573,6 +2582,35 @@ struct NativeRenderer::Impl
         lap.To(NativeProfile::kDrawRecord);
     }
 
+    // hc09: a draw into a small part of its target: a picture in the picture (the coordinator's video panel over
+    // the field, a 3D scene of its own with its own camera). Not part of the scene the rays are traced in: with the
+    // field's camera the coordinator stood over the field and cast his shadow on it.
+    bool SmallViewport()
+    {
+        const uint32_t vte = Reg(reg::PA_CL_VTE_CNTL);
+        if (!(vte & 1) || !(vte & 4)) return false;
+        const float s = BoundScale();
+        return 2.0f * std::abs(AsF(Reg(reg::PA_CL_VPORT_XSCALE))) * s < 0.6f * float(bound[0].width) ||
+               2.0f * std::abs(AsF(Reg(reg::PA_CL_VPORT_YSCALE))) * s < 0.6f * float(bound[0].height);
+    }
+    // A picture in the picture drawn this frame (the coordinator's video panel: his own 3D scene, in a corner of a
+    // screen-sized target, shown as a panel over the field by the interface later in the frame).
+    uint64_t insetFrame = ~0ull;
+    void NoteInset() { insetFrame = frame; }
+    // The soft dark sprite the game's interface lays under that panel (three gradient textures, nine pieces): over
+    // the field it reads as the coordinator's own shadow on the turf.
+    bool PanelShadow(uint32_t slots, const Texture* const* texOf, const xenos::TextureFetch* tfOf) const
+    {
+        for (uint32_t s = 0; s < 32; ++s)
+        {
+            if (!(slots & (1u << s)) || !texOf[s] || texOf[s]->height != 128 || (texOf[s]->width != 128 && texOf[s]->width != 32)) continue;
+            uint64_t hash = 0;
+            if (hc09::gpu::TextureContentHash(tfOf[s].dword, hash) &&
+                (hash == 0x6F2A7121B837F0E5ull || hash == 0x6625DAEFD4789CD5ull || hash == 0x5EB144F3967758F6ull))
+                return true;
+        }
+        return false;
+    }
     // hc09: the camera of a draw of the 3D scene (as the D3D12 renderer: gpu/scene_camera.h, vertex constants
     // c156..c159), with the viewport's depth mapping and rectangle.
     void NoteSceneCamera()
@@ -2618,9 +2656,12 @@ struct NativeRenderer::Impl
             return e && *e ? std::clamp(float(atof(e)), 0.0f, 1.0f) : 0.85f;
         }();
         const float sun[8] = { worldX[0], worldX[1], worldX[2], shadowDark, sunWorld[0], sunWorld[1], sunWorld[2], sunWorld[3] };
+        // No field drawn this frame (a close-up against the stands): no sun is known; the last value 2 has the pass
+        // shadow close-ups only, from its own light (a cap's brim over a face).
+        const float closeUpOnly[8] = { 1.0f, 0.0f, 0.0f, shadowDark, 0.0f, 1.0f, 0.0f, 2.0f };
         effects.Apply(cb, src->img, src->samples, bd->depthView, sceneView,
                       [this](VkDescriptorSetLayout layout) { return ComputeSet(layout); }, garbage,
-                      traced ? rt.Scene() : VK_NULL_HANDLE, traced && sunFrame == frame ? sun : nullptr,
+                      traced ? rt.Scene() : VK_NULL_HANDLE, traced ? (sunFrame == frame ? sun : closeUpOnly) : nullptr,
                       traced && rt.HasGlossy() ? rt.GlossyFrom() : ~0u);
         if (float rect[4]; effects.HdrGain(rect)) gainFrame = frame;
         if (effects.TracedShadows()) tracedShadowsFrame = frame;

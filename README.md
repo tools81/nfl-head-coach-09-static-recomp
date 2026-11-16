@@ -233,6 +233,34 @@ Scale=2
   show, the box loops a replay of the last play, from the snap to the next down, as you saw it (it keeps the last
   ten seconds of the 3D scene, small, in about 70 MB of video memory).
   Its typeface is Barlow Condensed (SIL Open Font License, `fonts/OFL.txt`). `off` keeps the game's banner.
+- `LowerThirds`: `on` by default, with the score bar. After a play worth it, a panel centred above the
+  score bar and the game's ticker shows the player who made it: his portrait on his team's colour (HC27's portraits or your own
+  replacement pictures; the team's logo when he has none, as in HC09), his name, position and number, what he did
+  ("18-YARD RUN", "SACK", "8-YARD TOUCHDOWN CATCH") and his game so far (carries and yards, completions,
+  catches, tackles, field goals). Scores, interceptions, sacks, field goals, runs of 10 yards and catches of 15
+  always get one, an ordinary play when the last few had none. It stays six seconds. The plays are read from
+  the game's own play-by-play (the text its ticker scrolls), so the numbers are the game's. `off` for none.
+- `TVCamera`: `on` by default. The game's Broadcast camera stands at midfield just outside the sideline and
+  turns to follow the play, so a play near a goal line is seen at a slant. With this the Broadcast camera
+  becomes a TV broadcast's set of four, and a click of the right stick (`H` on the keyboard) goes from one to
+  the next during a game; the camera's name shows above the score ribbon for a moment:
+  - Main: higher and further back, moving along the sideline with the play, so the line of scrimmage stays
+    square to the screen.
+  - End zone: high behind the end zone at the offense's back, looking up the field over the goal posts.
+  - Low sideline: at the players' height on the sideline, level with the play.
+  - Aerial: above and behind the offense, as the camera on wires, moving with the play.
+
+  With the main camera the picture also cuts as a broadcast does before the snap, on about one play in three: once the teams line up, a
+  few seconds from another camera (the low sideline, the aerial camera, or an end zone camera tight on the
+  quarterback or the defense), then back to the main camera, and at once when the ball is snapped. `fixed`
+  keeps the main camera without these cuts.
+
+  Field goals and extra points are shown from the end zone camera behind the goal posts kicked at, with the
+  uprights in the foreground, whichever of the four is selected.
+
+  `endzone`, `sideline` or `aerial` start a game on that one instead of the main camera. The game's other
+  cameras (Cinematic, Overhead, Defense, Press Box, On Field) are unchanged, and the right stick only changes
+  the camera while Broadcast is the one selected. `off` keeps the game's own Broadcast camera.
 - `AspectRatio`: for ultrawide screens, `21:9`, `32:9`, any `<width>:<height>`, or `auto` for your
   screen's shape; `16:9` (the game's own) by default. The 3D scenes fill the wider screen and show more at
   the sides, while the menus and on-field graphics keep their shape in the middle. Things just past
