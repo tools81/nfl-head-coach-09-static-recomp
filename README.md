@@ -70,6 +70,12 @@ Good to know:
   applied). The computer's teams decide on their own. A career started before this release needs
   its players' draft rounds set once: `python tools/roster_import/draft_rounds.py --save
   build/userdata-hc27/content/00000001/CAREER-<name>/CAREER-<name>`.
+- Extra points are kicked from the 15-yard line, a 33-yard kick, as in today's NFL. A two-point try
+  is still from the 2: the ball moves to the 15 only when the play called is a kick.
+- Careers have a 17-game regular season over 18 weeks, with three preseason games, as the NFL has
+  had since 2021. Each team's seventeenth game is against a team from the other conference that it
+  doesn't otherwise play. A career already in progress gets its seventeenth games when its next
+  regular season begins.
 - The original game is unchanged: HC09.exe ignores the `hc27` folder.
 
 ## Status

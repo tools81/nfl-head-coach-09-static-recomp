@@ -164,9 +164,17 @@ PPC_FUNC(sub_8279F208)
 // them, decoded, with its first four arguments (and the word each one points to after the call, for
 // arguments that return values) and the result code.
 extern "C" PPC_FUNC(__imp__sub_82C66928);
+void Season17Test(PPCContext& ctx, uint8_t* base);   // common/season17.cpp (dev)
 
 PPC_FUNC(sub_82C66928)
 {
+    static thread_local bool inside = false;
+    if (!inside)
+    {
+        inside = true;
+        Season17Test(ctx, base);
+        inside = false;
+    }
     static const char* const filter = std::getenv("HC09_TRACE_SQL");
     if (!filter)
     {
