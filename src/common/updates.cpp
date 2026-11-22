@@ -47,6 +47,12 @@ namespace hc09
         }
     }
 
+    bool RunningUnderWine()
+    {
+        const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        return ntdll && GetProcAddress(ntdll, "wine_get_version");
+    }
+
     std::optional<std::string> LatestReleaseTag(int timeoutMs)
     {
         Handle session{ WinHttpOpen(L"HC09Recomp-updater", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,

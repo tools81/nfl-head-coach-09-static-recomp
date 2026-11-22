@@ -17,4 +17,8 @@ namespace hc09
 
     // True when `tag` ("v1.2.3" or "1.2.3") is a newer version than `current` ("1.2.0").
     bool IsNewerVersion(const std::string& tag, const std::string& current);
+
+    // True when running under Wine or Proton (Linux, Steam Deck): the game is installed and updated there by
+    // tools/steamdeck/hc09-steamdeck.sh, not by HC09Setup.exe.
+    bool RunningUnderWine();
 }

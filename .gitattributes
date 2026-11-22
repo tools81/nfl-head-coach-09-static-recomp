@@ -2,3 +2,5 @@
 hc27/ROSTER binary
 hc27/disc/*.bin binary
 *.png binary
+# Shell scripts run on Linux (tools/steamdeck): always LF
+*.sh text eol=lf

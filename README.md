@@ -34,6 +34,51 @@ Running setup again and choosing the same folder updates that installation to th
 (keeping your saves), and is also how to change the disc image; a development clone on a git branch
 is built as it is instead. The setup log is `%TEMP%\HC09Setup.log`.
 
+### Steam Deck (and other Linux PCs with Steam)
+
+The games are Windows programs, and on the Steam Deck they run with Proton. They are built on the
+Deck itself, as on Windows, by a script instead of HC09Setup.exe:
+
+1. Switch to Desktop Mode (hold the power button, *Switch to Desktop*). Put your NFL Head Coach 09
+   disc image somewhere in your home folder or on the microSD card.
+2. Download `hc09-steamdeck.sh` from the [releases page](https://github.com/tools81/nfl-head-coach-09-static-recomp/releases)
+   (it is saved in `Downloads`).
+3. Open **Konsole** from the application menu and run:
+
+   ```sh
+   bash ~/Downloads/hc09-steamdeck.sh
+   ```
+
+   It asks for an install folder (`~/Games/HC09Recomp` unless you choose another; the path must
+   not contain spaces) and your disc image, and whether to tell you in the game about new versions.
+   While building it asks you to accept Microsoft's license for the Visual C++ runtime and Windows
+   SDK, which [xwin](https://github.com/Jake-Shadle/xwin) downloads from Microsoft (the games are
+   built against them). Keep the Deck plugged in: it downloads about 3 GB, needs about 15 GB free,
+   and takes 30 to 60 minutes. Nothing needs the root password or developer mode.
+4. At the end it offers to add **NFL Head Coach 09** and **NFL Head Coach 27** to Steam (Steam
+   is closed for a moment and started again). They appear in your library as non-Steam games, set
+   to run with Proton Experimental, which Steam downloads on the first start if needed. Return to
+   Game Mode and play.
+
+Good to know:
+
+- The controls are the built-in controller's (it acts as an Xbox controller); the picture keeps its
+  16:9 shape, with thin bars on the Deck's 16:10 screen. The defaults (720p at the game's own ~35 fps,
+  ray tracing and FSR off) suit the Deck; settings are in `hc09.ini` in the install folder, as on
+  Windows.
+- The first start takes longer: Proton sets itself up, and the game builds its shader caches.
+- Updates: with in-game notices on, the game tells you when a new version is out. Install it from
+  Desktop Mode with **Update NFL Head Coach 09** in the application menu (or
+  `bash ~/Games/HC09Recomp/tools/steamdeck/hc09-steamdeck.sh --update`). Saves are kept.
+- **Add NFL Head Coach 09 to Steam** in the application menu adds the games again (for example
+  for another Steam account). To add them by hand instead: in Steam, *Add a Game > Add a Non-Steam
+  Game > Browse*, choose `build/hc09/HC27.exe` (and `HC09.exe`) in the install folder, then tick
+  *Properties > Compatibility > Force the use of a specific Steam Play compatibility tool*.
+- The same script works on other x86-64 Linux PCs with Steam, git, curl, xz and Python 3. Without
+  Steam, a recent Wine with Vulkan should run them too (`wine build/hc09/HC27.exe` in the install
+  folder), though Proton is what they are set up for.
+- The setup log is `~/.cache/hc09-steamdeck.log`.
+
 ### Playing with today's rosters (HC27.exe)
 
 Setup builds a second game next to the original: **HC27.exe**, NFL Head Coach 09 with today's
@@ -444,6 +489,15 @@ cmake --build build/setup    # -> build/installer/HC09Setup.exe
 
 Installed copies offer the update the next time they start; accepting it checks out the release
 tag, re-patches XenonRecomp if the pin changed, and recompiles and rebuilds the game.
+
+Attach `tools/steamdeck/hc09-steamdeck.sh` to the release too (as `hc09-steamdeck.sh`): it is the
+Linux installer. It clones the release and runs that release's copy of itself for the build, which
+cross-compiles the games with clang-cl and lld-link (LLVM release), the MSVC runtime and Windows SDK
+from xwin, and `tools/steamdeck/windows-cross.cmake`; XenonRecomp is built for Linux with zig, which
+brings its own C library (SteamOS has no system headers). The toolchain versions and checksums are
+pinned at the top of the script. Under Wine the game says how to update instead of starting
+HC09Setup.exe, and guest memory falls back to fixed-address views where Wine's placeholder support
+falls short (`HC09_NO_PLACEHOLDERS=1` forces that path).
 
 ## Layout
 

@@ -159,6 +159,17 @@ namespace
         if (!tag || !hc09::IsNewerVersion(*tag, HC09_VERSION))
             return false;
         char message[512];
+        if (hc09::RunningUnderWine())
+        {
+            // Linux (Steam Deck): the game cannot rebuild itself from inside Proton; the Linux updater does it.
+            std::snprintf(message, sizeof(message),
+                "Version %s of the NFL Head Coach 09 recompilation is available (installed: %s).\n\n"
+                "To update, switch to Desktop Mode and run \"Update NFL Head Coach 09\" from the application menu "
+                "(or tools/steamdeck/hc09-steamdeck.sh --update in the install folder).",
+                tag->c_str(), HC09_VERSION);
+            MessageBoxA(nullptr, message, hc09::edition::kTitle, MB_OK | MB_ICONINFORMATION);
+            return false;
+        }
         std::snprintf(message, sizeof(message),
             "Version %s of the NFL Head Coach 09 recompilation is available (installed: %s).\n\n"
             "Update now? The updater downloads the new source and rebuilds the game, which takes a few minutes.",

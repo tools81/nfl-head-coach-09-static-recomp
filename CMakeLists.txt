@@ -1,11 +1,14 @@
 cmake_minimum_required(VERSION 3.20)
-project(HC09Recomp VERSION 1.7.0 LANGUAGES C CXX)
+project(HC09Recomp VERSION 1.8.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# The installer wizard (HC09Setup.exe) contains no game code and builds without ppc/.
-add_subdirectory(tools/installer)
+# The installer wizard (HC09Setup.exe) contains no game code and builds without ppc/. Not when cross-compiling on
+# Linux (tools/steamdeck/windows-cross.cmake): there the game is installed and updated by tools/steamdeck instead.
+if(NOT CMAKE_CROSSCOMPILING)
+    add_subdirectory(tools/installer)
+endif()
 # The roster editor (HC09RosterEditor.exe) likewise.
 add_subdirectory(tools/roster_editor)
 
