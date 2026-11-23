@@ -1,6 +1,10 @@
 // XAM/kernel system information: config settings, region, language, launch data,
 // execution id, system UI, and RtlRaiseException.
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -26,6 +30,53 @@ namespace hc09
             return Load<uint32_t>(ctx.r1.u32 + 0x54 + (index - 8) * 8);
         }
 
+        // The console's time zone: the host's. (It was UTC: the game's local time ran hours off, and Coach Now, which
+        // lights its games by the time of day, played afternoon games at night.) Bias in minutes (UTC = local + bias),
+        // three-letter names, and the dates the clocks change: month, which week (5: the last), day of the week, hour.
+        struct TimeZone
+        {
+            int32_t bias = 0, standardBias = 0, daylightBias = 0;
+            uint32_t standardName = 0x55544300, daylightName = 0x55544300;   // "UTC"
+            uint32_t standardDate = 0, daylightDate = 0;
+        };
+
+        uint32_t Initials(const wchar_t* name, const char* fallback)
+        {
+            char s[4] = {};
+            int n = 0;
+            for (const wchar_t* p = name; *p && n < 3; ++p)
+                if (*p >= L'A' && *p <= L'Z' && (p == name || p[-1] == L' ')) s[n++] = char(*p);
+            if (n < 3) std::snprintf(s, sizeof(s), "%s", fallback);
+            return uint32_t(uint8_t(s[0])) << 24 | uint32_t(uint8_t(s[1])) << 16 | uint32_t(uint8_t(s[2])) << 8;
+        }
+
+        const TimeZone& HostTimeZone()
+        {
+            static const TimeZone zone = [] {
+                TimeZone z;
+#ifdef _WIN32
+                TIME_ZONE_INFORMATION info{};
+                if (GetTimeZoneInformation(&info) != TIME_ZONE_ID_INVALID)
+                {
+                    auto date = [](const SYSTEMTIME& t) {
+                        return uint32_t(t.wMonth & 0xFF) << 24 | uint32_t(t.wDay & 0xFF) << 16 | uint32_t(t.wDayOfWeek & 0xFF) << 8 |
+                               uint32_t(t.wHour & 0xFF);
+                    };
+                    z.bias = info.Bias;
+                    z.standardBias = info.StandardBias;
+                    z.daylightBias = info.DaylightBias;
+                    z.standardName = Initials(info.StandardName, "STD");
+                    z.daylightName = Initials(info.DaylightName, "DST");
+                    z.standardDate = date(info.StandardDate);
+                    z.daylightDate = date(info.DaylightDate);
+                }
+#endif
+                std::fprintf(stderr, "[config] time zone: bias %d minutes (standard %d, daylight %d)\n", z.bias, z.standardBias, z.daylightBias);
+                return z;
+            }();
+            return zone;
+        }
+
         // Returns the setting's value width (bytes) and fills `value`, or 0 if unknown.
         uint32_t ConfigSetting(uint16_t category, uint16_t setting, uint32_t& value)
         {
@@ -41,13 +92,13 @@ namespace hc09
             {
                 switch (setting)
                 {
-                case 0x0001: value = 0; return 4;           // time zone bias
-                case 0x0002: value = 0x50535400; return 4;  // time zone standard name "PST"
-                case 0x0003: value = 0x50445400; return 4;  // time zone daylight name "PDT"
-                case 0x0004: value = 0; return 4;           // standard date
-                case 0x0005: value = 0; return 4;           // daylight date
-                case 0x0006: value = 0; return 4;           // time zone standard bias
-                case 0x0007: value = 0; return 4;           // time zone daylight bias
+                case 0x0001: value = uint32_t(HostTimeZone().bias); return 4;          // time zone bias
+                case 0x0002: value = HostTimeZone().standardName; return 4;            // time zone standard name
+                case 0x0003: value = HostTimeZone().daylightName; return 4;            // time zone daylight name
+                case 0x0004: value = HostTimeZone().standardDate; return 4;            // standard date
+                case 0x0005: value = HostTimeZone().daylightDate; return 4;            // daylight date
+                case 0x0006: value = uint32_t(HostTimeZone().standardBias); return 4;  // time zone standard bias
+                case 0x0007: value = uint32_t(HostTimeZone().daylightBias); return 4;  // time zone daylight bias
                 case 0x0009: value = 1; return 4;           // language: English
                 case 0x000A: value = 0x00040000; return 4;  // video flags: widescreen
                 case 0x000C: value = 0x40; return 4;        // retail flags

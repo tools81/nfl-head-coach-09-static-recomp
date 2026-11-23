@@ -8,6 +8,8 @@
 #include <cstring>
 #include <string>
 
+#include "common/weather.h"
+#include "vk_breath.h"
 #include "vk_shader_compile.h"
 
 namespace hc09vk {
@@ -65,9 +67,12 @@ layout(push_constant) uniform Effects { vec4 r0, r1, r2, r3, r4, r5, r6, r7; } E
 #define gradeStrength E.r7.y
 #define depthOfFieldStrength E.r7.z
 #define sourceInRect E.r7.w
+// hc09: how wet the field is (roadmap 16: 0 dry, 1 soaked), for the reflection passes, in the bloom's slot.
+#define fieldWet E.r7.x
 // hc09: the traced occlusion's lights (vk_raytrace.h), in slots that pass does not use (the blur's direction, the
 // in-target passes' target size and the post-processing's strengths): the world's x axis in view space, the
-// shadows' darkness, the direction toward the sun in the world's axes, and whether it is day (else floodlights).
+// shadows' darkness, the direction toward the sun in the world's axes, and the light: 1 the sun, 0 the floodlights,
+// 2 close-ups only (no sun known), 3 an overcast sky (rain or snow by day).
 #define worldXView vec3(E.r5.xy, E.r6.x)
 #define sunShadow E.r6.y
 #define sunWorld E.r7.xyz
@@ -275,16 +280,17 @@ void main()
     if (facing <= 0.0)
         return;
     float grazing = mix(0.6, 1.0, clamp(1.0 - dot(-view, normal), 0.0, 1.0));
-    float reach = radius * 5.0;
+    float reach = radius * mix(5.0, 12.0, fieldWet);
     float t = Hit(start, ray, nearest, reach);
     if (t < 0.0)
         return;
     // The reflected colour's luminance (black where the screen does not show the hit), its contrast deepened and
-    // brought down to a dark tone, as the screen-space pass's.
-    float luminance = dot(HitColor(start + ray * t), vec3(0.299, 0.587, 0.114));
-    float tone = clamp((luminance - 0.5) * 2.0 + 0.5, 0.0, 1.0) * 0.12;
-    float alpha = clamp(0.45 * reflectionStrength * grazing, 0.0, 1.0) * facing * clamp(1.0 - t / reach, 0.0, 1.0);
-    outColor = vec4(tone * alpha, tone * alpha, tone * alpha, alpha);
+    // brought down to a dark tone, as the screen-space pass's; a wet field reflects the colour itself, dimmed.
+    vec3 hitColor = HitColor(start + ray * t);
+    float luminance = dot(hitColor, vec3(0.299, 0.587, 0.114));
+    vec3 tone = mix(vec3(clamp((luminance - 0.5) * 2.0 + 0.5, 0.0, 1.0) * 0.12), hitColor * 0.4, fieldWet);
+    float alpha = clamp(mix(0.45, 0.6, fieldWet) * reflectionStrength * grazing, 0.0, 1.0) * facing * clamp(1.0 - t / reach, 0.0, 1.0);
+    outColor = vec4(tone * alpha, alpha);
 }
 #endif
 
@@ -358,9 +364,12 @@ void main()
         vec3 wz = normalize(cross(wy, wx));   // the game's world is left-handed
         // With no field in the picture (a close-up against the stands) the sun is not known: then only the
         // close-up's own light below casts.
-        bool keyOnly = sunDay > 1.5;
-        bool day = sunDay > 0.5;
-        int lights = day ? 1 : 4;
+        bool keyOnly = sunDay > 1.5 && sunDay < 2.5;
+        // Rain or snow by day: no sun, the whole sky lights the field. One light from overhead in a very wide cone
+        // gives a soft pool of shade under each player and none cast across the field.
+        bool overcast = sunDay > 2.5;
+        bool day = sunDay > 0.5 && !overcast;
+        int lights = day || overcast ? 1 : 4;
         float shadowed = 0.0;
         // Close-ups: more rays in a wider cone, for a soft edge (a cap's brim across a face); and the rays start
         // nearer the surface and count what is nearer. The usual start (about 2 cm off) and nearest hit (about 5 cm)
@@ -370,7 +379,7 @@ void main()
         for (int k = 0; k < lights; k++)
         {
             // The towers: beyond the field's corners, about 40 degrees up.
-            vec3 w = day ? sunWorld : normalize(vec3((k & 1) != 0 ? 0.55 : -0.55, 0.62, (k & 2) != 0 ? 0.56 : -0.56));
+            vec3 w = overcast ? vec3(0.0, 1.0, 0.0) : day ? sunWorld : normalize(vec3((k & 1) != 0 ? 0.55 : -0.55, 0.62, (k & 2) != 0 ? 0.56 : -0.56));
             vec3 l = normalize(wx * w.x + wy * w.y + wz * w.z);
             // Close-ups: the game lights a face with its own lights, not the sun, so the sun's shadows fell only on
             // the part of the face turned to it (a dark band down the middle under a high sun). There the light
@@ -384,12 +393,12 @@ void main()
                 continue;
             vec3 lt = normalize(abs(l.y) < 0.9 ? cross(l, vec3(0.0, 1.0, 0.0)) : cross(l, vec3(1.0, 0.0, 0.0)));
             vec3 lb = cross(l, lt);
-            int rays = closeUp > 0.0 ? 4 : day ? 2 : 1;
+            int rays = closeUp > 0.0 || overcast ? 4 : day ? 2 : 1;
             float blocked = 0.0;
             for (int i = 0; i < rays; i++)
             {
                 float a = angle + float(i) * 6.2831853 / float(rays) + float(k) * 1.3;
-                float cone = mix(day ? 0.035 : 0.07, 0.1, closeUp) * sqrt(fract(offset + float(i) * 0.618));
+                float cone = mix(overcast ? 0.75 : day ? 0.035 : 0.07, 0.1, closeUp) * sqrt(fract(offset + float(i) * 0.618));
                 vec3 direction = normalize(l + (lt * cos(a) + lb * sin(a)) * cone);
                 // Only what is near casts (players, benches, the goal posts), not the stands. By night the towers
                 // stand above them; by day the game has the stands' shadow in the field's own lighting already (a
@@ -406,7 +415,7 @@ void main()
         float receiver = mix(mix(0.35, 1.0, smoothstep(0.3, 0.8, dot(normal, wy))), 0.8, closeUp);
         // By day the sky fills the shadows in: at 0.7 here a day game's shadowed turf kept 40% of its light, which
         // read as black patches (Soldier Field, the stands' shadow over half the field).
-        sunLit = 1.0 - sunShadow * (day && !keyOnly ? 0.5 : keyOnly ? 0.7 : 1.0) * shadowed * receiver * (keyOnly ? closeUp : 1.0);
+        sunLit = 1.0 - sunShadow * (overcast ? 0.45 : day && !keyOnly ? 0.5 : keyOnly ? 0.7 : 1.0) * shadowed * receiver * (keyOnly ? closeUp : 1.0);
     }
     // The light left, coloured by the bounce: its luminance where the screen-space pass has its occlusion, its tint
     // (Co, Cg) beside the view distance.
@@ -547,7 +556,7 @@ void main()
     float grazing = mix(0.6, 1.0, clamp(1.0 - dot(-view, normal), 0.0, 1.0));
 
     const int kSteps = 48;
-    float stepLength = origin3.z * 0.01;
+    float stepLength = origin3.z * mix(0.01, 0.018, fieldWet);
     vec3 previous = origin3, current = origin3 + ray * stepLength * Noise(fragPixel);
     vec3 hit = vec3(0.0);
     bool found = false;
@@ -585,13 +594,14 @@ void main()
     if (RawDepth(ivec2(pixel)) >= kSky)
         return;
     vec2 edges = min(pixel, size - pixel) / (size * 0.08);
-    float fade = clamp(min(edges.x, edges.y), 0.0, 1.0) * clamp(1.0 - length(hit - origin3) / (radius * 5.0), 0.0, 1.0);
-    // The reflected colour's luminance, its contrast deepened and brought down to a dark tone.
+    float fade = clamp(min(edges.x, edges.y), 0.0, 1.0) * clamp(1.0 - length(hit - origin3) / (radius * mix(5.0, 12.0, fieldWet)), 0.0, 1.0);
+    // The reflected colour's luminance, its contrast deepened and brought down to a dark tone; a wet field reflects
+    // the colour itself, dimmed.
     vec3 color = textureLod(input0, (pixel * depthScale + origin) * targetInvSize, 0.0).rgb;
     float luminance = dot(color, vec3(0.299, 0.587, 0.114));
-    float tone = clamp((luminance - 0.5) * 2.0 + 0.5, 0.0, 1.0) * 0.12;
-    float alpha = clamp(0.45 * reflectionStrength * grazing, 0.0, 1.0) * facing * fade;
-    outColor = vec4(tone * alpha, tone * alpha, tone * alpha, alpha);
+    vec3 tone = mix(vec3(clamp((luminance - 0.5) * 2.0 + 0.5, 0.0, 1.0) * 0.12), color * 0.4, fieldWet);
+    float alpha = clamp(mix(0.45, 0.6, fieldWet) * reflectionStrength * grazing, 0.0, 1.0) * facing * fade;
+    outColor = vec4(tone * alpha, alpha);
 }
 #endif
 
@@ -601,6 +611,233 @@ void main()
 {
     vec4 reflection = ReflectionAt(input0, input1, FragPixel() + 0.5);
     outColor = debugView >= 2.0 ? vec4(reflection.rgb, 1.0) : reflection;
+}
+#endif
+
+#if PASS_PRECIPITATION
+// hc09: rain and snow (roadmap 16), over the scene before the other effects. The drops fill nested cylinders around
+// the camera, 3 to 80 yards out, in the world's axes (they fall straight down and stay put as the camera turns):
+// each pixel's view ray meets each cylinder, and the drop of the cell it meets there, if any, is drawn, unless the
+// scene is nearer (a player in front hides the rain behind him). Rain: thin streaks, as a camera's shutter blurs a
+// falling drop; snow: soft flakes that drift as they fall. The wind slants both. Output premultiplied.
+// Its slots (this pass reads no image): the world's x axis in view space, the time, the kind (1 rain, 2 snow), how
+// heavy (0..1), the wind (yards per second along the world's x and z).
+#define precipWorldX vec3(E.r5.xy, E.r6.x)
+#define precipTime E.r6.y
+#define precipKind E.r7.x
+#define precipAmount E.r7.y
+#define precipWind E.r7.zw
+float PrecipHash(vec2 p)
+{
+    vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+    q += dot(q, q.yzx + 33.33);
+    return fract((q.x + q.y) * q.z);
+}
+void main()
+{
+    vec2 pixel = FragPixel();
+    outColor = vec4(0.0);
+    vec3 d = normalize(ViewPosition(pixel, 1.0));
+    float sceneDepth = RawDepth(ivec2(pixel)) >= kSky ? 1e9 : ViewDepth(ivec2(pixel));
+    // The world's axes in view space.
+    vec3 up = normalize(upView);
+    vec3 wx = precipWorldX - up * dot(precipWorldX, up);
+    if (dot(wx, wx) < 1e-6)
+        wx = abs(up.x) < 0.9 ? vec3(1.0, 0.0, 0.0) - up * up.x : vec3(0.0, 0.0, 1.0) - up * up.z;
+    wx = normalize(wx);
+    vec3 wz = cross(wx, up);
+    vec3 w = vec3(dot(d, wx), dot(d, up), dot(d, wz));
+    float h = length(w.xz);
+    if (h < 0.03)
+        return;
+    bool snow = precipKind > 1.5;
+    float speed = snow ? 1.4 : 11.0;
+    float pixelAngle = 2.0 / (proj.y * size.y);
+    // The cells' size is the layer's, the same at every pixel (a size from each pixel's own distance cut a flake into
+    // slices where it changes from row to row): from the distance at the middle of the picture.
+    float middleH = max(length(vec2(wx.z, wz.z)), 0.2);
+    vec3 sum = vec3(0.0);
+    float alpha = 0.0;
+    const int kLayers = 8;
+    for (int k = 0; k < kLayers; k++)
+    {
+        float f = float(k) / float(kLayers - 1);
+        float r = 3.0 * pow(1.6, float(k));
+        float t = r / h;
+        if (t * d.z > sceneDepth)
+            break;   // the scene is nearer: this cylinder and those beyond are hidden here
+        vec3 at = w * t;
+        float theta = atan(at.z, at.x);
+        vec2 tangent = vec2(-sin(theta), cos(theta));
+        float pixelSize = t * pixelAngle;   // yards a pixel covers out there
+        // Across: arc length, shifted by the wind so a drop's whole path keeps one value; down: the fall.
+        float drift = dot(precipWind, tangent);
+        float across = theta * r + drift * at.y / speed;
+        float fall = at.y + speed * precipTime + float(k) * 17.0;
+        float cellPixel = r / middleH * pixelAngle;
+        float columnWidth = cellPixel * (snow ? mix(46.0, 16.0, f) : mix(34.0, 11.0, f));
+        float column = floor(across / columnWidth);
+        float length_ = snow ? columnWidth : 0.3 + 0.2 * PrecipHash(vec2(column, float(k)));
+        float rowHeight = snow ? columnWidth : length_ * 2.6;
+        float row = floor((fall + PrecipHash(vec2(column, 7.0 + float(k))) * rowHeight) / rowHeight);
+        vec2 cell = vec2(column, row + float(k) * 1000.0);
+        if (PrecipHash(cell) > (snow ? mix(0.15, 0.35, precipAmount) : mix(0.35, 0.85, precipAmount)))
+            continue;
+        float x = (column + (snow ? 0.2 + 0.6 : 0.25 + 0.5) * PrecipHash(cell + 0.37)) * columnWidth;
+        float y = (row + (snow ? 0.2 + 0.6 : 0.05 + 0.5) * PrecipHash(cell + 0.71)) * rowHeight - PrecipHash(vec2(column, 7.0 + float(k))) * rowHeight;
+        // A broadcast camera's long lens: drops far nearer than what it frames are a blur, hardly seen.
+        float focus = snow ? smoothstep(0.015, 0.12, t * d.z / min(sceneDepth, 120.0)) : smoothstep(0.04, 0.3, t * d.z / min(sceneDepth, 120.0));
+        float cover;
+        if (snow)
+        {
+            // A flake a few centimetres across, swaying as it falls, never smaller than about a pixel.
+            x += sin(precipTime * 1.7 + PrecipHash(cell + 0.13) * 6.283) * columnWidth * 0.18;
+            // Out of focus, a larger, fainter disc. Far off, a flake is less than a pixel, but the camera's blur
+            // and the glare of white keep it about two pixels wide on screen.
+            float blur = mix(2.5, 1.0, focus);
+            float flake = max(0.022, pixelSize * 1.1) * blur;
+            // Never past its cell's margins (it would be cut square there).
+            float room = max(0.2 * min(columnWidth, rowHeight * h) - pixelSize * 0.5, pixelSize * 0.5);
+            flake = min(flake, room);
+            // Round on screen: the wind's slant taken back out (it is the path's, not the flake's), and the height
+            // foreshortened as the view looks down.
+            vec2 dv = vec2(across - x - drift * (fall - y) / speed, (fall - y) * h);
+            cover = 1.0 - smoothstep(flake * mix(0.4, 0.05, blur * 0.5 - 0.5), flake + pixelSize * 0.5, length(dv));
+            cover *= min(1.0, 0.022 * 0.022 / (flake * flake) * blur * blur + 0.45) / (blur * blur);
+        }
+        else
+        {
+            // A streak: thin across, fading at its ends.
+            float width = max(0.004, pixelSize * 0.6);
+            float along = (fall - y) / length_;
+            cover = (1.0 - smoothstep(width * 0.5, width * 0.5 + pixelSize, abs(across - x))) * smoothstep(0.0, 0.25, along) *
+                    smoothstep(1.0, 0.6, along);
+            cover *= min(1.0, 0.006 / width);
+        }
+        float a = clamp(cover * precipAmount * (snow ? mix(0.85, 0.25, f) : mix(0.22, 0.1, f) * mix(0.15, 1.0, focus)), 0.0, 1.0);
+        vec3 color = snow ? vec3(0.96, 0.97, 1.0) : vec3(0.78, 0.81, 0.86);
+        sum += (1.0 - alpha) * color * a;
+        alpha += (1.0 - alpha) * a;
+    }
+    outColor = vec4(sum, alpha);
+}
+#endif
+
+#if PASS_BREATH
+// hc09: breath in the cold (roadmap 16, vk_breath.h): puffs of vapour, each a soft ball (centre in view space and
+// radius; opacity, age, seed) in the list at binding 6, from breathFirst on. Thickest through the middle, wispy at
+// the edges (noise across the puff as seen, stirring as it ages), hidden behind what the scene shows in front of it
+// (softly: a puff partly inside a helmet thins out there). Output premultiplied.
+layout(std430, set = 0, binding = 6) readonly buffer Puffs { vec4 puffs[]; };
+#define breathFirst E.r7.x
+#define breathCount E.r7.y
+#define breathLight E.r7.z
+float PuffHash(vec2 p) { p = fract(p * vec2(443.897, 441.423)); p += dot(p, p.yx + 19.19); return fract((p.x + p.y) * p.x); }
+float PuffNoise(vec2 p)
+{
+    vec2 i = floor(p), f = fract(p), u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(PuffHash(i), PuffHash(i + vec2(1.0, 0.0)), u.x), mix(PuffHash(i + vec2(0.0, 1.0)), PuffHash(i + vec2(1.0, 1.0)), u.x), u.y);
+}
+void main()
+{
+    vec2 pixel = FragPixel();
+    outColor = vec4(0.0);
+    vec3 d = normalize(ViewPosition(pixel, 1.0));
+    float sceneAlong = (RawDepth(ivec2(pixel)) >= kSky ? 1e9 : ViewDepth(ivec2(pixel))) / max(d.z, 1e-4);
+    float alpha = 0.0;
+    int first = int(breathFirst + 0.5), count = int(breathCount + 0.5);
+    for (int i = 0; i < count; i++)
+    {
+        vec4 a = puffs[(first + i) * 2], b = puffs[(first + i) * 2 + 1];
+        float r = a.w;
+        float t = dot(a.xyz, d);
+        if (t <= 0.0 || r <= 0.0)
+            continue;
+        vec3 off = d * t - a.xyz;
+        float dist2 = dot(off, off);
+        if (dist2 >= r * r)
+            continue;
+        float half_ = sqrt(r * r - dist2);
+        float seen = clamp((sceneAlong - (t - half_)) / (2.0 * half_), 0.0, 1.0);
+        if (seen <= 0.0)
+            continue;
+        vec2 local = off.xy / r * 2.2 + b.z * 37.0 + vec2(0.0, -b.y * 0.8);
+        float wisps = 0.6 * PuffNoise(local) + 0.4 * PuffNoise(local * 2.3 + 11.0);
+        float body = half_ / r;   // through the middle
+        float density = body * body * smoothstep(0.25, 0.75, wisps + 0.25 * body) * b.x * seen;
+        alpha += (1.0 - alpha) * clamp(density, 0.0, 1.0);
+    }
+    vec3 color = vec3(0.92, 0.94, 0.97) * breathLight;
+    outColor = vec4(color * alpha, alpha);
+}
+#endif
+
+#if PASS_FOOTPRINTS
+// hc09: footprints in the snow (roadmap 16). The output is the field's footprint map (kFootprint* below: x across
+// and z along the field, in yards, from its middle); each texel is a spot of ground. Projected into the picture,
+// the depth there tells what is seen at that spot: the ground itself, something far in front of it, or something
+// standing on it (seen within a few inches of it, a little above the turf): a foot (or a hand, a knee, the ball).
+// Those spots are stamped (blend: max). The world's axes and origin in view space are in the slots this pass does
+// not otherwise use.
+#define footAxisX vec3(E.r3.xyz)
+#define footAxisY vec3(E.r3.w, E.r4.xy)
+#define footAxisZ vec3(E.r4.zw, E.r5.x)
+#define footOrigin vec3(E.r5.y, E.r6.xy)
+const vec2 kFootprintYards = vec2(60.0, 120.0), kFootprintTexels = vec2(1200.0, 2400.0);
+void main()
+{
+    outColor = vec4(0.0);
+    vec2 uv = gl_FragCoord.xy / kFootprintTexels;
+    vec2 ground = (uv - 0.5) * kFootprintYards;
+    if (abs(ground.x) > 27.0 || abs(ground.y) > 60.0)
+        return;
+    vec3 at = footAxisX * ground.x + footAxisZ * ground.y + footOrigin;
+    if (at.z <= 0.05)
+        return;
+    vec2 pixel = ProjectToPixel(at);
+    if (any(lessThan(pixel, vec2(0.0))) || any(greaterThanEqual(pixel, size)))
+        return;
+    ivec2 p = ivec2(pixel);
+    if (RawDepth(p) >= kSky)
+        return;
+    // What is seen there, in the world's axes (from its view-space position).
+    vec3 seen = PositionAt(p) - footOrigin;
+    vec3 world = vec3(dot(seen, footAxisX) / dot(footAxisX, footAxisX), dot(seen, footAxisY) / dot(footAxisY, footAxisY),
+                      dot(seen, footAxisZ) / dot(footAxisZ, footAxisZ));
+    float across = length(world.xz - ground);
+    if (E.r6.w > 0.0)   // HC09_FOOTPRINTS=debug (dev): the height of what is seen there (0.5: 0, 1: an eighth of a yard)
+    {
+        outColor = vec4(clamp(0.5 + world.y * 4.0, 0.0, 1.0));
+        return;
+    }
+    // Above the turf, no higher than an ankle, right over this spot (the models' shoes sit partly in the turf). (The
+    // turf itself comes out at about 0.015 from the depth, give or take: from 0.02 up the whole field was stamped.)
+    if (world.y > 0.035 && world.y < 0.25 && across < 0.11)
+    {
+        // And the turf seen close by (a foot stands on the ground among it): a frame whose depth read a whole stretch
+        // of the field a few inches high (a cut, a replay's) stamped all of it.
+        bool ground = false;
+        for (int k = 0; k < 8 && !ground; k++)
+        {
+            float angle = float(k) * 0.785398;
+            ivec2 q = p + ivec2(vec2(cos(angle), sin(angle)) * 10.0);
+            if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(size))) || RawDepth(q) >= kSky)
+                continue;
+            vec3 there = PositionAt(q) - footOrigin;
+            ground = abs(dot(there, footAxisY) / dot(footAxisY, footAxisY)) < 0.03;
+        }
+        if (ground)
+            outColor = vec4(1.0 - smoothstep(0.06, 0.11, across));
+    }
+}
+#endif
+
+#if PASS_FOOTPRINT_FADE
+// hc09: the footprints fill in as it keeps snowing (blend: the map times this).
+#define footFade E.r7.x
+void main()
+{
+    outColor = vec4(footFade);
 }
 #endif
 
@@ -750,6 +987,9 @@ void main()
 #endif
 
 #if PASS_POST
+// hc09: the scene's tint for the time of day (vk_sunset.h: a warm, dimmer light as the sun goes down), in slots the
+// post-processing passes do not otherwise read.
+#define sceneTint vec3(E.r5.xy, E.r3.w)
 // The scene (input0: the copy, or the depth of field's output when sourceInRect) with the bloom (input1) added
 // in linear light, then graded, written over the scene's target. MERGED: the occlusion (input2) and reflections
 // (input3) put on the scene's copy here first, as their own composites would have (one pass over the scene
@@ -768,6 +1008,7 @@ void main()
     }
 #endif
     vec3 c = Linear(scene.rgb);
+    c *= sceneTint;   // hc09: the light of the time of day (vk_sunset.h)
     if (bloomStrength > 0.0)
         c += textureLod(input1, (vec2(p) + 0.5) * invSize, 0.0).rgb * (bloomStrength * 0.35);
     // Filmic shoulder: unchanged up to the knee, then rolled off towards white instead of clipping.
@@ -806,9 +1047,15 @@ void main()
 )GLSL";
 
 constexpr uint32_t kBindings = 5;   // depth, input0, input1, input2, input3
+constexpr uint32_t kPuffBinding = 6;   // hc09: the breath's puffs (not in the traced passes' layout)
+constexpr uint32_t kPuffRing = 4;
+constexpr VkDeviceSize kPuffBytes = VkDeviceSize(kPuffRing) * kMaxPuffs * 32;
 constexpr VkFormat kOcclusionFormat = VK_FORMAT_R16G16B16A16_SFLOAT;   // occlusion, view distance, its tint (Co, Cg)
 constexpr VkFormat kReflectionFormat = VK_FORMAT_R16G16B16A16_SFLOAT;   // premultiplied colour, opacity
 constexpr VkFormat kBloomFormat = VK_FORMAT_R16G16B16A16_SFLOAT;        // linear colour (bloom, depth of field)
+// hc09: the footprints in the snow: how pressed each spot of the field is (PASS_FOOTPRINTS's map).
+constexpr VkFormat kFootprintFormat = VK_FORMAT_R16_SFLOAT;
+constexpr uint32_t kFootprintWidth = 1200, kFootprintHeight = 2400;
 
 float Strength(const char* value, float fallback)
 {
@@ -841,6 +1088,17 @@ VkShaderModule Module(VkDevice device, const std::string& source, Stage stage, c
 }
 
 }  // namespace
+
+void SceneEffects::SetBreath(const float* puffs, uint32_t count, float light)
+{
+    breathCount_ = 0;
+    if (!puffBuffer_.mapped || !puffs) return;
+    breathPart_ = (breathPart_ + 1) % kPuffRing;
+    count = std::min(count, kMaxPuffs);
+    std::memcpy(static_cast<uint8_t*>(puffBuffer_.mapped) + size_t(breathPart_) * kMaxPuffs * 32, puffs, size_t(count) * 32);
+    breathCount_ = count;
+    breathLight_ = light;
+}
 
 bool SceneEffects::Init(Device& dev)
 {
@@ -878,9 +1136,13 @@ bool SceneEffects::Init(Device& dev)
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     }
+    // hc09: binding 6, the breath's puffs (PASS_BREATH; host-visible, a part a frame).
+    VkDescriptorSetLayoutBinding pb[kBindings + 1]{};
+    std::memcpy(pb, b, sizeof(b));
+    pb[kBindings] = { kPuffBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
     VkDescriptorSetLayoutCreateInfo lci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    lci.bindingCount = kBindings;
-    lci.pBindings = b;
+    lci.bindingCount = kBindings + 1;
+    lci.pBindings = pb;
     VkPushConstantRange pcr{ VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Constants) };
     VkPipelineLayoutCreateInfo pci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
     pci.setLayoutCount = 1;
@@ -893,7 +1155,10 @@ bool SceneEffects::Init(Device& dev)
     VkSamplerCreateInfo lin = sci;
     lin.magFilter = lin.minFilter = VK_FILTER_LINEAR;
     vs_ = Module(d, kVertex, Stage::kVertex, "effects_vs");
-    if (vkCreateDescriptorSetLayout(d, &lci, nullptr, &setLayout_) != VK_SUCCESS ||
+    if (!dev.CreateBuffer(kPuffBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          puffBuffer_))
+        puffBuffer_ = Buffer{};
+    if (!puffBuffer_.buffer || vkCreateDescriptorSetLayout(d, &lci, nullptr, &setLayout_) != VK_SUCCESS ||
         vkCreatePipelineLayout(d, &pci, nullptr, &pipeLayout_) != VK_SUCCESS || vkCreateSampler(d, &sci, nullptr, &nearest_) != VK_SUCCESS ||
         vkCreateSampler(d, &lin, nullptr, &linear_) != VK_SUCCESS || !vs_)
     {
@@ -909,7 +1174,7 @@ bool SceneEffects::Init(Device& dev)
         std::memcpy(tb, b, sizeof(b));
         tb[kBindings] = { kBindings, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
         VkDescriptorSetLayoutCreateInfo tl = lci;
-        tl.bindingCount = kBindings + 1;
+        tl.bindingCount = kBindings + 1;   // without the puffs
         tl.pBindings = tb;
         VkPipelineLayoutCreateInfo tp = pci;
         tp.pSetLayouts = &tracedSetLayout_;
@@ -928,15 +1193,17 @@ void SceneEffects::Shutdown()
     VkDevice d = dev_->device;
     for (Pipelines& p : pipelines_)
         for (VkPipeline pipe : { p.occlusion, p.blur, p.composite, p.reflections, p.reflectionComposite, p.bloomPrefilter, p.bloomDown,
-                                 p.bloomUp, p.focus, p.depthOfField, p.post, p.hdrGain, p.postMerged, p.tracedOcclusion, p.tracedReflections })
+                                 p.bloomUp, p.focus, p.depthOfField, p.post, p.hdrGain, p.postMerged, p.tracedOcclusion, p.tracedReflections,
+                                 p.precipitation, p.footprints, p.footprintFade, p.breath })
             if (pipe) vkDestroyPipeline(d, pipe, nullptr);
     pipelines_.clear();
     for (Image* img : { &occlusionRaw_, &occlusionBlurred_, &sceneCopy_, &reflectionTarget_, &focus_[0], &focus_[1], &depthOfFieldTarget_,
-                        &hdrGain_ })
+                        &hdrGain_, &footprints_ })
         if (img->image) dev_->DestroyImage(*img);
     for (Image& img : bloomLevels_)
         if (img.image) dev_->DestroyImage(img);
     if (vs_) vkDestroyShaderModule(d, vs_, nullptr);
+    if (puffBuffer_.buffer) dev_->DestroyBuffer(puffBuffer_);
     if (linear_) vkDestroySampler(d, linear_, nullptr);
     if (nearest_) vkDestroySampler(d, nearest_, nullptr);
     if (pipeLayout_) vkDestroyPipelineLayout(d, pipeLayout_, nullptr);
@@ -978,11 +1245,12 @@ VkPipeline SceneEffects::CreatePipeline(VkShaderModule fs, VkFormat target, VkSa
     cba.colorWriteMask = 0xF;
     if (blend)
     {
-        // 1: destination * source colour; 2: premultiplied source over destination; 3: source added. Alpha kept.
+        // 1: destination * source colour; 2: premultiplied source over destination; 3: source added; 4: the larger.
+        // Alpha kept.
         cba.blendEnable = VK_TRUE;
         cba.srcColorBlendFactor = blend == 1 ? VK_BLEND_FACTOR_ZERO : VK_BLEND_FACTOR_ONE;
         cba.dstColorBlendFactor = blend == 1 ? VK_BLEND_FACTOR_SRC_COLOR : blend == 2 ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ONE;
-        cba.colorBlendOp = VK_BLEND_OP_ADD;
+        cba.colorBlendOp = blend == 4 ? VK_BLEND_OP_MAX : VK_BLEND_OP_ADD;
         cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
         cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
         cba.alphaBlendOp = VK_BLEND_OP_ADD;
@@ -1043,6 +1311,10 @@ SceneEffects::Pipelines* SceneEffects::GetPipelines(VkFormat format, VkSampleCou
         { "PASS_POST", true, format, samples, 0, &p.post },
         { "HDR_GAIN 1\n#define PASS_POST", false, kOcclusionFormat, VK_SAMPLE_COUNT_1_BIT, 0, &p.hdrGain },
         { "MERGED 1\n#define PASS_POST", true, format, samples, 0, &p.postMerged },
+        { "PASS_PRECIPITATION", true, format, samples, 2, &p.precipitation },
+        { "PASS_BREATH", true, format, samples, 2, &p.breath },
+        { "PASS_FOOTPRINTS", false, kFootprintFormat, VK_SAMPLE_COUNT_1_BIT, 4, &p.footprints },
+        { "PASS_FOOTPRINT_FADE", false, kFootprintFormat, VK_SAMPLE_COUNT_1_BIT, 1, &p.footprintFade },
     };
     for (const Entry& e : entries)
     {
@@ -1207,6 +1479,17 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
             w[i].pImageInfo = &images[i];
         }
         vkUpdateDescriptorSets(dev_->device, kBindings, w, 0, nullptr);
+        if (!traced)
+        {
+            VkDescriptorBufferInfo puffs{ puffBuffer_.buffer, 0, VK_WHOLE_SIZE };
+            VkWriteDescriptorSet wp{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            wp.dstSet = set;
+            wp.dstBinding = kPuffBinding;
+            wp.descriptorCount = 1;
+            wp.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            wp.pBufferInfo = &puffs;
+            vkUpdateDescriptorSets(dev_->device, 1, &wp, 0, nullptr);
+        }
         if (traced)
         {
             VkWriteDescriptorSetAccelerationStructureKHR as{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR };
@@ -1279,6 +1562,93 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
         }
         Barrier(cb);
     };
+    // hc09: breath in the cold (vk_breath.h), before the rain and snow: this frame's part of the puff buffer.
+    if (breathCount_ > 0)
+    {
+        const Constants kept = c;
+        atLow(false);
+        c.bloom = float(breathPart_ * kMaxPuffs);   // breathFirst's slot
+        c.grade = float(breathCount_);
+        c.depthOfField = breathLight_;
+        pass(pipelines->breath, color, true, occlusionBlurred_, nearest_);
+        c = kept;
+    }
+    // hc09: rain or snow, first: the occlusion and reflections see the scene as before (the drops write no depth),
+    // and the merged pass's copy of the scene has them.
+    if (precipitationOn_)
+    {
+        const Constants kept = c;
+        c.blurDirection[0] = precipitation_[0];
+        c.blurDirection[1] = precipitation_[1];
+        c.targetInvSize[0] = precipitation_[2];
+        c.targetInvSize[1] = precipitation_[3];
+        c.bloom = precipitation_[4];
+        c.grade = precipitation_[5];
+        c.depthOfField = precipitation_[6];
+        c.sourceInRect = precipitation_[7];
+        atLow(false);
+        pass(pipelines->precipitation, color, true, occlusionBlurred_, nearest_);
+        c = kept;
+    }
+    // hc09: footprints in the snow: stamped into the field's map from this frame's depth (and faded a little every
+    // 2 seconds or so, as the snow fills them in). The map stays SHADER_READ_ONLY between frames for the field's draws.
+    if (footprintStamp_ || footprintClear_)
+    {
+        auto layout = [&](VkImageLayout from, VkImageLayout to) {
+            VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+            b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.image = footprints_.image;
+            b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            b.oldLayout = from;
+            b.newLayout = to;
+            b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+            b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+        };
+        bool have = footprints_.image != VK_NULL_HANDLE;
+        VkImageLayout now = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        if (!have && footprintStamp_)
+        {
+            have = dev_->CreateImage(VK_IMAGE_VIEW_TYPE_2D, kFootprintWidth, kFootprintHeight, 1, kFootprintFormat,
+                                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, footprints_);
+            if (!have)
+                footprints_ = Image{};
+            now = VK_IMAGE_LAYOUT_UNDEFINED;
+            footprintClear_ = true;
+        }
+        if (have && footprintClear_)
+        {
+            layout(now, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            VkClearColorValue zero{};
+            VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            vkCmdClearColorImage(cb, footprints_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &range);
+            now = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            footprintClear_ = false;
+            footprintFrames_ = 0;
+        }
+        if (have && footprintStamp_)
+        {
+            layout(now, VK_IMAGE_LAYOUT_GENERAL);
+            now = VK_IMAGE_LAYOUT_GENERAL;
+            const Constants kept = c;
+            atLow(false);
+            if (++footprintFrames_ >= 120)
+            {
+                footprintFrames_ = 0;
+                c.bloom = 0.995f;   // footFade's slot: about half gone in 4 to 5 minutes
+                pass(pipelines->footprintFade, footprints_, false, occlusionBlurred_, nearest_, nullptr, true);
+            }
+            const float* w = footprintWorld_;
+            float* slots[12] = { &c.up[0], &c.up[1], &c.up[2], &c.radius, &c.occlusion, &c.reflections, &c.debug, &c.peakRatio,
+                                 &c.blurDirection[0], &c.blurDirection[1], &c.targetInvSize[0], &c.targetInvSize[1] };
+            for (int i = 0; i < 12; ++i) *slots[i] = w[i];
+            static const bool debugPrints = [] { const char* e = Hc09Env("HC09_FOOTPRINTS"); return e && !std::strcmp(e, "debug"); }();
+            c.inputInvSize[1] = debugPrints ? 1.0f : 0.0f;
+            pass(pipelines->footprints, footprints_, false, occlusionBlurred_, nearest_, nullptr, true);
+            c = kept;
+        }
+        if (have) layout(now, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
     const Image* occlusionImage = nullptr;
     float reflectionDepths = 0.0f;
     bool copied = false;
@@ -1300,7 +1670,8 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
         if (traced) c.reflections = bounce;
         if (traced && sun)   // the lights' slots, back after the pass
         {
-            tracedShadows_ = sun[3] > 0.0f && sun[7] < 1.5f;   // not when only close-ups are shadowed (no sun known)
+            // Not when only close-ups are shadowed (no sun known); overcast (3) replaces the game's shadows too.
+            tracedShadows_ = sun[3] > 0.0f && (sun[7] < 1.5f || sun[7] > 2.5f);
             c.blurDirection[0] = sun[0];
             c.blurDirection[1] = sun[1];
             c.targetInvSize[0] = sun[2];
@@ -1337,9 +1708,12 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
         const bool tracedReflections = traced;
         const float keptDirection = c.blurDirection[0];
         if (traced) c.blurDirection[0] = glossyFrom == ~0u ? -1.0f : float(glossyFrom);   // glossyFrom's slot
+        const float keptBloom = c.bloom;
+        c.bloom = hc09::g_weather == int(hc09::Weather::Rain) ? 1.0f : 0.0f;   // fieldWet's slot
         pass(traced ? pipelines->tracedReflections : pipelines->reflections, reflectionTarget_, false, sceneCopy_, linear_);
         traced = false;
         c.blurDirection[0] = keptDirection;
+        c.bloom = keptBloom;
         atLow(false);
         // Traced, the reflections' blur keeps to its surface, by the occlusion image's view distances.
         reflectionDepths = tracedReflections && occlusionImage && occlusionImage->width == reflectionTarget_.width ? 1.0f : 0.0f;
@@ -1384,6 +1758,10 @@ void SceneEffects::Apply(VkCommandBuffer cb, const Image& color, VkSampleCountFl
         source = &depthOfFieldTarget_;
         c.sourceInRect = 1.0f;
     }
+    // The time of day's tint (sceneTint's slots).
+    c.blurDirection[0] = sceneTint_[0];
+    c.blurDirection[1] = sceneTint_[1];
+    c.radius = sceneTint_[2];
     if (hdr_)
     {
         pass(pipelines->hdrGain, hdrGain_, false, *source, nearest_, bloom_ > 0 ? &bloomLevels_[0] : nullptr);

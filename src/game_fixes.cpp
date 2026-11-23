@@ -109,6 +109,16 @@ namespace
         0, 0, 1, 1, 0, 1, 1, 1,  // Ravens, Commanders, Saints, Seahawks, Steelers, Texans, Titans, Vikings
     };
 
+}
+
+namespace hc09
+{
+    void LogWeather(PPCContext& ctx, uint8_t* base, const char* when);   // common/weather.cpp
+    void ApplyWeatherOverride(PPCContext& ctx, uint8_t* base);
+}
+
+namespace
+{
     void NoteFieldSurface(PPCContext& ctx, uint8_t* base)
     {
         hc09::guest::Database db(ctx, base);
@@ -148,4 +158,6 @@ PPC_FUNC(sub_82D1BAA8)
     }
     __imp__sub_82D1BAA8(ctx, base);
     NoteFieldSurface(ctx, base);
+    hc09::ApplyWeatherOverride(ctx, base);
+    hc09::LogWeather(ctx, base, "game set up");
 }

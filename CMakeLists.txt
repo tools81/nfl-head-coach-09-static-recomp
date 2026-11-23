@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(HC09Recomp VERSION 1.8.0 LANGUAGES C CXX)
+project(HC09Recomp VERSION 1.9.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -44,7 +44,7 @@ set(HC09_HOST_SOURCES
     src/common/font_hd.cpp
     src/common/broadcast_state.cpp
     src/common/play_log.cpp
-    src/common/tv_camera.cpp src/common/extra_point.cpp
+    src/common/tv_camera.cpp src/common/extra_point.cpp src/common/weather.cpp
     src/common/draft_picks.cpp
     src/common/edition.cpp
     src/common/fifth_year_option.cpp

@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -17,6 +18,7 @@
 
 #include "../dev_env.h"
 #include "common/field_surface.h"
+#include "common/weather.h"
 #include "gpu/texture_replacements.h"
 
 namespace hc09vk {
@@ -66,7 +68,26 @@ float hcShow(float size, float fw) { return 1.0 - smoothstep(0.2 * size, 0.6 * s
 float hcFbm(vec2 p) { return 0.5 * hcNoise(p) + 0.3 * hcNoise(p * 2.03 + 17.0) + 0.2 * hcNoise(p * 4.11 + 41.0); }
 )GLSL";
 
-// The turf: `c` the game's colour, `p` the world position, `eye` the camera's; D.pad2: how worn the field is (0..1).
+// The turf's value for the draw (D.pad2, MaterialDrawValue): its fraction how worn the field is (0..1), its whole part
+// how wet (rain) or snowed on in percent, plus 128 for snow, 512 at night and 1024 when the footprints in the snow are
+// bound (kFootprintSlot: how pressed each spot is, 60 x 120 yards from the field's middle).
+const char* kTurfValue = R"GLSL(
+float hcWorn() { return fract(D.pad2); }
+bool hcFootprintsBound() { return D.pad2 >= 1024.0; }
+float hcCode() { float w = floor(D.pad2); return w >= 1024.0 ? w - 1024.0 : w; }
+bool hcNight() { return hcCode() >= 512.0; }
+float hcWeatherCode() { float w = hcCode(); return w >= 512.0 ? w - 512.0 : w; }
+float hcFootprint(vec3 p)
+{
+    if (!hcFootprintsBound()) return 0.0;
+    return textureLod(tex2d[30], p.xz / vec2(60.0, 120.0) + 0.5, 0.0).r;
+}
+bool hcSnowing() { return hcWeatherCode() >= 128.0; }
+float hcWetness() { return hcSnowing() ? 0.0 : hcWeatherCode() / 100.0; }
+float hcSnowCover() { return hcSnowing() ? (hcWeatherCode() - 128.0) / 100.0 : 0.0; }
+)GLSL";
+
+// The turf: `c` the game's colour, `p` the world position, `eye` the camera's.
 const char* kTurf = R"GLSL(
 // Blade height at p: three sizes of tufts, each only where the pixel is small enough to show it.
 float hcBlades(vec2 p, float fw)
@@ -121,7 +142,7 @@ vec3 hcTurf(vec3 c, vec3 p, vec3 eye, float strength)
     col += pow(graze, 5.0) * 0.05 * vec3(0.85, 0.95, 0.85) * (0.5 + 0.5 * lum) * grass;
 
     // Wear: between the hash marks and in the middle of the field, in patches, growing through the game.
-    float worn = D.pad2;
+    float worn = hcWorn();
     float band = exp(-(p.x * p.x) / 30.0);                          // the hash marks are 3.1 yards from the middle
     float field = smoothstep(52.0, 38.0, abs(p.z)) * (0.55 + 0.45 * smoothstep(30.0, 5.0, abs(p.z)));
     float patches = smoothstep(0.62 - 0.32 * worn, 0.86 - 0.3 * worn, hcFbm(q / 1.7 + 5.0) + 0.15 * hcNoise(q / 0.35));
@@ -132,6 +153,119 @@ vec3 hcTurf(vec3 c, vec3 p, vec3 eye, float strength)
     col = mix(col, dirt, smoothstep(0.35, 0.9, wear) * 0.8);
 
     return mix(c, col, strength);
+}
+)GLSL";
+
+// Rain on the field (roadmap 16), for the day's and the night's field shaders: `c` the colour so far, `p` the world
+// position, `eye` the camera's. Water fills the gaps between the blades, so less light scatters back (darker, deeper
+// grass) and the film reflects the sky, by the angle (Fresnel), broken up by the blades. Where the ground is low, and
+// where the turf is worn to soil, water stands: flat, a mirror of the sky dimpled by the drops, the grass under it
+// dark. The puddles spread as the field gets wetter.
+const char* kWet = R"GLSL(
+vec3 hcWet(vec3 c, vec3 p, vec3 eye)
+{
+    float wet = hcWetness();
+    if (wet <= 0.0) return c;
+    float fw = max(max(abs(dFdx(p.x)), abs(dFdy(p.x))), max(abs(dFdx(p.z)), abs(dFdy(p.z))));
+    vec3 toEye = eye - p;
+    vec3 v = length(toEye) > 1e-4 ? normalize(toEye) : vec3(0.0, 1.0, 0.0);
+    vec2 q = p.xz;
+    float lum = dot(c, vec3(0.299, 0.587, 0.114));
+    float grass = smoothstep(0.004, 0.03, c.g - max(c.r, c.b));
+    // Overcast by day, the floodlit night above the stands.
+    vec3 sky = hcNight() ? vec3(0.13, 0.14, 0.16) : vec3(0.58, 0.61, 0.66);
+
+    vec3 col = c * mix(1.0, mix(0.86, 0.7, grass), wet);
+    col = mix(vec3(dot(col, vec3(0.299, 0.587, 0.114))), col, 1.0 + 0.2 * wet * grass);
+    float nv = clamp(v.y, 0.0, 1.0);
+    float film = 0.02 + 0.98 * pow(1.0 - nv, 5.0);
+    float blades = mix(0.55, 1.0, hcShow(0.05, fw) * hcNoise(q / 0.05 + 3.0) + (1.0 - hcShow(0.05, fw)) * 0.5);
+    col += sky * film * wet * 0.35 * blades;
+
+    // Standing water: in the low patches, more where the turf is worn (between the hash marks, in the middle).
+    float worn = hcWorn();
+    float band = exp(-(p.x * p.x) / 40.0) * smoothstep(50.0, 35.0, abs(p.z));
+    float low = hcFbm(q / 2.5 + 71.0) + 0.1 * hcNoise(q / 0.6 + 9.0) + 0.15 * band * worn;
+    float cover = clamp((wet - 0.45) / 0.55, 0.0, 1.0);
+    // Shallow at the rim, where blades still break the surface; deeper and whole toward the middle.
+    float level = 0.82 - 0.07 * cover;
+    float depth = smoothstep(level, level + 0.07, low);
+    float tufts = hcShow(0.04, fw) * hcNoise(q / 0.04 + 51.0) + (1.0 - hcShow(0.04, fw)) * 0.5;
+    float puddle = clamp(depth * 1.6 - tufts * (1.0 - depth) * 0.9, 0.0, 1.0) * smoothstep(level - max(fw * 0.4, 0.01), level, low) * cover;
+    if (puddle > 0.0)
+    {
+        // The drops' dimples tilt the water a little: the reflection's angle varies across it. The sky is far
+        // brighter than the grass it lights, so even the little a puddle mirrors from above reads as grey sheen.
+        vec2 dimple = (vec2(hcNoise(q / 0.06), hcNoise(q / 0.06 + 23.0)) - 0.5) * 0.25 * hcShow(0.06, fw);
+        vec3 n = normalize(vec3(dimple.x, 1.0, dimple.y));
+        float wv = clamp(dot(n, v), 0.0, 1.0);
+        float mirror = 0.02 + 0.98 * pow(1.0 - wv, 5.0);
+        // The grass under the water, its blades drowned: darker and even.
+        vec3 under = c * 0.5;
+        under = mix(under, vec3(dot(under, vec3(0.333))) * vec3(0.9, 1.0, 0.85), 0.3);
+        // An overcast sky is brightest overhead.
+        vec3 r = reflect(-v, n);
+        vec3 water = under + sky * (hcNight() ? 1.5 : 2.4) * mirror * mix(0.75, 1.15, clamp(r.y, 0.0, 1.0)) + sky * 0.05 * depth;
+        // By night the floodlight towers, beyond the field's corners about 40 degrees up, glint in the water.
+        if (hcNight())
+            for (int k = 0; k < 4; ++k)
+            {
+                vec3 tower = vec3((k & 1) != 0 ? 48.0 : -48.0, 52.0, (k & 2) != 0 ? 70.0 : -70.0);
+                float glint = pow(clamp(dot(r, normalize(tower - p)), 0.0, 1.0), 400.0);
+                water += vec3(1.0, 0.97, 0.9) * glint * 1.5 * depth;
+            }
+        col = mix(col, water, puddle * 0.8);
+    }
+    return col;
+}
+)GLSL";
+
+// Snow settling on the field (roadmap 16), for both field shaders, over what the game draws (its snowy field: the
+// grass a dull beige, banks along the sidelines). Drifts in patches that join up as it settles; between the hash
+// marks, where the play is, it is trampled to grey slush with the ground showing through; the yard lines are kept
+// swept. Lit as the game lit the ground under it (the shadows of players fall on it), with a fine grain and glints.
+const char* kSnow = R"GLSL(
+vec3 hcSnow(vec3 c, vec3 p, vec3 eye)
+{
+    float amount = hcSnowCover();
+    if (amount <= 0.0) return c;
+    float fw = max(max(abs(dFdx(p.x)), abs(dFdy(p.x))), max(abs(dFdx(p.z)), abs(dFdy(p.z))));
+    vec3 toEye = eye - p;
+    vec3 v = length(toEye) > 1e-4 ? normalize(toEye) : vec3(0.0, 1.0, 0.0);
+    vec2 q = p.xz;
+    float lum = dot(c, vec3(0.299, 0.587, 0.114));
+    // The light on the ground, against the game's snowy field fully lit (about 0.55).
+    float light = mix(clamp(lum / 0.55, 0.4, 1.15), 1.0, 0.3);
+    float paint = smoothstep(0.68, 0.78, lum);
+
+    // The drifts' pattern turned off the field's axes and warped (the noise's grid showed as square steps in their
+    // edges), with soft edges where the snow thins out.
+    vec2 r = mat2(0.8, -0.6, 0.6, 0.8) * q;
+    r += 1.6 * (vec2(hcNoise(r / 2.3 + 11.0), hcNoise(r / 2.3 + 29.0)) - 0.5);
+    float drift = hcFbm(r / 3.2 + 101.0) + 0.14 * (hcNoise(mat2(0.6, 0.8, -0.8, 0.6) * q / 0.45 + 7.0) - 0.5) * hcShow(0.45, fw);
+    float cover = smoothstep(0.0, 0.3, drift - (1.05 - 1.1 * amount));
+    // Trampled between the hash marks, most in the middle of the field and as the game wears on.
+    float band = exp(-(p.x * p.x) / 45.0) * smoothstep(52.0, 30.0, abs(p.z));
+    float trample = clamp(band * (0.7 + 0.3 * hcWorn()), 0.0, 1.0);
+    float prints = hcShow(0.25, fw) * hcNoise(q / 0.25 + 33.0);
+    cover *= 1.0 - trample * mix(0.55, 0.9, prints);
+    // The yard lines kept swept (white on white would vanish): a strip of ground along each 5-yard line, and the
+    // paint itself.
+    float toLine = abs(fract(p.z / 5.0 + 0.5) - 0.5) * 5.0;
+    float swept = (1.0 - smoothstep(0.3, 0.5 + fw, toLine)) * step(abs(p.z), 50.5) * step(abs(p.x), 26.7);
+    cover *= 1.0 - 0.85 * max(swept, paint);
+
+    float grain = 0.94 + 0.06 * (hcShow(0.05, fw) * hcNoise(q / 0.05 + 3.0) + (1.0 - hcShow(0.05, fw)) * 0.5);
+    vec3 snow = vec3(0.8, 0.82, 0.87) * light * grain;
+    snow = mix(snow, mix(c * 0.75, snow * 0.72, 0.55), trample * 0.7);   // slush
+    // Glints: a few crystals catch the light toward the eye, only where a pixel is small enough to show one.
+    float glint = step(0.985, hcHash(floor(q / 0.03))) * hcShow(0.03, fw) * pow(clamp(v.y, 0.0, 1.0), 0.5) * (1.0 - trample);
+    snow += vec3(0.25) * glint * light;
+    // Footprints: where something stood, the snow pressed down: a shaded hollow, thinner, packed grey at the bottom.
+    float print = clamp(hcFootprint(p), 0.0, 1.0);
+    snow = mix(snow, snow * vec3(0.66, 0.68, 0.74), print);
+    cover *= 1.0 - 0.3 * print;
+    return mix(c, snow, clamp(cover, 0.0, 1.0));
 }
 )GLSL";
 
@@ -321,15 +455,22 @@ bool MaterialPatch(uint64_t hash, std::string& glsl)
             return Insert(glsl, std::string("    oc0.rgb = vec3(") + kColours[i % 8] + ");\n");
 
     bool patched = false;
-    if (hash == kTurfPs)
+    if (hash == kTurfPs || hash == kTurfNightPs)
     {
+        // The day's field gets the turf (HC09_TURF) and the weather; the night's, the weather alone.
         static const float strength = Setting(Hc09Env("HC09_TURF"), 1.0f);
+        const bool turfToo = hash == kTurfPs && strength > 0.0f;
         const size_t mainAt = glsl.find("void main()");
-        if (strength > 0.0f && mainAt != std::string::npos && glsl.rfind(kEpilogue) != std::string::npos)
+        if (mainAt != std::string::npos && glsl.rfind(kEpilogue) != std::string::npos)
         {
-            glsl.insert(mainAt, std::string("// hc09: the turf (vk_materials.cpp).") + kNoise + kTurf + "\n");
-            char call[128];
-            snprintf(call, sizeof(call), "    oc0.rgb = hcTurf(oc0.rgb, vin[2].xyz, vin[3].xyz, %.3f);\n", strength);
+            glsl.insert(mainAt, std::string("// hc09: the turf (vk_materials.cpp).") + kNoise + kTurfValue + (turfToo ? kTurf : "") + kWet + kSnow + "\n");
+            char call[200];
+            if (turfToo)
+                snprintf(call, sizeof(call),
+                         "    oc0.rgb = hcSnow(hcWet(hcTurf(oc0.rgb, vin[2].xyz, vin[3].xyz, %.3f), vin[2].xyz, vin[3].xyz), vin[2].xyz, vin[3].xyz);\n",
+                         strength);
+            else
+                snprintf(call, sizeof(call), "    oc0.rgb = hcSnow(hcWet(oc0.rgb, vin[2].xyz, vin[3].xyz), vin[2].xyz, vin[3].xyz);\n");
             patched = Insert(glsl, call);
         }
     }
@@ -356,11 +497,36 @@ bool MaterialPatch(uint64_t hash, std::string& glsl)
     return patched;
 }
 
+namespace {
+// The turf's value as kTurfValue reads it: the wear, how wet the field is and whether it is night.
+float TurfValue(float wear)
+{
+    // In rain the field is wet from the kickoff and gets wetter over the first 20 minutes it is on screen.
+    // HC09_TURF_WET=<0..1> (dev): a fixed amount, whatever the weather.
+    static const float fixedWet = [] { const char* e = Hc09Env("HC09_TURF_WET"); return e && *e ? std::clamp(float(atof(e)), 0.0f, 1.0f) : -1.0f; }();
+    // In snow it settles: a thin cover at the kickoff, most of the field white after 25 minutes on screen.
+    // HC09_TURF_SNOW=<0..1> (dev): a fixed amount, whatever the weather.
+    static const float fixedSnow = [] { const char* e = Hc09Env("HC09_TURF_SNOW"); return e && *e ? std::clamp(float(atof(e)), 0.0f, 1.0f) : -1.0f; }();
+    float wet = 0.0f, snow = -1.0f;
+    if (fixedSnow >= 0.0f)
+        snow = fixedSnow;
+    else if (fixedWet >= 0.0f)
+        wet = fixedWet;
+    else if (hc09::g_weather == int(hc09::Weather::Rain))
+        wet = float(0.55 + 0.45 * std::min(1.0, turf.seconds / 1200.0));
+    else if (hc09::g_weather == int(hc09::Weather::Snow))
+        snow = float(0.4 + 0.6 * std::min(1.0, turf.seconds / 1500.0));
+    const float code = snow >= 0.0f ? 128.0f + std::floor(snow * 100.0f + 0.5f) : std::floor(wet * 100.0f + 0.5f);
+    return code + (hc09::g_nightGame ? 512.0f : 0.0f) + std::clamp(wear, 0.0f, 0.999f);
+}
+}  // namespace
+
 bool MaterialDrawValue(uint64_t psHash, const uint32_t (*fetch)[6], uint32_t slots, float& value)
 {
-    if (psHash != kTurfPs) return false;
-    // The field's markings (slot 3) tell one stadium and game from the next.
-    const uint32_t texture = (slots & 8u) ? fetch[3][1] & 0xFFFFF000u : 0u;
+    if (psHash != kTurfPs && psHash != kTurfNightPs) return false;
+    // The field's markings (slot 3) tell one stadium and game from the next. The night's field shader lacks a
+    // texture: its draws keep the field the day's last saw.
+    const uint32_t texture = psHash == kTurfNightPs ? turf.field : (slots & 8u) ? fetch[3][1] & 0xFFFFF000u : 0u;
     const auto now = std::chrono::steady_clock::now();
     const double gap = turf.last.time_since_epoch().count() ? std::chrono::duration<double>(now - turf.last).count() : 1e9;
     const uint32_t game = hc09::g_gamesStarted;
@@ -388,8 +554,9 @@ bool MaterialDrawValue(uint64_t psHash, const uint32_t (*fetch)[6], uint32_t slo
     // game), on grass only. A new game, a new field or 5 minutes without the field start over.
     // HC09_TURF_WEAR=<0..1> (dev): a fixed amount.
     static const float fixed = [] { const char* e = Hc09Env("HC09_TURF_WEAR"); return e && *e ? float(atof(e)) : -1.0f; }();
-    value = fixed >= 0.0f ? fixed : float(std::min(1.0, turf.seconds / 2400.0));
-    if (hc09::g_fieldTurf == 1) value = 0.0f;   // artificial turf never wears
+    float wear = fixed >= 0.0f ? fixed : float(std::min(1.0, turf.seconds / 2400.0));
+    if (hc09::g_fieldTurf == 1) wear = 0.0f;   // artificial turf never wears
+    value = TurfValue(wear);
     return true;
 }
 

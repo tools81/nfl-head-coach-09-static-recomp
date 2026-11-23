@@ -318,6 +318,25 @@ Scale=2
   the original picture's sides can occasionally pop in late, since the game still decides what to draw for
   16:9.
 
+#### Weather and time of day
+
+The Vulkan renderer also shows each game's weather and time of day, as the game sets them. These have no
+settings.
+
+- **Rain and snow by day:** an overcast sky. With `RayTracing` on, the sun's shadows give way to soft shade
+  under each player.
+- **Falling rain and snow:** drawn around the camera, behind and in front of the players. Rain falls as fine
+  streaks; snow falls as flakes, larger and softer near the camera. Wind slants both.
+- **Rain on the field:** the grass darkens and shines, and puddles spread as the game goes on. Players are
+  reflected in the wet field.
+- **Snow on the field:** it settles in drifts that cover more of the field through the game. It is trampled to
+  slush between the hash marks, and the yard lines are kept swept. Players leave footprints that slowly fill
+  in again.
+- **Breath:** at 45 °F or colder, outside a dome, players breathe out small clouds of vapour.
+- **The afternoon wearing on:** in a clear day game, the sun sinks as the game clock runs, from a 1 pm
+  kickoff toward 4:30 pm. Its light warms to a golden glow and the shadows lengthen. The time is read from
+  the score bar, so this needs `ScoreBar` on.
+
 The Vulkan renderer needs a graphics card and driver with Vulkan 1.3 (any card from the last
 several years). On a PC without one, the game uses the older D3D12 renderer instead, which runs at
 the game's own pace. To use the D3D12 renderer anyway, add `Renderer=d3d12` under

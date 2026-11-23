@@ -64,6 +64,42 @@ public:
     const Image* HdrGain(float rect[4]) const;
     // hc09: whether the last Apply traced the lights' shadows (so the game's own are not needed).
     bool TracedShadows() const { return tracedShadows_; }
+    // hc09: rain or snow over the next Apply's scene (roadmap 16; 8 values: the world's x axis in view space, the
+    // time in seconds, the kind (1 rain, 2 snow), how heavy (0..1), the wind along the world's x and z in yards per
+    // second), or nullptr: none.
+    void SetPrecipitation(const float* values)
+    {
+        precipitationOn_ = values != nullptr;
+        if (values)
+            for (int i = 0; i < 8; ++i) precipitation_[i] = values[i];
+    }
+    // hc09: footprints in the snow (roadmap 16): the next Apply stamps where something stands on the field into the
+    // footprint map. `world` (12 values): the world's x, y and z axes and its origin in view space (this frame's
+    // field camera), or nullptr: no stamping this frame. `game`: a new value starts a clean map.
+    void SetFootprints(const float* world, uint32_t game)
+    {
+        footprintStamp_ = world != nullptr;
+        if (world)
+            for (int i = 0; i < 12; ++i) footprintWorld_[i] = world[i];
+        if (game != footprintGame_) { footprintGame_ = game; footprintClear_ = true; }
+    }
+    // hc09: breath in the cold (vk_breath.h) over the next Apply's scene: `count` puffs (8 floats each, as
+    // Breath::Update writes them), lit by `light` (1 by day). Every frame (0 or nullptr: none).
+    void SetBreath(const float* puffs, uint32_t count, float light);
+    // hc09: the whole scene's tint in the post-processing (linear light; vk_sunset.h), every frame.
+    void SetSceneTint(const float* rgb)
+    {
+        for (int i = 0; i < 3; ++i) sceneTint_[i] = rgb ? rgb[i] : 1.0f;
+    }
+    // The footprint map for the field's shader (R16F, 60 x 120 yards from the field's middle, 20 texels a yard;
+    // SHADER_READ_ONLY_OPTIMAL between frames) and its sampler, once it exists.
+    bool Footprints(VkImageView& view, VkSampler& sampler) const
+    {
+        if (!footprints_.image || footprintClear_) return false;
+        view = footprints_.view;
+        sampler = linear_;
+        return true;
+    }
 
 private:
     static constexpr int kBloomLevels = 5;
@@ -75,7 +111,8 @@ private:
         VkPipeline occlusion = VK_NULL_HANDLE, blur = VK_NULL_HANDLE, composite = VK_NULL_HANDLE, reflections = VK_NULL_HANDLE,
                    reflectionComposite = VK_NULL_HANDLE, bloomPrefilter = VK_NULL_HANDLE, bloomDown = VK_NULL_HANDLE,
                    bloomUp = VK_NULL_HANDLE, focus = VK_NULL_HANDLE, depthOfField = VK_NULL_HANDLE, post = VK_NULL_HANDLE,
-                   hdrGain = VK_NULL_HANDLE, postMerged = VK_NULL_HANDLE;
+                   hdrGain = VK_NULL_HANDLE, postMerged = VK_NULL_HANDLE, precipitation = VK_NULL_HANDLE,
+                   footprints = VK_NULL_HANDLE, footprintFade = VK_NULL_HANDLE, breath = VK_NULL_HANDLE;
         VkPipeline tracedReflections = VK_NULL_HANDLE;
         VkPipeline tracedOcclusion = VK_NULL_HANDLE;   // hc09: ray-traced (with the device's ray queries)
     };
@@ -98,6 +135,17 @@ private:
     bool tracedShadows_ = false;  // and traced the lights' shadows
     float gainRect_[4] = {};
     bool loggedCamera_ = false;
+    bool precipitationOn_ = false;
+    float precipitation_[8] = {};
+    float sceneTint_[3] = { 1.0f, 1.0f, 1.0f };
+    Buffer puffBuffer_;            // the breath's puffs: a part a frame (host-visible)
+    uint32_t breathPart_ = 0, breathCount_ = 0;
+    float breathLight_ = 1.0f;
+    Image footprints_;
+    bool footprintStamp_ = false, footprintClear_ = true;
+    float footprintWorld_[12] = {};
+    uint32_t footprintGame_ = ~0u;
+    uint32_t footprintFrames_ = 0;   // stamping frames since the last fade
     VkDescriptorSetLayout setLayout_ = VK_NULL_HANDLE;
     VkPipelineLayout pipeLayout_ = VK_NULL_HANDLE;
     // hc09: the ray-traced occlusion's: the same bindings and the acceleration structure (binding 5).

@@ -16,7 +16,11 @@
 #include <vector>
 
 #include "../widescreen.h"
+#include "common/field_surface.h"
 #include "common/font_hd.h"
+#include "common/weather.h"
+#include "vk_breath.h"
+#include "vk_sunset.h"
 #include "vk_materials.h"
 #include "vk_tessellation.h"
 #include "vk_motion.h"
@@ -529,6 +533,35 @@ struct NativeRenderer::Impl
     // (with the camera's up, the effects' shader has the world's axes).
     float sunWorld[4] = {};   // toward the sun; w: 1 by day, 0: the floodlights
     float worldX[3] = {};     // the world's x axis in view space
+    float worldView[12] = {};  // the world's x, y and z axes and its origin in view space
+    // hc09: breath in the cold (vk_breath.h): the helmets' sums (host-visible), and the puffs.
+    Buffer heads;
+    bool headsPatched = false;
+    Breath breath;
+    // hc09: the afternoon wearing on (vk_sunset.h): the scene's sun moved to the game's time of day.
+    Sunset sunset;
+    // The draw's sun constants (c204, c205 of a window), moved when they are the scene's.
+    void MoveSun(DrawConsts& C, uint32_t base, uint32_t size)
+    {
+        if (base + 205 >= 512 || size <= 205) return;
+        float sun[2][4];
+        for (uint32_t k = 0; k < 2; ++k)
+            for (uint32_t i = 0; i < 4; ++i) sun[k][i] = AsF(Reg(reg::ALU_CONSTANTS + (base + 204 + k) * 4 + i));
+        if (sunset.Apply(sun[0], sun[1]))
+        {
+            std::memcpy(C.c[base + 204], sun[0], 16);
+            std::memcpy(C.c[base + 205], sun[1], 16);
+        }
+    }
+    // A cold game outdoors (common/weather.h): the players breathe out vapour. HC09_BREATH=0 (dev): never; =1: always.
+    bool Breathing() const
+    {
+        static const int forced = [] { const char* e = Hc09Env("HC09_BREATH"); return e && *e ? atoi(e) : -1; }();
+        if (forced >= 0) return forced != 0;
+        return hc09::g_temperature.load() <= 45 && !hc09::g_domed.load();
+    }
+    float fieldProj[2] = {};   // that camera's projection scale and up (to tell it is the scene's)
+    float fieldUp[3] = {};
     uint64_t sunFrame = ~0ull;
     uint64_t tracedShadowsFrame = ~0ull - 1;   // the last frame whose lights' shadows were traced
     void NoteSun(uint32_t vsBase, uint32_t psBase)
@@ -541,6 +574,14 @@ struct NativeRenderer::Impl
             l[i] = AsF(Reg(reg::ALU_CONSTANTS + (psBase + 204) * 4 + i));
             c[i] = AsF(Reg(reg::ALU_CONSTANTS + (psBase + 205) * 4 + i));
         }
+        // The game's sun for this frame (vk_sunset.h), then the time of day's, as the draws get it.
+        sunset.NoteGameSun(l, c);
+        sunset.BeginFrame(frame);
+        {
+            float l4[4] = { l[0], l[1], l[2], 0.0f }, c4[4] = { c[0], c[1], c[2], 0.0f };
+            if (sunset.Apply(l4, c4))
+                for (int i = 0; i < 3; ++i) l[i] = l4[i], c[i] = c4[i];
+        }
         const hc09::gpu::SceneCamera cam = hc09::gpu::CameraFromConstants(m);
         if (!cam.valid) return;
         // World x in view space: its clip x without the w part over the projection's scale, clip y likewise, and w.
@@ -548,16 +589,65 @@ struct NativeRenderer::Impl
         const float xn = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
         if (!(xn > 1e-9f)) return;
         for (int i = 0; i < 3; ++i) worldX[i] = x[i] / xn;
+        // The world's axes and origin in view space, as they are (the footprints in the snow map the field's ground).
+        fieldProj[0] = cam.sx;
+        fieldProj[1] = cam.sy;
+        if (heads.mapped)
+        {
+            const float projection[4] = { cam.sx, cam.sy, cam.cx, cam.cy };
+            float axes[12];
+            for (int a = 0; a < 4; ++a)
+            {
+                axes[a * 3 + 0] = (m[a * 4 + 0] - cam.cx * m[a * 4 + 3]) / cam.sx;
+                axes[a * 3 + 1] = (m[a * 4 + 1] - cam.cy * m[a * 4 + 3]) / cam.sy;
+                axes[a * 3 + 2] = m[a * 4 + 3];
+            }
+            breath.Camera(frame, axes, projection, static_cast<uint32_t*>(heads.mapped));
+        }
+        for (int i = 0; i < 3; ++i) fieldUp[i] = cam.up[i];
+        for (int a = 0; a < 4; ++a)
+        {
+            worldView[a * 3 + 0] = (m[a * 4 + 0] - cam.cx * m[a * 4 + 3]) / cam.sx;
+            worldView[a * 3 + 1] = (m[a * 4 + 1] - cam.cy * m[a * 4 + 3]) / cam.sy;
+            worldView[a * 3 + 2] = m[a * 4 + 3];
+        }
         const float ln = std::sqrt(l[0] * l[0] + l[1] * l[1] + l[2] * l[2]);
-        const bool day = ln > 1e-3f && std::max({ c[0], c[1], c[2] }) > 0.05f && std::fabs(l[1]) / ln > 0.15f;
+        // (A sun the time of day has brought low, vk_sunset.h, is still the sun.)
+        const bool day = ln > 1e-3f && std::max({ c[0], c[1], c[2] }) > 0.05f && std::fabs(l[1]) / ln > (sunset.Active() ? 0.01f : 0.15f);
         const float sign = l[1] < 0.0f ? -1.0f : 1.0f;   // toward the light (above), as the turf's shading takes it
         for (int i = 0; i < 3; ++i) sunWorld[i] = day ? sign * l[i] / ln : 0.0f;
         sunWorld[3] = day ? 1.0f : 0.0f;
+        // Rain or snow by day (common/weather.h): an overcast sky, whatever the game's lighting gives (in snow it
+        // has no sun, which read as floodlights: four shadows around each player at 1 pm).
+        const bool overcast = hc09::Overcast();
+        if (overcast) sunWorld[3] = 3.0f;
         sunFrame = frame;
         static uint64_t logged = 0;
         if (Hc09Env("HC09_RAY_TRACING_PROF") && (logged++ < 3 || frame % 600 == 0))
             fprintf(stderr, "[raytrace] frame %llu: sun %.3f %.3f %.3f colour %.3f %.3f %.3f: %s\n", (unsigned long long)frame, l[0], l[1], l[2],
-                    c[0], c[1], c[2], day ? "day" : "floodlights");
+                    c[0], c[1], c[2], overcast ? "overcast" : day ? "day" : "floodlights");
+    }
+    // hc09: the rain or snow over this frame's scene (roadmap 16; SceneEffects::SetPrecipitation), or nullptr: in a
+    // game with rain or snow (common/weather.h) while its field has been seen in the last 10 seconds (the close-ups
+    // between plays too, not the menus' scenes). The game's own drops stay: they are few, and only near its camera.
+    // HC09_PRECIPITATION (dev): 0 none, rain or snow whatever the weather.
+    float precipitation[8] = {};
+    const float* Precipitation()
+    {
+        static const int forced = [] {
+            const char* e = Hc09Env("HC09_PRECIPITATION");
+            if (!e || !*e) return -1;
+            return !strcmp(e, "rain") ? 1 : !strcmp(e, "snow") ? 2 : 0;
+        }();
+        const int kind = forced >= 0 ? forced : hc09::g_weather.load();
+        if (kind <= 0 || sunFrame == ~0ull || frame - sunFrame > 600) return nullptr;
+        static const auto start = std::chrono::steady_clock::now();
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        const float amount = forced > 0 ? 0.8f : std::clamp(0.35f + float(hc09::g_precipitation.load()) / 100.0f, 0.35f, 1.0f);
+        const float wind = float(hc09::g_wind.load()) * 0.49f * (kind == 2 ? 0.5f : 0.35f);   // mph to yards per second, eased
+        const float values[8] = { worldX[0], worldX[1], worldX[2], float(std::fmod(seconds, 3600.0)), float(kind), amount, wind, wind * 0.3f };
+        std::memcpy(precipitation, values, sizeof(values));
+        return precipitation;
     }
     uint64_t replayFrame = ~0ull;
     uint64_t gainFrame = ~0ull;   // the frame whose scene made the HDR gain image
@@ -1426,6 +1516,7 @@ struct NativeRenderer::Impl
         e.meta = TranslateShader(code, translate);
         if (!vs && hash == kCrowdPs && crowdOn && e.meta.error.empty()) CrowdPatch(e.meta.glsl);
         if (!vs && e.meta.error.empty()) MaterialPatch(hash, e.meta.glsl);
+        if (vs && heads.buffer && e.meta.error.empty() && HeadPatch(hash, e.meta.glsl)) headsPatched = true;
         char name[64];
         snprintf(name, sizeof(name), "native_%s_%016llx", vs ? "vs" : "ps", (unsigned long long)hash);
         if (!e.meta.error.empty()) { Warn(std::string("shader ") + name + " failed: " + e.meta.error); return nullptr; }
@@ -2254,6 +2345,12 @@ struct NativeRenderer::Impl
         else
             window(vsBase, vsSize, &vs->meta);
         if (ps) window(psBase, psSize, &ps->meta);
+        sunset.BeginFrame(frame);
+        if (sunset.Active())
+        {
+            MoveSun(C, vsBase, vsSize);
+            if (ps) MoveSun(C, psBase, psSize);
+        }
         xenos::RegRange(reg::BOOL_CONSTANTS, 8, C.bools);
         xenos::RegRange(reg::LOOP_CONSTANTS, 32, C.loops);
         xenos::RegRange(reg::FETCH_CONSTANTS, 192, C.fetch);
@@ -2399,12 +2496,25 @@ struct NativeRenderer::Impl
             }
         }
         memcpy(&C.pad0, &crowdInfo, sizeof(crowdInfo));
-        // hc09: our shading's value for the draw (vk_materials.cpp: the turf's wear).
-        if (psHash == kTurfPs)
+        // hc09: our shading's value for the draw (vk_materials.cpp: the turf's wear and weather), and the footprints in
+        // the snow (SceneEffects::Footprints) in slot kFootprintSlot's 2D binding, which the field's shaders leave free
+        // (+1024 in the value: bound).
+        VkImageView footprintView = VK_NULL_HANDLE;
+        VkSampler footprintSampler = VK_NULL_HANDLE;
+        if (psHash == kTurfPs || psHash == kTurfNightPs)
         {
             uint32_t fetch[32][6];
             for (uint32_t s = 0; s < 32; ++s) memcpy(fetch[s], tfOf[s].dword, sizeof(fetch[s]));
-            if (float value; MaterialDrawValue(psHash, fetch, slots, value)) memcpy(&C.pad0, &value, sizeof(value));
+            if (float value; MaterialDrawValue(psHash, fetch, slots, value))
+            {
+                if (!(slots & (1u << kFootprintSlot)) && effects.Footprints(footprintView, footprintSampler))
+                {
+                    value += 1024.0f;
+                    descKey.insert(descKey.end(), { kFootprintSlot | (uint64_t(kTex2D) << 8) | (2ull << 32), uint64_t(footprintView),
+                                                    uint64_t(footprintSampler) });
+                }
+                memcpy(&C.pad0, &value, sizeof(value));
+            }
         }
         VkDescriptorSet set = VK_NULL_HANDLE;
         if (lastSet && descKey == lastDescKey) set = lastSet;
@@ -2421,13 +2531,14 @@ struct NativeRenderer::Impl
                         images[k][s] = { slotSmp[s][k], slotTex[s][k]->img.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                         uimages[k][s] = { nearest, slotTex[s][k]->img.altView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                     }
+            if (footprintView) images[kTex2D][kFootprintSlot] = { footprintSampler, footprintView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
             VkDescriptorSetAllocateInfo ai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
             ai.descriptorPool = pool;
             ai.descriptorSetCount = 1;
             ai.pSetLayouts = &setLayout;
             if (vkAllocateDescriptorSets(dev->device, &ai, &set) != VK_SUCCESS) { Skip("descriptor pool exhausted"); return; }
             VkDescriptorBufferInfo bMem{ guest.buffer, 0, VK_WHOLE_SIZE }, bConst{ consts.buffer, 0, VK_WHOLE_SIZE };
-            VkWriteDescriptorSet w[9]{};
+            VkWriteDescriptorSet w[10]{};
             for (auto& x : w) { x.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; x.dstSet = set; x.descriptorCount = 1; }
             w[0].dstBinding = 0; w[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[0].pBufferInfo = &bMem;
             w[1].dstBinding = 1; w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[1].pBufferInfo = &bConst;
@@ -2444,7 +2555,10 @@ struct NativeRenderer::Impl
             // hc09: binding 9, the ray tracer's capture (any storage buffer when it is off: never written).
             VkDescriptorBufferInfo bCapture{ rt.Ready() ? rt.CaptureBuffer() : consts.buffer, 0, VK_WHOLE_SIZE };
             w[8].dstBinding = 9; w[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[8].pBufferInfo = &bCapture;
-            vkUpdateDescriptorSets(dev->device, 9, w, 0, nullptr);
+            // hc09: binding 10, the helmets' sums for the breath (any storage buffer without it: never written).
+            VkDescriptorBufferInfo bHeads{ heads.buffer ? heads.buffer : consts.buffer, 0, VK_WHOLE_SIZE };
+            w[9].dstBinding = 10; w[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[9].pBufferInfo = &bHeads;
+            vkUpdateDescriptorSets(dev->device, 10, w, 0, nullptr);
             descSets.emplace(descKey, set);
         }
         if (set != lastSet) { lastSet = set; lastDescKey = descKey; }
@@ -2553,8 +2667,17 @@ struct NativeRenderer::Impl
         }
         // hc09: ray-traced lighting: an opaque 3D draw of the scene writes its clip positions for the scene's
         // acceleration structure (vk_raytrace.h).
-        if (rt.Ready() && (psHash == kTurfPs || psHash == kTurfNightPs) && sunFrame != frame && bt[0] && bound[0].width >= 1024) NoteSun(vsBase, psBase);
+        // (The world's axes are wanted for the rain and snow too, without ray tracing.)
+        if ((psHash == kTurfPs || psHash == kTurfNightPs) && sunFrame != frame && bt[0] && bound[0].width >= 1024 && !SmallViewport())
+            NoteSun(vsBase, psBase);
         if (zEnable && zWrite && bt[0] && bd && bound[0].width >= 1024 && bound[0].height >= 576 && SmallViewport()) NoteInset();
+        // hc09: breath in the cold: the scene's helmet draws add up their positions (vk_breath.h).
+        if (vsHash == kHelmetVs && headsPatched && !tess && bt[0] && bound[0].width >= 1024 && !SmallViewport() && vsBase + 184 <= 512 && Breathing())
+        {
+            float model[16];
+            for (uint32_t i = 0; i < 16; ++i) model[i] = AsF(Reg(reg::ALU_CONSTANTS + (vsBase + 180) * 4 + i));
+            C.clip[3] = breath.Helmet(frame, model, static_cast<uint32_t*>(heads.mapped));
+        }
         if (rt.Ready() && zEnable && zWrite && colorOn && !rect && !tess && bt[0] && bd && bound[0].width >= 1024 && bound[0].height >= 576 &&
             !((Reg(reg::RB_COLORCONTROL) >> 3) & 1) && Perspective(vsBase, vsSize, vs->meta) && !SmallViewport())
         {
@@ -2659,6 +2782,30 @@ struct NativeRenderer::Impl
         // No field drawn this frame (a close-up against the stands): no sun is known; the last value 2 has the pass
         // shadow close-ups only, from its own light (a cap's brim over a face).
         const float closeUpOnly[8] = { 1.0f, 0.0f, 0.0f, shadowDark, 0.0f, 1.0f, 0.0f, 2.0f };
+        effects.SetPrecipitation(Precipitation());
+        effects.SetSceneTint(sunset.SceneTint());
+        // Breath in the cold (vk_breath.h): with this frame's field camera, the scene's own.
+        {
+            static float puffs[kMaxPuffs * 8];
+            const bool sceneCamera = sunFrame == frame && std::fabs(fieldProj[1] - sceneView.camera.sy) < 1e-3f * std::fabs(fieldProj[1]) &&
+                                     std::fabs(fieldUp[0] - sceneView.camera.up[0]) + std::fabs(fieldUp[1] - sceneView.camera.up[1]) +
+                                             std::fabs(fieldUp[2] - sceneView.camera.up[2]) < 1e-3f;
+            uint32_t count = 0;
+            if (heads.mapped && headsPatched)
+                count = breath.Update(frame, static_cast<const uint32_t*>(heads.mapped), worldView, Breathing(), puffs);
+            const float light = hc09::g_nightGame ? 0.7f : hc09::Overcast() ? 0.9f : 1.0f;
+            effects.SetBreath(sceneCamera ? puffs : nullptr, count, light);
+        }
+        // Footprints in the snow (roadmap 16): stamped while a snowy game's field is drawn this frame.
+        // HC09_FOOTPRINTS=0 (dev): none.
+        static const bool footprintsOff = [] { const char* e = Hc09Env("HC09_FOOTPRINTS"); return e && !strcmp(e, "0"); }();
+        const bool snowing = hc09::g_weather == int(hc09::Weather::Snow) || Hc09Env("HC09_TURF_SNOW");
+        // Only with the scene's own camera (not a replay's picture in the picture).
+        const bool sameCamera = std::fabs(fieldProj[1] - sceneView.camera.sy) < 1e-3f * std::fabs(fieldProj[1]) &&
+                                std::fabs(fieldProj[0] * squeeze - sceneView.camera.sx) < 1e-3f * std::fabs(fieldProj[0]) &&
+                                std::fabs(fieldUp[0] - sceneView.camera.up[0]) + std::fabs(fieldUp[1] - sceneView.camera.up[1]) +
+                                        std::fabs(fieldUp[2] - sceneView.camera.up[2]) < 1e-3f;
+        effects.SetFootprints(!footprintsOff && snowing && sunFrame == frame && sameCamera ? worldView : nullptr, hc09::g_gamesStarted.load());
         effects.Apply(cb, src->img, src->samples, bd->depthView, sceneView,
                       [this](VkDescriptorSetLayout layout) { return ComputeSet(layout); }, garbage,
                       traced ? rt.Scene() : VK_NULL_HANDLE, traced ? (sunFrame == frame ? sun : closeUpOnly) : nullptr,
@@ -3157,7 +3304,7 @@ bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* e
     }
 
     // Draw descriptors: as vk_edram without binding 3 (EDRAM).
-    VkDescriptorSetLayoutBinding b[9]{};
+    VkDescriptorSetLayoutBinding b[10]{};
     // hc09: guest memory and the draw constants are read by the tessellation stages too (vk_tessellation.h).
     const VkShaderStageFlags tessStages = dev.tessellation ? VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT : 0;
     b[0] = { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | tessStages, nullptr };
@@ -3169,8 +3316,10 @@ bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* e
         b[5 + k] = { 6 + k, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
     // hc09: ray-traced lighting: the vertex shaders' capture of the scene's positions (vk_raytrace.h).
     b[8] = { 9, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | tessStages, nullptr };
+    // hc09: breath in the cold: the helmets' sums (vk_breath.h).
+    b[9] = { 10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | tessStages, nullptr };
     VkDescriptorSetLayoutCreateInfo lci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    lci.bindingCount = 9;
+    lci.bindingCount = 10;
     lci.pBindings = b;
     // Update-after-bind pool: the 192 texture bindings count against the update-after-bind limits (Intel: 64
     // samplers per stage otherwise). Descriptors are still all written before the set is bound.
@@ -3184,7 +3333,7 @@ bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* e
     pci.pushConstantRangeCount = 1;
     pci.pPushConstantRanges = &pcr;
     VkDescriptorPoolSize sizes[3] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxSets },
-                                      { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxSets * 2 },
+                                      { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxSets * 3 },
                                       { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxSets / 2 * 32 * kTexKinds * 2 } };   // under Intel's 1M update-after-bind descriptors in all pools (x kSlots)
     VkDescriptorPoolCreateInfo dpi{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     if (uab) dpi.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
@@ -3197,7 +3346,7 @@ bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* e
         if (vkCreateDescriptorPool(d, &dpi, nullptr, &sl.pool) != VK_SUCCESS) { if (err) *err = "descriptor pool"; return false; }
 
     // Compute: one pool for resolves, texture decodes and mips.
-    VkDescriptorPoolSize cps[4] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, Impl::kComputeSets * 2 },
+    VkDescriptorPoolSize cps[4] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, Impl::kComputeSets * 3 },
                                     { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, Impl::kComputeSets * 2 },
                                     { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, Impl::kComputeSets * 3 },
                                     { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 8 } };   // hc09: ray-traced lighting
@@ -3333,6 +3482,13 @@ bool NativeRenderer::Init(Device& dev, const Buffer& guestMemory, std::string* e
     vkCreateSampler(d, &nci, nullptr, &I.nearest);
     I.effects.Init(dev);
     if (I.rt.Init(dev)) I.translate.capture = true;
+    // hc09: breath in the cold (vk_breath.h): the helmets' sums, written by their vertex shaders.
+    if (dev.vertexStores &&
+        dev.CreateBuffer(kHeadBufferBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                         I.heads))
+        memset(I.heads.mapped, 0, kHeadBufferBytes);
+    else
+        I.heads = Buffer{};
     if (const int mode = TemporalUpscaler::Mode())
     {
         // The game's 3D scene is 1280 x 736 (times the scale); drawn at 1 / Ratio of that per side.
@@ -3532,6 +3688,7 @@ void NativeRenderer::Shutdown()
     I.fsr.Destroy();
     I.rt.Destroy();
     if (I.crowdHistory.img.image) I.dev->DestroyImage(I.crowdHistory.img);
+    if (I.heads.buffer) I.dev->DestroyBuffer(I.heads);
     I.Park(I.slots[I.cur]);
     for (Impl::Slot& sl : I.slots)
     {

@@ -10,6 +10,8 @@ namespace hc09vk {
 constexpr uint64_t kTurfPs = 0x076698e96199da36ull;
 // The field as night games draw it during play: the same shader less one texture (the same constants).
 constexpr uint64_t kTurfNightPs = 0xcf6a1cd735fb0fdcull;
+// The texture slot the field's shaders leave free, where the footprints in the snow are bound for them.
+constexpr uint32_t kFootprintSlot = 30;
 constexpr uint64_t kHelmetPs = 0xe263d5063e531450ull;   // the helmets' shells
 // The game's own shadows of players, coaches and officials: their models drawn dark into a 640x360 target (cleared
 // white, then blurred), which the field's shader reads.
@@ -21,7 +23,8 @@ constexpr uint64_t kPlayerShadowPs = 0x5c2d30a29ad4dff3ull;
 // of its own, logged as [tint] <hash> <r> <g> <b>.
 bool MaterialPatch(uint64_t hash, std::string& glsl);
 
-// A draw's value for our code (DrawConsts::pad0) when its pixel shader is one of ours: the turf's wear. `fetch`:
+// A draw's value for our code (DrawConsts::pad0) when its pixel shader is one of ours: the turf's wear, how wet the
+// field is and whether it is night (the day's and the night's field shaders). `fetch`:
 // the draw's texture fetch constants, `slots` the ones it samples.
 bool MaterialDrawValue(uint64_t psHash, const uint32_t (*fetch)[6], uint32_t slots, float& value);
 
