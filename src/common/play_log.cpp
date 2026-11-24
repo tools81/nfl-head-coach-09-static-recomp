@@ -48,8 +48,9 @@ namespace
         int carries = 0, rushYards = 0, rushTds = 0;
         int attempts = 0, completions = 0, passYards = 0, passTds = 0, picked = 0;
         int catches = 0, catchYards = 0, catchTds = 0;
-        int tackles = 0, sacks = 0, picks = 0, defended = 0;
+        int tackles = 0, sacks = 0, picks = 0, defended = 0, recoveries = 0;
         int kicksMade = 0, kicks = 0;
+        int returns = 0, returnYards = 0, returnTds = 0, punts = 0, puntYards = 0;
     };
 
     enum Kind
@@ -59,6 +60,8 @@ namespace
         kPass,
         kSack,
         kFieldGoal,
+        kPunt,
+        kKickoff,
     };
 
     // A play, from its lines.
@@ -72,7 +75,29 @@ namespace
         int yards = 0;
         bool complete = false, picked = false, knocked = false, touchdown = false, fumble = false, good = false, missed = false;
         int possession = -1;     // the side with the ball as it began
+        // Kicks: the punt's or kickoff's length, an onside kick, the returner and his yards; a fumble's (or an onside
+        // kick's) recovery and the team that made it ("CHI"); a kick blocked (1 a punt, 2 a field goal) and by whom.
+        int kickYards = 0, returnYards = 0, blocked = 0;
+        bool onside = false;
+        std::string returner, recoverer, recoverTeam, blocker;
+        // A two-point conversion (not counted in the players' games) and whether it was good.
+        bool conversion = false, converted = false;
+        // The end of a quarter, the half or the game, or the two-minute warning: its title and the score ("CHI 0   GB 16").
+        std::string period, score;
+        // A challenge of the play ("Play challenged by GB and OVERTURNED."): the team, 1 the ruling stands, 2 overturned.
+        std::string challenger;
+        int challenge = 0;
     };
+
+    // The drive under way: the team with the ball, its plays and yards, and the game time it began (seconds since
+    // kickoff, from the score bug).
+    struct Drive
+    {
+        int side = -1, plays = 0, yards = 0;
+        int start = -1;
+    };
+    Drive g_drive;
+    int g_quarterLength = 0;   // the longest clock the score bug has shown (seconds)
 
     std::mutex g_mutex;
     Play g_play;
@@ -80,7 +105,42 @@ namespace
     std::unordered_map<std::string, Line> g_lines;       // by name as the log writes it
     uint32_t g_teams[2] = {};                             // the teams the players were read for
     LowerThird g_third;
+    std::vector<LowerThird> g_waiting;                    // lower-thirds made while another was still shown
     int g_sinceThird = 0;                                 // plays since the last lower-third
+    // The players' games and the drive before the last play was counted: a challenge that overturns it takes it back.
+    std::unordered_map<std::string, Line> g_undoLines;
+    Drive g_undoDrive;
+    bool g_undo = false;
+
+    // A lower-third shows for six seconds (vk/score_bar.cpp); one made meanwhile waits its turn (a scoring play's, then
+    // its drive's), at most two.
+    constexpr auto kShownFor = std::chrono::milliseconds(6500);
+    bool Logging();
+    void Show(LowerThird third)
+    {
+        const bool waits = g_third.id && Clock::now() - g_third.at < kShownFor;
+        if (Logging())
+            std::fprintf(stderr, "[playlog] lower-third%s: %s | %s | %s\n", waits ? " (waits)" : "", third.name.c_str(), third.headline.c_str(),
+                         third.stats.c_str());
+        if (waits)
+        {
+            if (g_waiting.size() < 2)
+                g_waiting.push_back(std::move(third));
+            return;
+        }
+        third.id = g_third.id + 1;
+        third.at = Clock::now();
+        g_third = std::move(third);
+    }
+    void NextShown()
+    {
+        if (!g_waiting.empty() && Clock::now() - g_third.at >= kShownFor)
+        {
+            LowerThird next = std::move(g_waiting.front());
+            g_waiting.erase(g_waiting.begin());
+            Show(std::move(next));
+        }
+    }
 
     bool Logging()
     {
@@ -131,9 +191,131 @@ namespace
     }
 
     // One line of the play log, added to the play.
+    // "CHI 0, GB 16" or "CHI 7 GB 16 final" as "CHI 0   GB 16".
+    std::string Score(std::string text)
+    {
+        if (Ends(text, " final"))
+            text.resize(text.size() - 6);
+        std::string out;
+        for (char c : text)
+            if (c == ',')
+                continue;
+            else
+                out.push_back(c);
+        // Three spaces between the teams: after the first number.
+        const size_t digit = out.find_first_of("0123456789");
+        const size_t after = digit == std::string::npos ? std::string::npos : out.find(' ', digit);
+        if (after != std::string::npos)
+            out.replace(after, 1, "   ");
+        return Trim(out);
+    }
+
     void Read(Play& play, const std::string& line)
     {
         size_t at;
+        if (Starts(line, "END OF THE ") && (at = line.find(" QUARTER - ")) != std::string::npos)
+        {
+            play.period = "END OF " + Upper(line.substr(11, at - 11)) + " QUARTER";
+            play.score = Score(line.substr(at + 11));
+            play.ended = true;
+            return;
+        }
+        if (Starts(line, "HALFTIME - ") || Starts(line, "GAME OVER - "))
+        {
+            play.period = line[0] == 'H' ? "HALFTIME" : "FINAL";
+            play.score = Score(line.substr(line.find(" - ") + 3));
+            play.ended = true;
+            return;
+        }
+        if (line == "TWO-MINUTE WARNING")
+        {
+            play.period = line;
+            play.ended = true;
+            return;
+        }
+        if (Starts(line, "Play challenged by "))
+        {
+            const std::string rest = line.substr(19);
+            play.challenger = Trim(rest.substr(0, rest.find(' ')));
+            play.challenge = Upper(rest).find("OVERTURNED") != std::string::npos ? 2 : 1;
+            return;
+        }
+        if (Starts(line, "two point conversion"))
+        {
+            play.conversion = true;
+            play.converted = line.find("good") != std::string::npos;
+            play.ended = true;
+            return;
+        }
+        if (Starts(line, "Punt Blocked by ") || Starts(line, "Field Goal Blocked by "))
+        {
+            play.blocked = line[0] == 'P' ? 1 : 2;
+            play.blocker = Trim(line.substr(line.find(" by ") + 4));
+            play.ended = true;
+            return;
+        }
+        if ((at = line.find(" punt ")) != std::string::npos || Ends(line, " punt"))
+        {
+            // "<name> punt <n> yards", "<name> punt <n> yards from <spot>", "<name> punt from <spot>"
+            play.kind = kPunt;
+            play.actor = line.substr(0, at == std::string::npos ? line.size() - 5 : at);
+            if (at != std::string::npos && line.size() > at + 6 && line[at + 6] >= '0' && line[at + 6] <= '9')
+                play.kickYards = std::atoi(line.c_str() + at + 6);
+            return;
+        }
+        if ((at = line.find(" kickoff ")) != std::string::npos)
+        {
+            play.kind = kKickoff;
+            play.actor = line.substr(0, at);
+            play.kickYards = std::atoi(line.c_str() + at + 9);
+            return;
+        }
+        if (Ends(line, " onside kick"))
+        {
+            play.kind = kKickoff;
+            play.onside = true;
+            play.actor = line.substr(0, line.size() - 12);
+            return;
+        }
+        if (Starts(line, "returned by "))
+        {
+            // "returned by <name> for <n> yards for a touchdown"
+            const size_t result = line.find(" for ", 12);
+            play.returner = Trim(line.substr(12, result == std::string::npos ? std::string::npos : result - 12));
+            if (result != std::string::npos)
+                play.returnYards = std::atoi(line.c_str() + result + 5);
+            play.touchdown = line.find("touchdown") != std::string::npos;
+            play.ended = play.touchdown;
+            return;
+        }
+        if (Starts(line, "returned for "))
+        {
+            // A fumble's return: "returned for a gain of 12 yards".
+            play.returnYards = Yards(line.substr(13));
+            return;
+        }
+        if (Starts(line, "returned ") && (at = line.find(" yards by ")) != std::string::npos)
+        {
+            // "returned <n> yards by <name>"
+            play.returnYards = std::atoi(line.c_str() + 9);
+            play.returner = Trim(line.substr(at + 10));
+            return;
+        }
+        if (Starts(line, "recovered by "))
+        {
+            // "recovered by <name> (<team>)" after a fumble; "recovered by <name>" after an onside kick.
+            const std::string rest = line.substr(13);
+            const size_t open = rest.rfind(" (");
+            play.recoverer = Trim(open == std::string::npos ? rest : rest.substr(0, open));
+            if (open != std::string::npos && rest.back() == ')')
+                play.recoverTeam = rest.substr(open + 2, rest.size() - open - 3);
+            return;
+        }
+        if (Starts(line, "fair catch by ") || line.find("touchback") != std::string::npos)
+        {
+            play.ended = true;
+            return;
+        }
         if ((at = line.find(" rush ")) != std::string::npos || (at = line.find(" scrambles ")) != std::string::npos)
         {
             play.kind = kRush;
@@ -262,6 +444,29 @@ namespace
             Add(s, std::to_string(l.catchTds) + " TD");
         return s;
     }
+    std::string Returning(const Line& l)
+    {
+        std::string s = std::to_string(l.returns) + " RET";
+        Add(s, Plural(l.returnYards, "YD", "YDS"));
+        if (l.returnTds)
+            Add(s, std::to_string(l.returnTds) + " TD");
+        return s;
+    }
+    std::string Punting(const Line& l)
+    {
+        char average[16];
+        std::snprintf(average, sizeof(average), "%.1f AVG", l.punts ? double(l.puntYards) / l.punts : 0.0);
+        std::string s = Plural(l.punts, "PUNT", "PUNTS");
+        Add(s, average);
+        return s;
+    }
+    // A player's team (0 the away team, 1 the home team; -1 not known).
+    int SideOf(const std::string& name)
+    {
+        const auto found = g_players.find(Lower(name));
+        return found == g_players.end() ? -1 : found->second.side;
+    }
+
     std::string Defending(const Line& l)
     {
         std::string s;
@@ -273,16 +478,134 @@ namespace
             Add(s, std::to_string(l.picks) + " INT");
         if (l.defended)
             Add(s, std::to_string(l.defended) + " PD");
+        if (l.recoveries)
+            Add(s, std::to_string(l.recoveries) + " FR");
         return s;
     }
 
     // The play counted in its players' games, and a lower-third made if it is worth one: scores, turnovers, sacks,
     // field goals and long gains always; an ordinary play when the last few had none.
+    // Seconds of game time since kickoff, from the score bug (-1: not known).
+    int GameTime()
+    {
+        const hc09::broadcast::Scoreboard board = hc09::broadcast::Snapshot();
+        int m = 0, sec = 0;
+        const int quarter = !board.quarter.empty() && board.quarter[0] >= '1' && board.quarter[0] <= '4' ? board.quarter[0] - '1'
+                            : board.quarter.find("OT") != std::string::npos ? 4 : -1;
+        int clock = -1;
+        if (!board.clock.empty() && board.clock[0] == ':' && std::sscanf(board.clock.c_str() + 1, "%d", &sec) == 1)
+            clock = sec;
+        else if (std::sscanf(board.clock.c_str(), "%d:%d", &m, &sec) == 2)
+            clock = m * 60 + sec;
+        if (quarter < 0 || clock < 0)
+            return -1;
+        g_quarterLength = std::max(g_quarterLength, clock);
+        const int length = std::max(g_quarterLength, 60);
+        return quarter * length + std::max(length - clock, 0);
+    }
+
+    // A panel without a player: the end of a period (grey), or a scoring drive (in the team's colour).
+    LowerThird Panel(const std::string& title, const std::string& headline, const std::string& stats, int side, bool big)
+    {
+        LowerThird third;
+        third.side = side;
+        third.name = title;
+        third.headline = headline;
+        third.stats = stats;
+        third.big = big;
+        return third;
+    }
+
+    // A challenge's ruling. Overturned: the play's lower-thirds go (the ruling at once) and, if the play was already
+    // counted, it is taken back.
+    void Ruling(const std::string& team, bool overturned, bool counted)
+    {
+        const hc09::broadcast::Scoreboard board = hc09::broadcast::Snapshot();
+        const int side = team == board.away.abbreviation ? 0 : team == board.home.abbreviation ? 1 : -1;
+        if (overturned)
+        {
+            if (counted && g_undo)
+            {
+                g_lines = g_undoLines;
+                g_drive = g_undoDrive;
+            }
+            g_waiting.clear();
+            g_third.at = Clock::now() - kShownFor;
+        }
+        g_undo = false;
+        Show(Panel("REPLAY REVIEW", overturned ? "THE RULING IS OVERTURNED" : "THE RULING STANDS", team.empty() ? "" : team + " CHALLENGE", side, false));
+    }
+
     void Finish(Play& play)
     {
         if (!play.open)
             return;
         play.open = false;
+        // Challenged before it was counted: counted only if the ruling stands.
+        if (play.challenge)
+        {
+            Play ruled = play;
+            ruled.challenge = 0;
+            ruled.open = true;
+            if (play.challenge == 1)
+                Finish(ruled);
+            Ruling(play.challenger, play.challenge == 2, false);
+            return;
+        }
+        // The end of a period: the score.
+        if (!play.period.empty())
+        {
+            std::string score = play.score;
+            if (score.empty())
+            {
+                const hc09::broadcast::Scoreboard board = hc09::broadcast::Snapshot();
+                score = board.away.abbreviation + " " + Trim(board.awayScore) + "   " + board.home.abbreviation + " " + Trim(board.homeScore);
+            }
+            Show(Panel(play.period, score, "", -1, false));
+            return;
+        }
+        // A two-point conversion: not a play of the players' games; when good, the scorer's.
+        if (play.conversion)
+        {
+            if (play.converted)
+            {
+                const std::string scorer = !play.receiver.empty() ? play.receiver : play.actor;
+                if (!scorer.empty())
+                {
+                    LowerThird third = Panel(Upper(scorer), "TWO-POINT CONVERSION", "", SideOf(scorer) >= 0 ? SideOf(scorer) : play.possession, true);
+                    Show(third);
+                }
+            }
+            return;
+        }
+        // Kept to take the play back if a challenge overturns it.
+        g_undoLines = g_lines;
+        g_undoDrive = g_drive;
+        g_undo = true;
+        // A fumble lost is written first ("FUMBLE", "recovered by <name> (<team>)", "returned for ..."), then the play;
+        // a return can be written as the recoverer's rush: not a play of the offense, and his team did not carry it.
+        const bool fumbleReturn = play.fumble && play.kind == kRush && !play.recoverer.empty() && Lower(play.actor) == Lower(play.recoverer);
+        if (fumbleReturn)
+        {
+            play.kind = kOther;
+            g_drive = Drive{};
+        }
+        // The drive: a new one when the other team has the ball (or after a kick).
+        const bool offense = play.kind == kRush || play.kind == kPass || play.kind == kSack || play.kind == kFieldGoal;
+        if (play.kind == kPunt || play.kind == kKickoff || play.picked || (offense && play.possession != g_drive.side))
+            g_drive = Drive{};
+        if (offense && play.possession >= 0)
+        {
+            if (g_drive.side < 0)
+            {
+                g_drive.side = play.possession;
+                g_drive.start = GameTime();
+            }
+            ++g_drive.plays;
+            if (play.kind != kFieldGoal && !(play.kind == kPass && !play.complete))
+                g_drive.yards += play.yards;
+        }
+        const bool scored = offense && !play.picked && !play.fumble && (play.touchdown || (play.kind == kFieldGoal && play.good));
         std::string name, headline, stats;
         int side = play.possession;   // the offense's, unless the player is known
         bool big = false, worth = false;
@@ -371,6 +694,89 @@ namespace
             big = play.good;
             worth = true;
         }
+        // Kicks: a long return (and every return for a score), a long punt, an onside kick the kicking team recovered.
+        const int kicking = SideOf(play.actor) >= 0 ? SideOf(play.actor) : play.possession;
+        if ((play.kind == kPunt || play.kind == kKickoff) && !play.actor.empty())
+        {
+            if (play.kind == kPunt && play.kickYards > 0)
+            {
+                Line& l = g_lines[play.actor];
+                ++l.punts;
+                l.puntYards += play.kickYards;
+                if (play.kickYards >= 55)
+                {
+                    name = play.actor;
+                    headline = std::to_string(play.kickYards) + "-YARD PUNT";
+                    stats = Punting(l);
+                    side = kicking;
+                    worth = true;
+                }
+            }
+            if (!play.returner.empty() && !play.onside)
+            {
+                Line& l = g_lines[play.returner];
+                ++l.returns;
+                l.returnYards += play.returnYards;
+                l.returnTds += play.touchdown;
+                const char* what = play.kind == kPunt ? "PUNT RETURN" : "KICKOFF RETURN";
+                const bool longOne = play.returnYards >= (play.kind == kPunt ? 15 : 35);
+                if (play.touchdown || longOne)
+                {
+                    name = play.returner;
+                    headline = std::to_string(play.returnYards) + "-YARD " + what + (play.touchdown ? " TOUCHDOWN" : "");
+                    stats = Returning(l);
+                    side = kicking < 0 ? -1 : 1 - kicking;
+                    big = play.touchdown;
+                    worth = true;
+                }
+            }
+            if (play.onside && !play.recoverer.empty() && kicking >= 0 && SideOf(play.recoverer) == kicking)
+            {
+                Line& l = g_lines[play.recoverer];
+                ++l.recoveries;
+                name = play.recoverer;
+                headline = "ONSIDE KICK RECOVERED";
+                stats = Defending(l);
+                side = kicking;
+                big = worth = true;
+            }
+        }
+        // A kick blocked.
+        if (play.blocked && !play.blocker.empty())
+        {
+            name = play.blocker;
+            headline = play.blocked == 1 ? "BLOCKED PUNT" : "BLOCKED FIELD GOAL";
+            stats = Defending(g_lines[play.blocker]);
+            side = SideOf(play.blocker) >= 0 ? SideOf(play.blocker) : play.possession < 0 ? -1 : 1 - play.possession;
+            big = worth = true;
+        }
+        // A fumble lost: recovered by the other team than the one carrying the ball (after a kick, the receiving team).
+        bool fumbleShown = false;
+        if (play.fumble && !play.recoverer.empty())
+        {
+            int recovering = SideOf(play.recoverer);
+            if (recovering < 0 && !play.recoverTeam.empty())
+            {
+                const hc09::broadcast::Scoreboard board = hc09::broadcast::Snapshot();
+                recovering = play.recoverTeam == board.away.abbreviation ? 0 : play.recoverTeam == board.home.abbreviation ? 1 : -1;
+            }
+            // The team carrying the ball: the receiving team's after a kick; the passer's or runner's (the score bug
+            // may already show the other team with the ball); the other team's when the return is written as a rush.
+            const int carrying = play.kind == kPunt || play.kind == kKickoff ? (kicking < 0 ? -1 : 1 - kicking)
+                                 : fumbleReturn                           ? (recovering < 0 ? -1 : 1 - recovering)
+                                 : SideOf(play.actor) >= 0                ? SideOf(play.actor)
+                                                                          : play.possession;
+            if (carrying >= 0 && recovering >= 0 && recovering != carrying)
+            {
+                Line& l = g_lines[play.recoverer];
+                ++l.recoveries;
+                name = play.recoverer;
+                headline = play.touchdown ? "FUMBLE RETURNED FOR A TOUCHDOWN" : "FUMBLE RECOVERY";
+                stats = Defending(l);
+                side = recovering;
+                big = worth = fumbleShown = true;
+            }
+        }
         // A tackle (the sack's is counted above); behind the line, the tackler takes an ordinary play's lower-third.
         if (!play.tackler.empty() && play.kind != kSack)
         {
@@ -384,20 +790,40 @@ namespace
                 side = play.possession < 0 ? -1 : 1 - play.possession;
             }
         }
-        if (play.fumble)
-            big = false, worth = false;   // who has the ball now is not told the same way: no lower-third
+        if (play.fumble && !fumbleShown)
+            big = false, worth = false;   // a fumble the same team kept: no lower-third
         if (Logging())
             std::fprintf(stderr, "[playlog] play: kind %d, %s, %d yards%s%s -> %s | %s | %s%s\n", int(play.kind), play.actor.c_str(), play.yards,
                          play.touchdown ? ", touchdown" : "", play.picked ? ", intercepted" : "", name.c_str(), headline.c_str(), stats.c_str(),
                          worth ? " (shown)" : "");
-        if (name.empty() || play.fumble)
+        // A scoring drive of three plays or more: after the play's own lower-third.
+        auto driveSummary = [&] {
+            if (!scored || g_drive.plays < 3 || g_drive.side < 0)
+                return;
+            std::string time;
+            const int now = GameTime();
+            if (g_drive.start >= 0 && now > g_drive.start)
+            {
+                char t[16];
+                std::snprintf(t, sizeof(t), "%d:%02d", (now - g_drive.start) / 60, (now - g_drive.start) % 60);
+                time = t;
+            }
+            const std::string headline = Plural(g_drive.plays, "PLAY", "PLAYS") + ", " + Plural(g_drive.yards, "YARD", "YARDS");
+            Show(Panel("SCORING DRIVE", headline, time.empty() ? "" : time + " TIME OF POSSESSION", g_drive.side, false));
+            g_drive = Drive{};
+        };
+        if (name.empty() || (play.fumble && !fumbleShown))
+        {
+            driveSummary();
             return;
+        }
         if (!worth && ++g_sinceThird < 3)
+        {
+            driveSummary();
             return;
+        }
         g_sinceThird = 0;
         LowerThird third;
-        third.id = g_third.id + 1;
-        third.at = Clock::now();
         third.side = side;
         third.name = Upper(name);
         third.headline = headline;
@@ -413,7 +839,8 @@ namespace
             if (p.number >= 0)
                 third.tag += (third.tag.empty() ? "#" : "  #") + std::to_string(p.number);
         }
-        g_third = third;
+        Show(std::move(third));
+        driveSummary();
     }
 
     // The two teams' players (name, number, position), from the game's database, when the teams change.
@@ -476,6 +903,8 @@ namespace
         std::lock_guard<std::mutex> lock(g_mutex);
         g_players = std::move(players);
         g_lines.clear();
+        g_drive = Drive{};
+        g_quarterLength = 0;
         g_sinceThird = 0;
     }
 
@@ -489,12 +918,97 @@ namespace
     }
 }
 
+namespace
+{
+    // HC09_PLAYLOG_TEST=<file> (dev): plays read from a file through the same reading, each play's lower-third logged,
+    // once. Plays are separated by blank lines; "#possession <0|1>" sets the side with the ball for the plays after it,
+    // "#player <0|1> <name>" puts a player on a team.
+    void SelfTest()
+    {
+        static bool done = false;
+        const char* path = Hc09Env("HC09_PLAYLOG_TEST");
+        // In a game, with the score bar up (the last panel stays on the screen).
+        if (done || !path || !hc09::broadcast::Snapshot().shown)
+            return;
+        done = true;
+        FILE* f = std::fopen(path, "rb");
+        if (!f)
+            return;
+        std::lock_guard<std::mutex> lock(g_mutex);
+        int possession = 0;
+        Play play;
+        char text[256];
+        auto end = [&] {
+            if (!play.open)
+                return;
+            const uint64_t before = g_third.id;
+            g_sinceThird = 0;
+            g_third.at = Clock::now() - kShownFor;   // each play's own, not queued
+            Finish(play);
+            std::fprintf(stderr, "[playtest] %s\n", g_third.id != before ? (g_third.name + " | " + g_third.headline + " | " + g_third.stats +
+                                                                           " | side " + std::to_string(g_third.side) + (g_third.big ? " | big" : "")).c_str()
+                                                                     : "(none)");
+            for (const LowerThird& w : g_waiting)
+                std::fprintf(stderr, "[playtest]   then %s | %s | %s | side %d\n", w.name.c_str(), w.headline.c_str(), w.stats.c_str(), w.side);
+            g_waiting.clear();
+            play = Play{};
+        };
+        while (std::fgets(text, sizeof(text), f))
+        {
+            std::string line = Trim(std::string(text).substr(0, std::strcspn(text, "\r\n")));
+            if (line.empty())
+            {
+                end();
+                continue;
+            }
+            if (Starts(line, "#possession "))
+            {
+                possession = std::atoi(line.c_str() + 12);
+                continue;
+            }
+            if (Starts(line, "#late "))
+            {
+                // A line for the play before, after it was counted (a challenge's ruling).
+                end();
+                Play late;
+                Read(late, line.substr(6));
+                if (late.challenge)
+                {
+                    g_third.at = Clock::now() - kShownFor;
+                    Ruling(late.challenger, late.challenge == 2, true);
+                }
+                std::fprintf(stderr, "[playtest] late: %s | %s | %s\n", g_third.name.c_str(), g_third.headline.c_str(), g_third.stats.c_str());
+                g_waiting.clear();
+                continue;
+            }
+            if (Starts(line, "#player "))
+            {
+                g_players[Lower(line.substr(10))] = Player{ std::atoi(line.c_str() + 8), 1, 0, 0 };
+                continue;
+            }
+            if (!play.open)
+            {
+                play = Play{};
+                play.possession = possession;
+                play.open = true;
+            }
+            Read(play, line);
+        }
+        end();
+        std::fclose(f);
+        g_lines.clear();
+        g_third.at = Clock::now();
+        g_waiting.clear();
+    }
+}
+
 namespace hc09::broadcast
 {
     LowerThird LatestLowerThird()
     {
         if (!LowerThirds())
             return {};
+        SelfTest();
         std::lock_guard<std::mutex> lock(g_mutex);
         // A play is over half a second after a line that ends one, or four seconds after any.
         if (g_play.open)
@@ -503,6 +1017,7 @@ namespace hc09::broadcast
             if (quiet > std::chrono::seconds(4) || (g_play.ended && quiet > std::chrono::milliseconds(500)))
                 Finish(g_play);
         }
+        NextShown();
         return g_third;
     }
 }
@@ -536,6 +1051,16 @@ PPC_FUNC(sub_826D4118)
         Finish(g_play);
         g_play = Play{};
         g_play.possession = possession;
+    }
+    else if (!g_play.open)
+    {
+        // A line for a play already counted: a challenge's ruling ("Play challenged by GB and OVERTURNED."); any other
+        // is not counted again.
+        Play late;
+        Read(late, line);
+        if (late.challenge)
+            Ruling(late.challenger, late.challenge == 2, true);
+        return;
     }
     g_play.open = true;
     g_play.last = Clock::now();

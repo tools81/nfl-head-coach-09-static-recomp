@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "../dev_env.h"
+#include "common/broadcast_state.h"
 #include "common/field_surface.h"
 #include "common/weather.h"
 #include "gpu/texture_replacements.h"
@@ -55,6 +56,29 @@ bool Insert(std::string& glsl, const std::string& code)
     return true;
 }
 
+// The UI in the 2026 style (kUiPs). The game's UI tints its grey art with a few blues: (5, 16, 41) its darkest panels,
+// (21, 57, 148) and (22, 62, 160) its bars and buttons, (42, 114, 254) the highlight and headers, (84, 227, 254) a
+// light cyan highlight. In a game (D.pad2: 0xA5 in the top byte, the accent colour below) those become near-black,
+// charcoal and the accent (the cyan a lighter accent), brightness for brightness; whites, greys and black are kept.
+const char* kUiStyle = R"GLSL(
+vec4 hcUiTint(vec4 t)
+{
+    uint info = floatBitsToUint(D.pad2);
+    if ((info >> 24) != 0xA5u) return t;
+    vec3 c = t.rgb;
+    // Its black (the panels' bodies): a little of the picture shows through.
+    if (max(c.r, max(c.g, c.b)) < 0.02) return vec4(c, t.a * 0.85);
+    if (!(c.b > 0.12 && c.r < 0.45 * c.b && c.g < 0.95 * c.b)) return t;   // not one of its blues
+    vec3 accent = vec3(float((info >> 16) & 255u), float((info >> 8) & 255u), float(info & 255u)) / 255.0;
+    // The darkest blue near-black; the bars, the row chosen and the highlights the team's colour (the darker blue
+    // a little deeper), the cyan a lighter one.
+    vec3 dark = vec3(0.030, 0.032, 0.038);
+    vec3 lit = accent * mix(0.8, 1.0, smoothstep(0.55, 0.95, c.b));
+    lit = mix(lit, mix(accent, vec3(1.0), 0.45), smoothstep(0.6, 0.85, c.g / c.b));
+    return vec4(mix(dark, lit, smoothstep(0.2, 0.4, c.b)), t.a);
+}
+)GLSL";
+
 // Value noise and its sums, shared by the materials.
 const char* kNoise = R"GLSL(
 float hcHash(vec2 p) { p = fract(p * vec2(443.897, 441.423)); p += dot(p, p.yx + 19.19); return fract((p.x + p.y) * p.x); }
@@ -85,6 +109,31 @@ float hcFootprint(vec3 p)
 bool hcSnowing() { return hcWeatherCode() >= 128.0; }
 float hcWetness() { return hcSnowing() ? 0.0 : hcWeatherCode() / 100.0; }
 float hcSnowCover() { return hcSnowing() ? (hcWeatherCode() - 128.0) / 100.0 : 0.0; }
+)GLSL";
+
+// The lines a broadcast keys onto the field from a snap's line-up to the end of the play (FieldLineValues, in
+// D.texSize[29]): a blue line of scrimmage and a yellow line to gain, under a quarter of a yard wide, in muted
+// colours, sideline to sideline. Painted into the turf, so the players stand on them; the turf's light and shade
+// carry through.
+const char* kFieldLines = R"GLSL(
+float hcLineCover(float d, float fw)
+{
+    float halfW = 0.11, drawn = max(halfW, 0.6 * fw);   // at least a pixel wide far off, fainter for it
+    return clamp((drawn - d) / max(fw, 1e-4) + 0.5, 0.0, 1.0) * (halfW / drawn);
+}
+vec3 hcFieldLines(vec3 c, vec3 p)
+{
+    vec4 lines = D.texSize[29];
+    if (lines.z < 0.5) return c;
+    float fw = max(abs(dFdx(p.z)), abs(dFdy(p.z)));
+    float fx = max(abs(dFdx(p.x)), abs(dFdy(p.x)));
+    float field = clamp((26.6 - abs(p.x)) / max(fx, 1e-4) + 0.5, 0.0, 1.0);
+    float shade = clamp(0.45 + 1.3 * dot(c, vec3(0.299, 0.587, 0.114)), 0.5, 0.95);
+    c = mix(c, vec3(0.30, 0.47, 0.78) * shade, 0.85 * field * hcLineCover(abs(p.z - lines.x), fw));
+    if (abs(lines.y) < 100.0)
+        c = mix(c, vec3(0.90, 0.80, 0.38) * shade, 0.85 * field * hcLineCover(abs(p.z - lines.y), fw));
+    return c;
+}
 )GLSL";
 
 // The turf: `c` the game's colour, `p` the world position, `eye` the camera's.
@@ -455,6 +504,20 @@ bool MaterialPatch(uint64_t hash, std::string& glsl)
             return Insert(glsl, std::string("    oc0.rgb = vec3(") + kColours[i % 8] + ");\n");
 
     bool patched = false;
+    if (hash == kUiPs)
+    {
+        // The 2026 style in games (UiStyleValue): the UI's blue tints become near-black panels, charcoal bars and
+        // the team's colour, right after the tint is read into r[1] (the shader then multiplies its art by it).
+        static const char* kAfter = "oc0 = vec4(0.0, 0.0, 0.0, 1.0); oc1 = vec4(0.0); oc2 = vec4(0.0); oc3 = vec4(0.0);\n";
+        const size_t at = glsl.find(kAfter);
+        const size_t main = glsl.find("void main()");
+        if (at != std::string::npos && main != std::string::npos && at > main)
+        {
+            glsl.insert(at + strlen(kAfter), "    r[1] = hcUiTint(r[1]);\n");
+            glsl.insert(main, kUiStyle);
+            patched = true;
+        }
+    }
     if (hash == kTurfPs || hash == kTurfNightPs)
     {
         // The day's field gets the turf (HC09_TURF) and the weather; the night's, the weather alone.
@@ -463,7 +526,8 @@ bool MaterialPatch(uint64_t hash, std::string& glsl)
         const size_t mainAt = glsl.find("void main()");
         if (mainAt != std::string::npos && glsl.rfind(kEpilogue) != std::string::npos)
         {
-            glsl.insert(mainAt, std::string("// hc09: the turf (vk_materials.cpp).") + kNoise + kTurfValue + (turfToo ? kTurf : "") + kWet + kSnow + "\n");
+            glsl.insert(mainAt, std::string("// hc09: the turf (vk_materials.cpp).") + kNoise + kTurfValue + (turfToo ? kTurf : "") + kWet + kSnow +
+                                    kFieldLines + "\n");
             char call[200];
             if (turfToo)
                 snprintf(call, sizeof(call),
@@ -471,7 +535,7 @@ bool MaterialPatch(uint64_t hash, std::string& glsl)
                          strength);
             else
                 snprintf(call, sizeof(call), "    oc0.rgb = hcSnow(hcWet(oc0.rgb, vin[2].xyz, vin[3].xyz), vin[2].xyz, vin[3].xyz);\n");
-            patched = Insert(glsl, call);
+            patched = Insert(glsl, call) && Insert(glsl, "    oc0.rgb = hcFieldLines(oc0.rgb, vin[2].xyz);\n");
         }
     }
     else
@@ -520,6 +584,69 @@ float TurfValue(float wear)
     return code + (hc09::g_nightGame ? 512.0f : 0.0f) + std::clamp(wear, 0.0f, 0.999f);
 }
 }  // namespace
+
+bool UiStyleValue(float& value)
+{
+    // MenuStyle (HC09_MENU_STYLE): on by default; off keeps the game's colours.
+    static const bool on = [] { const char* e = Hc09Env("HC09_MENU_STYLE"); return !(e && (!strcmp(e, "0") || !_stricmp(e, "off"))); }();
+    if (!on) return false;
+    // The scoreboard, looked at ten times a second (the UI draws are many).
+    static std::chrono::steady_clock::time_point last;
+    static uint32_t info = 0;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last > std::chrono::milliseconds(100))
+    {
+        last = now;
+        const hc09::broadcast::Scoreboard board = hc09::broadcast::Snapshot();
+        info = 0;
+        if (board.inGame && (board.away.rgb || board.home.rgb))
+        {
+            uint32_t rgb = board.user == 0 ? board.away.rgb : board.user == 1 ? board.home.rgb : board.home.rgb ? board.home.rgb : board.away.rgb;
+            // HC09_MENU_ACCENT=<RRGGBB> (dev): that accent instead of the team's.
+            if (const char* e = Hc09Env("HC09_MENU_ACCENT")) rgb = uint32_t(strtoul(e, nullptr, 16)) & 0xFFFFFFu;
+            // A dark team colour (navy, black) lifted until its brightest channel is at least 60%: it is drawn on near-black.
+            float c[3] = { float((rgb >> 16) & 255) / 255.0f, float((rgb >> 8) & 255) / 255.0f, float(rgb & 255) / 255.0f };
+            const float top = std::max({ c[0], c[1], c[2] });
+            for (float& v : c)
+                v = top < 0.02f ? 0.6f : top < 0.6f ? v * 0.6f / top : v;
+            // A light one (gold, yellow) darkened until white text on it reads: luminance at most 0.5.
+            const float luminance = 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
+            if (luminance > 0.5f)
+                for (float& v : c)
+                    v *= 0.5f / luminance;
+            info = 0xA5000000u | (uint32_t(c[0] * 255.0f + 0.5f) << 16) | (uint32_t(c[1] * 255.0f + 0.5f) << 8) | uint32_t(c[2] * 255.0f + 0.5f);
+        }
+    }
+    if (!info) return false;
+    memcpy(&value, &info, sizeof(value));
+    return true;
+}
+
+bool FieldLinesOn()
+{
+    static const bool on = [] { const char* e = Hc09Env("HC09_FIELD_LINES"); return !(e && (!strcmp(e, "0") || !_stricmp(e, "off"))); }();
+    return on;
+}
+
+void FieldLineValues(float (&out)[4])
+{
+    out[0] = out[1] = out[2] = out[3] = 0.0f;
+    // From the line-up for the snap to the end of the play, whatever the camera. The lines are taken while the teams
+    // are lined up (the game's line of scrimmage moves with the ball during the play) and kept through the play.
+    // HC09_FIELD_LINES_TEST=1 (dev): after the play as well.
+    static const bool always = Hc09Env("HC09_FIELD_LINES_TEST") != nullptr;
+    static float kept[2] = { 0.0f, 0.0f };
+    static bool held = false;
+    if (!FieldLinesOn()) return;
+    const int state = hc09::broadcast::PlayState();
+    float scrimmage, gain;
+    if (state == 1 && hc09::broadcast::FieldLines(scrimmage, gain))
+        kept[0] = scrimmage, kept[1] = gain, held = true;
+    else if (state != 3 && !(always && state != 0))
+        held = false;   // the play is over (or no game): the next line-up takes them afresh
+    if (held)
+        out[0] = kept[0], out[1] = kept[1], out[2] = 1.0f;
+}
 
 bool MaterialDrawValue(uint64_t psHash, const uint32_t (*fetch)[6], uint32_t slots, float& value)
 {

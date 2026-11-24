@@ -26,6 +26,7 @@
 #include "kernel/threads.h"
 #include "kernel/variables.h"
 #include "vk/vk_select.h"
+#include "common/menu_fonts.h"
 #include "kernel/vfs.h"
 #include "kernel/xex.h"
 
@@ -241,6 +242,7 @@ int main(int argc, char** argv)
     }
     if (std::string error; !hc09::edition::Apply(error))
         return StartupFailure(error.c_str());
+    hc09::menu_fonts::Apply();
     PopulateFunctionTable();
     hc09::PatchImportSlots();
     AddVectoredExceptionHandler(1, ReportGuestFault);

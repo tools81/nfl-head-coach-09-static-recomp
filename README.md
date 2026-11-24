@@ -312,6 +312,22 @@ Scale=2
   `endzone`, `sideline` or `aerial` start a game on that one instead of the main camera. The game's other
   cameras (Cinematic, Overhead, Defense, Press Box, On Field) are unchanged, and the right stick only changes
   the camera while Broadcast is the one selected. `off` keeps the game's own Broadcast camera.
+
+  Instant replays (the clipboard's Gameday page after a play) are shown from replay angles: low behind the
+  offense looking down the field, the reverse angle from the other sideline, or the skycam above and behind
+  the play. Each replay starts on the next one, and the right stick goes to the next during a replay.
+- `MenuFonts`: `on` by default. The menus' text, in the game's front end and on its in-game clipboard, is set
+  in the Barlow family (SIL Open Font License, `fonts/OFL.txt`) instead of the game's Helvetica Neue: each of
+  the game's six menu fonts is replaced by the Barlow style of the same weight and width (`fonts/menus`, made
+  by `tools/menu_fonts.py`). `off` keeps the game's fonts.
+- `MenuStyle`: `on` by default (Vulkan renderer). During games, the clipboard, the play-call screens and the game's
+  other in-game menus lose their blue: panels near-black and slightly see-through, the row chosen and the
+  highlights in your team's colour (lightened if it is very dark, darkened if it is very light, so white text
+  reads on it). The front-end menus keep the game's look. `off` keeps the game's colours.
+- `FieldLines`: `on` by default (Vulkan renderer). From the line-up for a snap to the end of the play, a blue line of
+  scrimmage and a yellow line to gain are painted into the turf, sideline to sideline, as TV broadcasts show
+  them, with the players standing on them. There is no yellow line when it is goal to go. They replace the
+  game's orange line to gain. `off` keeps the game's line.
 - `AspectRatio`: for ultrawide screens, `21:9`, `32:9`, any `<width>:<height>`, or `auto` for your
   screen's shape; `16:9` (the game's own) by default. The 3D scenes fill the wider screen and show more at
   the sides, while the menus and on-field graphics keep their shape in the middle. Things just past
@@ -530,7 +546,7 @@ falls short (`HC09_NO_PLACEHOLDERS=1` forces that path).
 | `src/gpu/` | Command processor and the D3D12 renderer |
 | `src/vk/` | The Vulkan renderer and frame pacing (MIT, `src/vk/LICENSE`) and their adapter (`vk_adapter.cpp`) |
 | `src/common/` | Shared by the game and setup: `hc09.ini` settings, GitHub release check |
-| `fonts/` | The score bar's typeface, Barlow Condensed SemiBold (SIL Open Font License 1.1, `fonts/OFL.txt`) |
+| `fonts/` | The score bar's typeface, Barlow Condensed SemiBold, and the menus' (`fonts/menus`, subsets of the Barlow family made by `tools/menu_fonts.py`), SIL Open Font License 1.1, `fonts/OFL.txt` |
 | `thirdparty/stb/` | `stb_truetype.h` (public domain or MIT), which draws the score bar's letters |
 | `tools/installer/` | `HC09Setup.exe`: install/update wizard (disc import, build pipeline) |
 | `tools/` | Extraction, decryption and analysis scripts |

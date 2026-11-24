@@ -152,8 +152,13 @@ namespace hc09
             XINPUT_GAMEPAD pad{};
             buttons = 0;
             const int frame = gpu::FrameNumber();
+            // Dev (HC09_REPLAY_TEST): the clipboard's Instant Replay opened after a play, the script waiting meanwhile.
+            bool hold = false;
+            const int step = hc09::broadcast::ReplayTestStep(hold);
+            if (step)
+                buttons |= step == 1 ? XINPUT_GAMEPAD_RIGHT_SHOULDER : step == 2 ? XINPUT_GAMEPAD_DPAD_DOWN : step == 3 ? XINPUT_GAMEPAD_A : XINPUT_GAMEPAD_RIGHT_THUMB;
             for (const ScriptedPress& press : Pad().script)
-                if (frame >= press.frame && frame < press.frame + kPressFrames)
+                if (!hold && frame >= press.frame && frame < press.frame + kPressFrames)
                     buttons |= press.mask;
             if (GameWindowFocused())
             {

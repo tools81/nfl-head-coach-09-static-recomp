@@ -21,6 +21,12 @@
 // Field goals and extra points: the game has a camera of its own for them, at (-35, 20, 0), which looks at the ball
 // and follows it. It becomes the end zone camera behind the goal posts kicked at: the kick comes toward the camera,
 // between the uprights in the foreground.
+//
+// Instant replays (the clipboard's Gameday page): the game plays the play again through the cameras it was shown
+// with. While the replay's screen is up (common/broadcast_state.cpp), every camera looking at the field is moved to a
+// replay angle on the point it looks at: low behind the offense, the reverse angle from the other sideline, or the
+// skycam. Each replay starts on the next one; the right stick goes to the next. (Dev: HC09_REPLAY_TEST opens a
+// replay after a play, clicks through the angles and takes screenshots.)
 
 #include <algorithm>
 #include <atomic>
@@ -192,12 +198,32 @@ namespace
     }
 }
 
+namespace
+{
+    // The clipboard's Instant Replay plays the play again through the cameras it was shown with (the game's for kicks,
+    // the Broadcast camera): while it is up, whichever camera looks at the field is moved to a replay angle. Each
+    // replay is shown from the next of these; a click of the right stick goes to the next one.
+    constexpr int kReplayAngles = 3;
+    constexpr const char* kReplayNames[kReplayAngles] = { "END ZONE REPLAY", "REVERSE ANGLE", "SKYCAM" };
+    std::atomic<int> g_replayAngle{ -1 };
+    std::atomic<int64_t> g_replaySeen{ 0 }, g_replayChanged{ 0 };
+}
+
 namespace hc09::broadcast
 {
     bool CycleTvCamera()
     {
+        if (Setting() < 0)
+            return false;
+        // A replay (the Broadcast camera is updated through it too, but not shown).
+        if (Now() - g_replaySeen.load() < 500)
+        {
+            g_replayAngle = (std::max(g_replayAngle.load(), 0) + 1) % kReplayAngles;
+            g_replayChanged = Now();
+            return true;
+        }
         // Only while the Broadcast camera is the one the game shows (a moment ago).
-        if (Setting() < 0 || Now() - g_seen.load() > 500)
+        if (Now() - g_seen.load() > 500)
             return false;
         g_angle = (Angle() + 1) % kAngles;
         g_changed = Now();
@@ -207,6 +233,8 @@ namespace hc09::broadcast
     const char* TvCameraNote()
     {
         const int64_t now = Now();
+        if (now - g_replaySeen.load() < 500)
+            return now - g_replayChanged.load() < 2500 && g_replayAngle.load() >= 0 ? kReplayNames[g_replayAngle.load()] : nullptr;
         return now - g_changed.load() < 2500 && now - g_seen.load() < 500 ? kNames[Angle()] : nullptr;
     }
 }
@@ -225,7 +253,44 @@ PPC_FUNC(sub_82986348)
         const float side = ex < 0 ? -1.0f : 1.0f;
         float nx = ex, ny = ey, nz = ez, wider = 1.0f, fixed = 0.0f, widest = 60.0f, cover = 0.0f;
         bool moved = false;
-        if (kicks)
+        // The instant replay: a camera looking at the field (inside the sidelines: not the coach's on the sideline,
+        // nor a camera at rest at the origin).
+        const bool replay = hc09::broadcast::ReplayShown() && std::abs(tx) < 27.0f && std::abs(tz) < 65.0f && ty > -1.0f && ty < 6.0f &&
+                            !(tx == 0.0f && ty == 0.0f && tz == 0.0f) && fov > 1.0f && fov < 120.0f;
+        static std::atomic<float> mainSide{ -1.0f };   // the side of the field the main camera is on
+        if (broadcast)
+            mainSide = side;
+        if (replay)
+        {
+            const int64_t now = Now();
+            if (now - g_replaySeen.load() > 1500)   // a new replay: the next angle
+            {
+                g_replayAngle = (g_replayAngle.load() + 1) % kReplayAngles;
+                g_replayChanged = now;
+            }
+            g_replaySeen = now;
+            const float behind = Behind(1e9f);   // the offense's back, as before the play (not looked at again)
+            switch (std::max(g_replayAngle.load(), 0))
+            {
+            case 0:
+                // Low behind the offense: the play coming at the camera's back, down the field.
+                nx = tx * 0.5f, ny = ty + 7.0f, nz = std::clamp(tz + behind * 32.0f, -70.0f, 70.0f);
+                cover = 20.0f;
+                break;
+            case 1:
+                // The reverse angle: from the other sideline than the main camera's.
+                nx = -mainSide.load() * 42.0f, ny = ty + 9.0f, nz = tz;
+                cover = 16.0f;
+                break;
+            default:
+                // The skycam: above the play and a little behind it.
+                nx = tx * 0.8f, ny = ty + 12.0f, nz = std::clamp(tz + behind * 18.0f, -66.0f, 66.0f);
+                cover = 24.0f;
+                break;
+            }
+            moved = true;
+        }
+        else if (kicks)
         {
             // The game's camera for kicks.
             static float restX = 0, restY = 0, restZ = 0;

@@ -149,7 +149,7 @@ namespace hc09::vk
             { L"HDRPaperWhite", "HC09_HDR_PAPER_WHITE" }, { L"Crowd", "HC09_CROWD" }, { L"Turf", "HC09_TURF" },
             { L"Players", "HC09_PLAYERS" }, { L"SharpText", "HC09_SHARP_TEXT" }, { L"ScoreBar", "HC09_SCORE_BAR" },
             { L"TemporalUpscaling", "HC09_TEMPORAL_UPSCALING" }, { L"RayTracing", "HC09_RAY_TRACING" },
-            { L"LowerThirds", "HC09_LOWER_THIRDS" }, { L"TVCamera", "HC09_TV_CAMERA" },
+            { L"LowerThirds", "HC09_LOWER_THIRDS" }, { L"TVCamera", "HC09_TV_CAMERA" }, { L"MenuFonts", "HC09_MENU_FONTS" }, { L"MenuStyle", "HC09_MENU_STYLE" }, { L"FieldLines", "HC09_FIELD_LINES" },
         };
         const std::wstring file = (std::filesystem::current_path() / L"hc09.ini").wstring();
         for (const auto& [key, variable] : kSettings)

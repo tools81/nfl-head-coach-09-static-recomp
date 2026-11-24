@@ -20,6 +20,7 @@
 #include "common/broadcast_state.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -37,6 +38,10 @@
 #include "common/guest_db.h"
 #include "vk/dev_env.h"
 #include "vk/vk_select.h"
+
+namespace hc09::gpu { void RequestScreenshot(int tag); void RequestTrace(); }   // vk/gpu_live.cpp (dev)
+namespace hc09 { extern uint8_t* g_base; }
+extern "C" PPC_FUNC(__imp__sub_826C4F58);  // the user's team (its TGID)
 
 namespace hc09::broadcast
 {
@@ -201,12 +206,17 @@ namespace hc09::broadcast
                         teams[i].abbreviation.push_back(s[k]);
                 }
             }
+            // The user's team (in Coach Now, the copy of the team the user chose).
+            const uint32_t user = db.Call(__imp__sub_826C4F58, std::initializer_list<uint32_t>{});
+            const int userSide = user == ids[0] || (user >= 1 && user <= 32 && user == teams[0].id) ? 0
+                                 : user == ids[1] || (user >= 1 && user <= 32 && user == teams[1].id) ? 1 : -1;
             std::lock_guard<std::mutex> lock(g_mutex);
             g_board.away = teams[0];
             g_board.home = teams[1];
+            g_board.user = userSide;
             if (Hc09Env("HC09_SCORE_BAR_LOG"))
-                std::fprintf(stderr, "[scorebar] teams %u %s #%06X at %u %s #%06X\n", ids[0], teams[0].abbreviation.c_str(), teams[0].rgb,
-                             ids[1], teams[1].abbreviation.c_str(), teams[1].rgb);
+                std::fprintf(stderr, "[scorebar] teams %u %s #%06X at %u %s #%06X, the user's %u (side %d)\n", ids[0],
+                             teams[0].abbreviation.c_str(), teams[0].rgb, ids[1], teams[1].abbreviation.c_str(), teams[1].rgb, user, userSide);
             return true;
         }
 
@@ -261,7 +271,132 @@ namespace hc09::broadcast
         // Exactly while the game shows its box (at rest at the clipboard's top, in a game): see UpdateBillboards.
         board.box = inGame ? g_box : 0.0f;
         board.coaching = g_prepVisible && g_prepY < kPrepShownBelow;
+        board.inGame = inGame;
         return board;
+    }
+
+    std::atomic<bool> g_replayScreen{ false };   // the screen manager's latest event is the instant replay's
+    std::atomic<bool> g_replayShown{ false };    // the instant replay is on the screen
+
+    bool ReplayShown() { return g_replayShown.load(); }
+
+    bool FieldLines(float& scrimmage, float& gain)
+    {
+        constexpr uint32_t kLine = 0x830A8A74;   // the line of scrimmage's z (common/extra_point.cpp)
+        if (!hc09::g_base)
+            return false;
+        const Scoreboard board = Snapshot();
+        if (!board.inGame)
+            return false;
+        const uint32_t bits = __builtin_bswap32(*reinterpret_cast<const uint32_t*>(hc09::g_base + kLine));
+        float z;
+        std::memcpy(&z, &bits, sizeof(z));
+        if (!std::isfinite(z) || std::abs(z) > 50.0f)
+            return false;
+        scrimmage = z;
+        gain = 1e9f;
+        // "3rd & 2 on CHI 28": the yards to go, and the spot, whose team's half tells which way the offense goes.
+        const std::string& down = board.down;
+        const size_t on = down.find(" on "), amp = down.find('&');
+        if (on == std::string::npos || amp == std::string::npos || amp > on)
+            return false;  // a kickoff, a try: no lines
+        const std::string toGo = down.substr(amp + 1, on - amp - 1);
+        float yards = 0.0f;
+        if (toGo.find_first_of("0123456789") != std::string::npos)
+            yards = float(std::atof(toGo.c_str()));
+        else if (toGo.find("In") != std::string::npos || toGo.find("IN") != std::string::npos)
+            yards = 0.3f;   // inches
+        else
+            return true;    // goal to go: the goal line is the line
+        static float ahead = 1.0f;   // the sign of z the offense goes towards (kept from the play before at midfield)
+        const std::string spot = down.substr(on + 4);
+        const size_t space = spot.find(' ');
+        // The score bug's spot and the line must agree (one can be a play behind the other as they change): no
+        // lines until they do.
+        const int yard = std::atoi(spot.c_str() + (space == std::string::npos ? 0 : space + 1));
+        if (yard < 1 || yard > 50 || std::abs(float(50 - yard) - std::abs(z)) >= 1.5f)
+            return false;
+        if (space != std::string::npos && board.possession >= 0 && std::abs(z) > 0.5f)
+        {
+            const std::string team = spot.substr(0, space);
+            const int side = !_stricmp(team.c_str(), board.home.abbreviation.c_str()) ? 1
+                           : !_stricmp(team.c_str(), board.away.abbreviation.c_str()) ? 0 : -1;
+            if (side < 0)
+                return false;
+            const float half = z < 0 ? -1.0f : 1.0f;
+            ahead = side == board.possession ? -half : half;   // out of its own half, into the other's
+        }
+        float line = z + ahead * yards;
+        // The yards to go are rounded: the line a first down set (10 yards on, exactly) holds through its series.
+        static float series = 1e9f;
+        if (down.compare(0, 3, "1st") == 0 || down.compare(0, 3, "1ST") == 0 || std::abs(line - series) >= 1.0f)
+            series = line;
+        else
+            line = series;
+        if (std::abs(line) < 50.0f)
+            gain = line;
+        // HC09_FIELD_LINES_LOG=1 (dev): the lines when they change.
+        static const bool log = Hc09Env("HC09_FIELD_LINES_LOG") != nullptr;
+        static float lastZ = 1e9f, lastGain = 1e9f;
+        if (log && (z != lastZ || gain != lastGain))
+        {
+            lastZ = z, lastGain = gain;
+            std::fprintf(stderr, "[field-lines] scrimmage %.3f gain %.3f (%s, possession %d)\n", z, gain, down.c_str(), board.possession);
+        }
+        return true;
+    }
+
+    std::atomic<int64_t> g_replayTestAt{ 0 };   // dev: when the Gameday page was filled and the replay is opened (ms)
+    std::atomic<int> g_replayTestSlot{ 1 };      // dev: the Gameday list's item that is Instant Replay (1, 2)
+
+    int ReplayTestStep(bool& hold)
+    {
+        hold = false;
+        const int64_t at = g_replayTestAt.load();
+        if (at <= 0)
+            return 0;
+        const int64_t t = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count() - at;
+        if (t > 40000)   // the replay has had its time: the script goes on
+            return 0;
+        hold = true;
+        // RB to the Gameday page (its list's first item chosen), down to Instant Replay, A; a second apart from two
+        // seconds in. Then a click of the right stick five and ten seconds into the replay (its next angles).
+        // Screenshots (build/screenshot_<9000 + k>): before each press, and every 2.5 s of the replay.
+        static int64_t lastAt = 0;
+        static std::vector<std::pair<int64_t, int>> steps;   // when, button (1 RB, 2 down, 3 A, 4 the right stick)
+        static std::vector<int64_t> shots;
+        static size_t shot = 0;
+        if (lastAt != at)
+        {
+            lastAt = at;
+            steps.clear();
+            shots.clear();
+            shot = 0;
+            int64_t when = 2000;
+            steps.push_back({ when, 1 });
+            for (int k = 1; k < g_replayTestSlot.load(); ++k)
+                steps.push_back({ when += 1000, 2 });
+            steps.push_back({ when += 1000, 3 });
+            const int64_t opened = when;
+            steps.push_back({ opened + 5000, 4 });
+            steps.push_back({ opened + 10000, 4 });
+            for (const auto& step : steps)
+                if (step.first < opened)
+                    shots.push_back(step.first - 300);
+            for (int64_t k = 1; k <= 6; ++k)
+                shots.push_back(opened + 2500 * k - 1000);
+        }
+        if (shot < shots.size() && t >= shots[shot])
+        {
+            hc09::gpu::RequestScreenshot(9000 + int(shot));
+            if (shot == 1 && Hc09Env("HC09_REPLAY_TEST_TRACE"))   // the Gameday page: its draws
+                hc09::gpu::RequestTrace();
+            ++shot;
+        }
+        for (const auto& step : steps)
+            if (t >= step.first && t < step.first + 120)
+                return step.second;
+        return 0;
     }
 }
 
@@ -443,6 +578,35 @@ PPC_FUNC(sub_82B04600)
         {
             last = line;
             std::fprintf(stderr, "[apt] %s\n", line.c_str());
+        }
+    }
+    // The instant replay's screen: its id is written to the screen manager's events ("../headcoach/screen/gameday/
+    // Replay"), then the event's Type: ready (shown) and unloaded (gone).
+    if (Word(base, value) == kString)
+    {
+        const char* member = MemberOf(base, ctx.r6.u32);
+        if (!std::strcmp(member, "ScreenId"))
+            g_replayScreen = Text(base, value).find("/gameday/Replay") != std::string::npos;
+        else if (g_replayScreen && !std::strcmp(member, "Type"))
+        {
+            const std::string type = Text(base, value);
+            if (type == "ScreenManagerScreenReady")
+                g_replayShown = true;
+            else if (type == "ScreenManagerScreenUnloaded" || type == "ScreenStartTransitionOut")
+                g_replayShown = false;
+        }
+    }
+    // Dev (HC09_REPLAY_TEST): the clipboard's Gameday page is filled after each play ("Timeout", "Instant Replay").
+    static const bool replayTest = Hc09Env("HC09_REPLAY_TEST") != nullptr;
+    if (replayTest && Word(base, value) == kString && !std::strcmp(MemberOf(base, ctx.r6.u32), "mLabel") && Text(base, value) == "Instant Replay")
+    {
+        const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+        if (g_replayTestAt.load() == 0)   // once a game
+        {
+            const char* slot = std::strstr(NameOf(base, object), "mcOption");
+            g_replayTestSlot = slot ? std::max(std::atoi(slot + 8), 1) : 1;
+            g_replayTestAt = now;
+            std::fprintf(stderr, "[replaytest] opening the instant replay (item %d)\n", g_replayTestSlot.load());
         }
     }
     if (!name[0])

@@ -23,6 +23,7 @@
 #include <emmintrin.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -208,10 +209,24 @@ namespace
     }
 }
 
+namespace
+{
+    std::atomic<int> g_playState{ 0 };
+    std::atomic<int64_t> g_playStateAt{ 0 };   // when the play flow last ran (ms)
+    int64_t NowMs() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+}
+
+namespace hc09::broadcast
+{
+    int PlayState() { return NowMs() - g_playStateAt.load() < 500 ? g_playState.load() : 0; }
+}
+
 PPC_FUNC(sub_82533ED0)
 {
     const uint32_t machine = ctx.r3.u32;
     if (base[machine + 48] && Word(base, machine + 32) == 1 && Word(base, machine + 36) == 5)
         LineUp(base);
     __imp__sub_82533ED0(ctx, base);
+    g_playState = int(Word(base, machine + 32));
+    g_playStateAt = NowMs();
 }

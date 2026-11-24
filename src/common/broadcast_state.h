@@ -20,7 +20,9 @@ namespace hc09::broadcast
     struct Scoreboard
     {
         bool shown = false;    // the game shows its score bug
+        bool inGame = false;   // a game is being played (its screens, the field, the score bug in use: not the menus)
         Team away, home;
+        int user = -1;         // the user's team: 0 the away team, 1 the home team, -1 not known
         std::string awayScore, homeScore, quarter, clock, down, playClock;  // as the score bug shows them
         int possession = -1;                      // 0 the away team has the ball, 1 the home team, -1 not known
         int awayTimeouts = -1, homeTimeouts = -1; // left this half (-1: not known)
@@ -60,6 +62,22 @@ namespace hc09::broadcast
     bool CycleTvCamera();
     // The camera's name for a few seconds after a change (nullptr otherwise), for the score bar to show.
     const char* TvCameraNote();
+
+    // The clipboard's Instant Replay is being shown (its screen is up).
+    bool ReplayShown();
+
+    // The game's play flow (common/extra_point.cpp): 5 the play call, 1 the teams lined up waiting for the snap, 3 the
+    // play, 4 after it; 0 not in a game (the flow has not run for half a second).
+    int PlayState();
+
+    // The field's lines in a game (the renderer paints them before a snap): the line of scrimmage's and the line to
+    // gain's z (yards along the field, 0 at midfield; gain 1e9 when there is none: goal to go).
+    // False outside games, and for a kickoff or a try.
+    bool FieldLines(float& scrimmage, float& gain);
+
+    // Dev (HC09_REPLAY_TEST): opens the clipboard's Instant Replay after a play, at most once a minute. The button to
+    // press now (0 none, 1 RB, 2 down, 3 A); hold: the scripted presses (HC09_PRESS) wait meanwhile.
+    int ReplayTestStep(bool& hold);
 
     // The bar's font (SIL Open Font License, fonts/OFL.txt), from the game's folder.
     inline constexpr const char* kFontFile = "fonts\\BarlowCondensed-SemiBold.ttf";

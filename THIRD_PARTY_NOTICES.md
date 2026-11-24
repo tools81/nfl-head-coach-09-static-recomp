@@ -81,6 +81,13 @@ HC27's players' career and season statistics (the `player_stats` patches in `hc2
 [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/). They were reduced to the fields the game
 keeps and arranged in its career database's tables.
 
+## Barlow
+
+`fonts/BarlowCondensed-SemiBold.ttf` (the score bar) and `fonts/menus/*.ttf` (the menus: subsets of Barlow
+Medium and Bold and Barlow Condensed Regular, Bold, ExtraBold and Black, made by `tools/menu_fonts.py`, renamed
+after the game's fonts they replace) are from the Barlow family, https://github.com/jpt/barlow.
+Copyright 2017 The Barlow Project Authors. Licensed under the SIL Open Font License, Version 1.1 (`fonts/OFL.txt`).
+
 ## Fetched separately (not included in this repository)
 
 - With `HDTextures=on`, `HC09HDPack.exe` downloads

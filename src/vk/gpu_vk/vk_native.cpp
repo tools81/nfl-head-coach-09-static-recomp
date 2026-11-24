@@ -36,6 +36,9 @@
 // vk_edram.cpp (same decoding, same results); render targets, pipelines and
 // resolves are this renderer's own. TODO: share the common parts with vk_edram.
 
+#include <atomic>
+namespace hc09::gpu { extern std::atomic<bool> g_traceAsked; }   // vk/gpu_live.cpp (dev)
+
 namespace hc09vk {
 
 namespace {
@@ -2501,8 +2504,12 @@ struct NativeRenderer::Impl
         // (+1024 in the value: bound).
         VkImageView footprintView = VK_NULL_HANDLE;
         VkSampler footprintSampler = VK_NULL_HANDLE;
+        if (float value; psHash == kUiPs && UiStyleValue(value))
+            memcpy(&C.pad0, &value, sizeof(value));
         if (psHash == kTurfPs || psHash == kTurfNightPs)
         {
+            // The lines painted into the field before a snap (FieldLines).
+            FieldLineValues(C.texSize[kFieldLineSlot]);
             uint32_t fetch[32][6];
             for (uint32_t s = 0; s < 32; ++s) memcpy(fetch[s], tfOf[s].dword, sizeof(fetch[s]));
             if (float value; MaterialDrawValue(psHash, fetch, slots, value))
@@ -2615,6 +2622,8 @@ struct NativeRenderer::Impl
             ++hudDraws;
             if (hudDraws >= skipHud.first && hudDraws <= skipHud.second) { Skip("HC09_NATIVE_SKIP_HUD"); return; }
         }
+        // hc09: the game's orange line to gain gives way to the lines painted into the field (FieldLines).
+        if (psHash == kLineToGainPs && vsHash == kLineToGainVs && d.numIndices == 4 && FieldLinesOn()) { Skip("line to gain (FieldLines)"); return; }
         if (traceDrawsOn && Tracing() && bt[0] && bound[0].width >= 320)
         {
             std::string tex;
@@ -3565,6 +3574,12 @@ void NativeRenderer::EndFrame()
     if (I.motionOn) I.motion.Report();
     if (I.squeeze != 1.0f)
         for (auto& [k, t] : I.targets) t.wide = false;
+    // Dev: a trace of the next frame asked for (hc09::gpu::RequestTrace: the HC09_NATIVE_TRACE_PASSES output).
+    if (hc09::gpu::g_traceAsked.exchange(false))
+    {
+        I.tracePasses.from = I.frame + 1;
+        I.tracePasses.to = I.frame + 2;
+    }
     if (++I.frame % 60 == 0)
         for (auto it = I.textures.begin(); it != I.textures.end();)
         {

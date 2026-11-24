@@ -21,6 +21,9 @@
 #include "xenos_texture.h"
 #include "gpu/swappable_images.h"
 #include "gpu/texture_replacements.h"
+#include "dev_env.h"
+
+namespace hc09::gpu { int FrameNumber(); }   // gpu/renderer.cpp: the frame counter of HC09_PRESS
 
 namespace
 {
@@ -113,6 +116,10 @@ namespace
         }
         for (uint64_t h : drop) std::filesystem::remove(pathOf(h));
         if (!drop.empty()) return;
+        // Dev (HC09_DUMP_LOG): each content as it is first seen, with the frame (which screen loaded it).
+        static const bool log = Hc09Env("HC09_DUMP_LOG") != nullptr;
+        if (log)
+            std::fprintf(stderr, "[dump] %016llX %ux%u frame %d\n", (unsigned long long)hash, img.width, img.height, hc09::gpu::FrameNumber());
         static const bool folder = [] { std::filesystem::create_directories("build/hashed"); return true; }();
         (void)folder;
         const std::string path = pathOf(hash);

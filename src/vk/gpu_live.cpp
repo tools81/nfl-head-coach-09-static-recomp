@@ -108,7 +108,16 @@ void GpuCpIdle(double* ringEmptySeconds, double* memWaitSeconds);
 void GuestWatchAccess(uint32_t pa, uint32_t bytes);
 void GuestSetAccessHook(void (*hook)(uint32_t pa), bool log);
 void NativeLiveWriteBack(uint32_t pa);
-namespace hc09::gpu { int FrameNumber(); }   // gpu/renderer.cpp: the frame counter of HC09_PRESS
+namespace hc09::gpu
+{
+    int FrameNumber();   // gpu/renderer.cpp: the frame counter of HC09_PRESS
+    // Dev: a screenshot at the next present, named by tag (dev tools; 0: none asked).
+    std::atomic<int> g_screenshotAsked{ 0 };
+    void RequestScreenshot(int tag) { g_screenshotAsked = tag; }
+    // Dev: the native renderer's pass and draw trace (HC09_NATIVE_TRACE_DRAWS) of the next frame.
+    std::atomic<bool> g_traceAsked{ false };
+    void RequestTrace() { g_traceAsked = true; }
+}
 
 // HC09_SCREENSHOT=<frame>[,<frame>...]: the window as presented at those frames (counted as HC09_PRESS
 // counts them), saved as build/screenshot_<frame>.bmp, as the D3D12 renderer does
@@ -568,19 +577,28 @@ struct Live : xenos::DrawObserver
         static const std::vector<int> screenshotFrames = ScreenshotFrames();
         static size_t nextScreenshot = 0;
         const int frame = hc09::gpu::FrameNumber();
-        const bool screenshot = nextScreenshot < screenshotFrames.size() && frame >= screenshotFrames[nextScreenshot];
+        // Dev: a screenshot asked for by name (hc09::gpu::RequestScreenshot), as build/screenshot_<tag>.bmp.
+        const int asked = hc09::gpu::g_screenshotAsked.exchange(0);
+        const bool screenshot = asked || (nextScreenshot < screenshotFrames.size() && frame >= screenshotFrames[nextScreenshot]);
         std::vector<uint32_t> shown;
         VkResult r = swapchain.Present(img, (oneToOne || shot || screenshot) ? &shown : nullptr);
         if (screenshot)
         {
             char path[64];
-            snprintf(path, sizeof(path), "build/screenshot_%d.bmp", screenshotFrames[nextScreenshot]);
+            snprintf(path, sizeof(path), "build/screenshot_%d.bmp", asked ? asked : screenshotFrames[nextScreenshot]);
             if (shown.size() == size_t(swapchain.extent.width) * swapchain.extent.height &&
                 WriteBmp(path, swapchain.extent.width, swapchain.extent.height, shown))
                 fprintf(stderr, "[gpu] wrote %s (frame %d, %ux%u)\n", path, frame, swapchain.extent.width, swapchain.extent.height);
             else
                 fprintf(stderr, "[gpu] screenshot frame %d: the window could not be read back\n", frame);
             while (nextScreenshot < screenshotFrames.size() && screenshotFrames[nextScreenshot] <= frame) ++nextScreenshot;
+            // Dev (HC09_SCREENSHOT_TRACE): the draw trace of the frame after each screenshot, tagged in the log.
+            static const bool traceShots = Hc09Env("HC09_SCREENSHOT_TRACE") != nullptr;
+            if (traceShots)
+            {
+                fprintf(stderr, "[shot-trace] %s\n", path);
+                hc09::gpu::RequestTrace();
+            }
         }
         if (shot && shown.size() == size_t(swapchain.extent.width) * swapchain.extent.height)
         {
